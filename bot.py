@@ -40,25 +40,25 @@ ADMIN_ID = int(admin_id_env) if admin_id_env and admin_id_env.isdigit() else 0
 UPI_ID = os.getenv('UPI_ID')
 CONTACT_USERNAME = os.getenv('CONTACT_USERNAME')
 
-# Emoji pool used to give each channel button a random face — picked fresh every time
+# Emoji pool used to give each channel button a random face â€” picked fresh every time
 # the channel list is rendered so the list feels lively and each entry looks distinct.
 FACE_EMOJIS = [
-    "😀", "😂", "🤣", "😎", "🤩", "😘", "🥳", "😜", "🤪", "😈",
-    "🥶", "🥷", "👻", "🤡", "👹", "👾", "💀", "👽", "🦃", "🐱",
-    "🐶", "🐼", "🐯", "🦁", "🐺", "🐧", "🐻", "🦊", "🐷", "⚡", 
-    "🍌", "🍓", "🍾", "💋", "😈", "🙈", "😇", "😨", "❤", "🔥", "🥰"
+    "ðŸ˜€", "ðŸ˜‚", "ðŸ¤£", "ðŸ˜Ž", "ðŸ¤©", "ðŸ˜˜", "ðŸ¥³", "ðŸ˜œ", "ðŸ¤ª", "ðŸ˜ˆ",
+    "ðŸ¥¶", "ðŸ¥·", "ðŸ‘»", "ðŸ¤¡", "ðŸ‘¹", "ðŸ‘¾", "ðŸ’€", "ðŸ‘½", "ðŸ¦ƒ", "ðŸ±",
+    "ðŸ¶", "ðŸ¼", "ðŸ¯", "ðŸ¦", "ðŸº", "ðŸ§", "ðŸ»", "ðŸ¦Š", "ðŸ·", "âš¡", 
+    "ðŸŒ", "ðŸ“", "ðŸ¾", "ðŸ’‹", "ðŸ˜ˆ", "ðŸ™ˆ", "ðŸ˜‡", "ðŸ˜¨", "â¤", "ðŸ”¥", "ðŸ¥°"
 ]
 
-# All Telegram-supported reaction emojis (Bot API 7.x) — used to auto-react to every incoming message.
+# All Telegram-supported reaction emojis (Bot API 7.x) â€” used to auto-react to every incoming message.
 # Telegram only accepts reactions from this specific set; arbitrary Unicode will be rejected.
 REACT_EMOJIS = [
-    "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
-    "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡",
-    "🥱", "🥴", "😍", "🐳", "🌚", "🌭", "💯", "🤣", "⚡", "🍌",
-    "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "😈", "😴", "😭",
-    "🤓", "👻", "👀", "🎃", "🙈", "😇", "😨", "🙉", "🐝", "🤗",
-    "🫡", "🎅", "💅", "🤪", "🗿", "🆒", "💘", "😘", "🦄", "😻",
-    "🌸", "🎁", "🎈", "🎊",
+    "ðŸ‘", "ðŸ‘Ž", "â¤", "ðŸ”¥", "ðŸ¥°", "ðŸ‘", "ðŸ˜", "ðŸ¤”", "ðŸ¤¯", "ðŸ˜±",
+    "ðŸ¤¬", "ðŸ˜¢", "ðŸŽ‰", "ðŸ¤©", "ðŸ¤®", "ðŸ’©", "ðŸ™", "ðŸ‘Œ", "ðŸ•Š", "ðŸ¤¡",
+    "ðŸ¥±", "ðŸ¥´", "ðŸ˜", "ðŸ³", "ðŸŒš", "ðŸŒ­", "ðŸ’¯", "ðŸ¤£", "âš¡", "ðŸŒ",
+    "ðŸ†", "ðŸ’”", "ðŸ¤¨", "ðŸ˜", "ðŸ“", "ðŸ¾", "ðŸ’‹", "ðŸ˜ˆ", "ðŸ˜´", "ðŸ˜­",
+    "ðŸ¤“", "ðŸ‘»", "ðŸ‘€", "ðŸŽƒ", "ðŸ™ˆ", "ðŸ˜‡", "ðŸ˜¨", "ðŸ™‰", "ðŸ", "ðŸ¤—",
+    "ðŸ«¡", "ðŸŽ…", "ðŸ’…", "ðŸ¤ª", "ðŸ—¿", "ðŸ†’", "ðŸ’˜", "ðŸ˜˜", "ðŸ¦„", "ðŸ˜»",
+    "ðŸŒ¸", "ðŸŽ", "ðŸŽˆ", "ðŸŽŠ",
 ]
 
 bot = telebot.TeleBot(BOT_TOKEN, use_class_middlewares=True)
@@ -216,7 +216,7 @@ def untrack_chat(chat_id):
 def sync_chat_admins(chat_id):
     """Fetch and store the admins of a chat the bot belongs to.
 
-    Telegram only lets bots read the ADMIN list of a chat — it provides no API
+    Telegram only lets bots read the ADMIN list of a chat â€” it provides no API
     to enumerate all (non-admin) members, so admins are the only "existing
     members" the bot can backfill automatically. Everyone else is collected
     passively (messages, joins/leaves) from the moment the bot joins."""
@@ -249,7 +249,7 @@ def sync_all_tracked_chats():
         pass
 
 # In-memory shopping cart per user: {user_id: [ {channel_id, name, t, price}, ... ]}
-# Intentionally NOT persisted to Mongo — carts are transient (pre-payment); if the bot restarts
+# Intentionally NOT persisted to Mongo â€” carts are transient (pre-payment); if the bot restarts
 # mid-browsing the user just re-adds items, no paid transaction data is ever at risk.
 user_carts = {}
 
@@ -273,7 +273,7 @@ SYNC_VANISH_SECONDS = 60        # how long /sync's long member-list replies stay
 QR_SHOW_SECONDS = 90            # how long the initial QR is shown before 'I Have Paid' is clicked
 
 pending_deletes = {}  # (chat_id, message_id) -> Timer
-last_bot_msg = {}    # user_id -> (chat_id, message_id)  — for animated dismissal of old replies
+last_bot_msg = {}    # user_id -> (chat_id, message_id)  â€” for animated dismissal of old replies
 
 def cancel_delete(chat_id, message_id):
     key = (chat_id, message_id)
@@ -345,7 +345,7 @@ def send_prompt(chat_id, text, reply_markup=None, parse_mode=None):
 
 def send_admin_reply(text, parse_mode=None, reply_markup=None, delay=ADMIN_REPLY_VANISH_SECONDS):
     """Send a confirmation or error reply to the admin that auto-deletes after `delay` seconds
-    (default 20 s). Used for one-shot result messages like '✅ Price updated' or '❌ Invalid format'
+    (default 20 s). Used for one-shot result messages like 'âœ… Price updated' or 'âŒ Invalid format'
     so the admin chat stays clean without the admin having to manually dismiss anything."""
     msg = bot.send_message(ADMIN_ID, text, parse_mode=parse_mode, reply_markup=reply_markup)
     schedule_delete(ADMIN_ID, msg.message_id, delay)
@@ -353,7 +353,7 @@ def send_admin_reply(text, parse_mode=None, reply_markup=None, delay=ADMIN_REPLY
 
 def _safe_reply(message, text, parse_mode=None, delay=COMMAND_VANISH_SECONDS):
     """reply_to works in supergroups, but plain channels don't support message
-    replies — there it silently fails and the admin sees nothing. Fall back to
+    replies â€” there it silently fails and the admin sees nothing. Fall back to
     sending a regular message in that case. The reply auto-vanishes after
     `delay` seconds (default 20 s), keeping group/channel chat clean.
     If a Markdown-formatted message is rejected by Telegram (e.g. an unescaped
@@ -370,7 +370,7 @@ def _safe_reply(message, text, parse_mode=None, delay=COMMAND_VANISH_SECONDS):
 
     msg = _send_with(parse_mode)
     if msg is None and parse_mode:
-        # Telegram rejected the Markdown — resend without formatting
+        # Telegram rejected the Markdown â€” resend without formatting
         msg = _send_with(None)
     if msg and getattr(message.chat, 'type', None) in ('group', 'supergroup', 'channel'):
         schedule_delete(message.chat.id, msg.message_id, delay)
@@ -383,7 +383,7 @@ def track_msg(user_id, msg):
 
 def dismiss_previous(chat_id, user_id):
     """If there is a previous bot reply for this user, edit it to a vanish
-    animation frame (💨 ✦ ·) and then delete it 2 seconds later.
+    animation frame (ðŸ’¨ âœ¦ Â·) and then delete it 2 seconds later.
     This runs entirely in a daemon thread so it never blocks the main flow."""
     entry = last_bot_msg.pop(user_id, None)
     if not entry:
@@ -393,14 +393,14 @@ def dismiss_previous(chat_id, user_id):
     cancel_delete(prev_chat_id, prev_msg_id)
     def _animate_out():
         import time
-        # Frame 1 — shrinking text suggests motion
+        # Frame 1 â€” shrinking text suggests motion
         try:
-            bot.edit_message_text("💨  ·  ·  ·", prev_chat_id, prev_msg_id)
+            bot.edit_message_text("ðŸ’¨  Â·  Â·  Â·", prev_chat_id, prev_msg_id)
         except: pass
         time.sleep(1)
-        # Frame 2 — almost gone
+        # Frame 2 â€” almost gone
         try:
-            bot.edit_message_text("·", prev_chat_id, prev_msg_id)
+            bot.edit_message_text("Â·", prev_chat_id, prev_msg_id)
         except: pass
         time.sleep(1)
         # Delete
@@ -412,7 +412,7 @@ def dismiss_previous(chat_id, user_id):
 
 def send_command_reply(message, text, reply_markup=None, parse_mode=None):
     """Reply to a typed /command:
-    - Previous bot reply animates out (💨 → deleted after 2 s).
+    - Previous bot reply animates out (ðŸ’¨ â†’ deleted after 2 s).
     - The bot's new reply auto-vanishes after COMMAND_VANISH_SECONDS (15 s).
     Returns the sent Message object."""
     user_id = message.from_user.id
@@ -459,7 +459,7 @@ def format_label(total_minutes):
     """Turns a stored total-minutes duration into a readable 'Xd Xh Xm' label.
     A plan can also be stored with the special key 'lifetime' for permanent access."""
     if str(total_minutes).lower() == "lifetime":
-        return "Lifetime ♾️"
+        return "Lifetime â™¾ï¸"
     total_minutes = int(total_minutes)
     days, rem = divmod(total_minutes, 1440)
     hours, mins = divmod(rem, 60)
@@ -514,7 +514,7 @@ def format_plans_text(plans):
         return "No plans set yet."
     lines = []
     for t, pr in plans.items():
-        lines.append(f"• {format_label(t)} — ₹{pr}")
+        lines.append(f"â€¢ {format_label(t)} â€” â‚¹{pr}")
     return "\n".join(lines)
 
 def _build_plan_selection(ch_data):
@@ -524,12 +524,12 @@ def _build_plan_selection(ch_data):
     markup = InlineKeyboardMarkup()
     for p_time, p_price in ch_data['plans'].items():
         label = format_label(p_time)
-        markup.add(InlineKeyboardButton(f"💳 {label} - ₹{p_price}", callback_data=f"cartadd_{ch_data['channel_id']}_{p_time}"))
+        markup.add(InlineKeyboardButton(f"ðŸ’³ {label} - â‚¹{p_price}", callback_data=f"cartadd_{ch_data['channel_id']}_{p_time}"))
 
-    markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="cart_browse"))
-    markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
-    desc_part = f"\n\n📝 *About:* {ch_data['description']}" if ch_data.get('description') else ""
-    text = f"Yoo \n\nAb yaha tak agaya hai to plan bhi lele dalle 😁 \n\nYou are joining: *{ch_data['name']}*.{desc_part}\n\nPlease select a subscription plan below:"
+    markup.add(InlineKeyboardButton("â¬…ï¸ Back to Channels", callback_data="cart_browse"))
+    markup.add(InlineKeyboardButton("ðŸ“ž Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
+    desc_part = f"\n\nðŸ“ *About:* {ch_data['description']}" if ch_data.get('description') else ""
+    text = f"Yoo \n\nAb yaha tak agaya hai to plan bhi lele dalle ðŸ˜ \n\nYou are joining: *{ch_data['name']}*.{desc_part}\n\nPlease select a subscription plan below:"
     return text, markup
 
 def send_plan_selection(chat_id, ch_data):
@@ -563,7 +563,7 @@ def edit_plan_selection(chat_id, message_id, ch_data):
             msg = bot.send_photo(chat_id, screenshot, caption=text, reply_markup=markup, parse_mode="Markdown")
             schedule_delete(chat_id, msg.message_id, MENU_VANISH_SECONDS)
         except Exception:
-            # Screenshot broken — fallback to plain text
+            # Screenshot broken â€” fallback to plain text
             fallback = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
             schedule_delete(chat_id, fallback.message_id, MENU_VANISH_SECONDS)
     else:
@@ -595,24 +595,24 @@ def build_cart_summary(user_id):
     """Builds the (text, markup) for the cart summary / checkout screen."""
     items = get_cart(user_id)
     if not items:
-        text = "🛒 Your cart is empty.\n\nBrowse channels below to add a subscription."
+        text = "ðŸ›’ Your cart is empty.\n\nBrowse channels below to add a subscription."
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse"))
-        markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
+        markup.add(InlineKeyboardButton("ðŸ“º Browse Channels", callback_data="cart_browse"))
+        markup.add(InlineKeyboardButton("ðŸ“ž Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
         return text, markup
 
-    lines = ["🛒 *Your Cart*\n"]
+    lines = ["ðŸ›’ *Your Cart*\n"]
     for i in items:
-        lines.append(f"• {i['name']} — {format_label(i['t'])} — ₹{i['price']}")
+        lines.append(f"â€¢ {i['name']} â€” {format_label(i['t'])} â€” â‚¹{i['price']}")
     total = cart_total(items)
-    lines.append(f"\n💰 *Total: ₹{total}*")
+    lines.append(f"\nðŸ’° *Total: â‚¹{total}*")
     text = "\n".join(lines)
 
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("➕ Add Another Channel", callback_data="cart_browse"))
-    markup.add(InlineKeyboardButton(f"✅ Checkout & Pay ₹{total}", callback_data="cart_checkout"))
-    markup.add(InlineKeyboardButton("🗑 Clear Cart", callback_data="cart_clear_ask"))
-    markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
+    markup.add(InlineKeyboardButton("âž• Add Another Channel", callback_data="cart_browse"))
+    markup.add(InlineKeyboardButton(f"âœ… Checkout & Pay â‚¹{total}", callback_data="cart_checkout"))
+    markup.add(InlineKeyboardButton("ðŸ—‘ Clear Cart", callback_data="cart_clear_ask"))
+    markup.add(InlineKeyboardButton("ðŸ“ž Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
     return text, markup
 
 def build_channel_list(user_id):
@@ -632,11 +632,11 @@ def build_channel_list(user_id):
     items = get_cart(user_id)
     if items:
         total = cart_total(items)
-        markup.add(InlineKeyboardButton(f"🛒 View Cart ({len(items)}) — ₹{total}", callback_data="cart_view"))
+        markup.add(InlineKeyboardButton(f"ðŸ›’ View Cart ({len(items)}) â€” â‚¹{total}", callback_data="cart_view"))
 
-    markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
-    text = ("👋 Welcome Dallo !\n\nShaana banne ki Koshish mat karna  😂😂\n\nPlease select a channel/group you'd like to join.\n\n"
-            "💡 You can add multiple channels to your cart and pay for all of them at once!")
+    markup.add(InlineKeyboardButton("ðŸ“ž Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
+    text = ("ðŸ‘‹ Welcome Dallo !\n\nShaana banne ki Koshish mat karna  ðŸ˜‚ðŸ˜‚\n\nPlease select a channel/group you'd like to join.\n\n"
+            "ðŸ’¡ You can add multiple channels to your cart and pay for all of them at once!")
     return text, markup
 
 def show_all_channels(chat_id, user_id):
@@ -646,7 +646,7 @@ def show_all_channels(chat_id, user_id):
     text, markup = build_channel_list(user_id)
     if text is None:
         reply = bot.send_message(chat_id, "No channels are available right now. Please check back later, or contact the admin.",
-                          reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}")))
+                          reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("ðŸ“ž Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}")))
         schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
         track_msg(user_id, reply)
         return
@@ -660,7 +660,7 @@ def edit_all_channels(chat_id, message_id, user_id, message_obj=None):
     text, markup = build_channel_list(user_id)
     if text is None:
         edit_menu(chat_id, message_id, "No channels are available right now. Please check back later, or contact the admin.",
-                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}")),
+                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("ðŸ“ž Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}")),
                   message_obj=message_obj)
         return
     edit_menu(chat_id, message_id, text, reply_markup=markup, message_obj=message_obj)
@@ -709,7 +709,7 @@ def _sleep_retry_after(e):
 def remove_user_from_chat(chat_id, user_id):
     """Kick a user from a channel/group so they lose access immediately.
     Returns (removed: bool, detail: str). The user is unbanned right after the
-    kick so they are not kept on a permanent block list — they can rejoin the
+    kick so they are not kept on a permanent block list â€” they can rejoin the
     group/channel again in the future."""
     chat_id = int(chat_id)
     user_id = int(user_id)
@@ -739,7 +739,7 @@ def remove_user_from_chat(chat_id, user_id):
         try:
             bot.ban_chat_member(chat_id, user_id)
             # Kick is done. Immediately unban so the user is NOT kept on a permanent
-            # block list — they can rejoin the group/channel again in the future.
+            # block list â€” they can rejoin the group/channel again in the future.
             try:
                 bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
             except Exception:
@@ -835,12 +835,12 @@ def _resolve_username_to_id(raw, chat_id=None, candidate_ids=None):
     """Resolve a @username / bare username to (numeric user_id, display_username).
 
     Checks, in order:
-      1. Telegram getChat — authoritative for users the bot has already met
+      1. Telegram getChat â€” authoritative for users the bot has already met
          (also handles usernames that were reused after being freed)
-      2. seen_users  — anyone who has ever used the bot
-      3. chat_members — anyone observed inside a specific chat
-      4. chat_members — anyone observed in any chat the bot tracks
-      5. candidate_ids — refresh each candidate's current username from Telegram
+      2. seen_users  â€” anyone who has ever used the bot
+      3. chat_members â€” anyone observed inside a specific chat
+      4. chat_members â€” anyone observed in any chat the bot tracks
+      5. candidate_ids â€” refresh each candidate's current username from Telegram
          (subscribers always succeed here because the bot has their DM chat)
     """
     username = raw.strip().lstrip('@')
@@ -905,34 +905,30 @@ def _parse_member_line(line):
 
 def _parse_csv_member_line(line):
     """Parse a comma-separated row: User ID,Username,First Name,Last Name.
-    The header row is skipped. Only the ID and username columns are kept."""
+    The header row is skipped. Column 0 is the user ID, column 1 is the
+    username â€” later columns (first/last name) are never treated as usernames,
+    so a short or empty username cell can't grab the wrong data."""
     fields = [f.strip() for f in line.split(',')]
     if fields and fields[0].lower().startswith('user id'):
         return None, None
     user_id = None
+    if fields and fields[0]:
+        try:
+            user_id = int(fields[0])
+        except ValueError:
+            user_id = None
     username = None
-    for i, field in enumerate(fields):
-        if not field:
-            continue
-        if i == 0:
-            try:
-                user_id = int(field)
-                continue
-            except ValueError:
-                pass
-        if username is None:
-            candidate = field.lstrip('@')
-            if len(candidate) >= 5 and re.fullmatch(r'[A-Za-z0-9_]+', candidate):
-                username = candidate
-        if user_id is not None and username is not None:
-            break
+    if len(fields) > 1:
+        candidate = fields[1].lstrip('@')
+        if candidate and re.fullmatch(r'[A-Za-z0-9_]+', candidate):
+            username = candidate
     return user_id, username
 
 def import_chat_members(chat_id, text):
     """Bulk-import a member list (usernames / user IDs) into chat_members_col.
 
     Returns a list of {"user_id", "username"} dicts. User IDs are stored as-is;
-    usernames are stored too — resolved to a numeric ID when possible, otherwise
+    usernames are stored too â€” resolved to a numeric ID when possible, otherwise
     kept as a username-only record (user_id=None) so importing by username never
     requires the user to have interacted with the bot."""
     imported = []
@@ -1050,7 +1046,7 @@ def _kick_from_group(chat_id, user_id):
     return removed, detail
 
 def setup_commands():
-    """Registers the '/' command menu in Telegram — a different list for the admin vs everyone else."""
+    """Registers the '/' command menu in Telegram â€” a different list for the admin vs everyone else."""
     user_commands = [
         BotCommand("start", "Browse channels & get started"),
         BotCommand("buy", "Browse channels to subscribe"),
@@ -1109,7 +1105,7 @@ def start_handler(message):
     if user_id == ADMIN_ID:
         dismiss_previous(message.chat.id, user_id)
         reply = bot.send_message(message.chat.id,
-            "✅ *Admin Panel Active!*\n\n"
+            "âœ… *Admin Panel Active!*\n\n"
             "/add - Add a new channel & prices\n"
             "/channels - Manage existing channels (edit price, duration, delete)\n"
             "/removeuser - Remove a subscriber before their plan expires\n"
@@ -1146,25 +1142,25 @@ def myplans_handler(message):
         ch = channels_col.find_one({"channel_id": s['channel_id']})
         ch_name = ch['name'] if ch else "Unknown Channel"
         if s.get('lifetime'):
-            lines.append(f"• *{ch_name}* — Lifetime access ♾️")
+            lines.append(f"â€¢ *{ch_name}* â€” Lifetime access â™¾ï¸")
             continue
         remaining = s['expiry'] - now
         if remaining <= 0:
             continue
-        lines.append(f"• *{ch_name}* — expires in {format_time_left(remaining)}")
+        lines.append(f"â€¢ *{ch_name}* â€” expires in {format_time_left(remaining)}")
 
     if not lines:
         send_command_reply(message, "You don't have any active subscriptions right now.\n\nUse /buy to browse channels.")
         return
 
-    send_command_reply(message, "📋 *Your Active Subscriptions:*\n\n" + "\n".join(lines), parse_mode="Markdown")
+    send_command_reply(message, "ðŸ“‹ *Your Active Subscriptions:*\n\n" + "\n".join(lines), parse_mode="Markdown")
 
 @bot.message_handler(commands=['help'])
 def help_handler(message):
     record_seen_user(message.from_user)
-    markup = InlineKeyboardMarkup().add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
+    markup = InlineKeyboardMarkup().add(InlineKeyboardButton("ðŸ“ž Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
     send_command_reply(message,
-        "ℹ️ *How this works:*\n\n"
+        "â„¹ï¸ *How this works:*\n\n"
         "1. Use /buy to see available channels\n"
         "2. Pick a channel and a plan\n"
         "3. Pay via UPI and tap 'I Have Paid'\n"
@@ -1182,7 +1178,7 @@ def browse_channel(call):
     ch_data = channels_col.find_one({"channel_id": ch_id})
     bot.answer_callback_query(call.id)
     if not ch_data:
-        bot.send_message(call.message.chat.id, "❌ This channel is no longer available.")
+        bot.send_message(call.message.chat.id, "âŒ This channel is no longer available.")
         return
     edit_plan_selection(call.message.chat.id, call.message.message_id, ch_data)
 
@@ -1201,7 +1197,7 @@ def show_channel_list(chat_id, message_id=None):
         markup.add(InlineKeyboardButton(f"{emoji} {idx}. {ch['name']}", callback_data=f"manage_{ch['channel_id']}"))
         count += 1
 
-    markup.add(InlineKeyboardButton("➕ Add New Channel", callback_data="add_new"))
+    markup.add(InlineKeyboardButton("âž• Add New Channel", callback_data="add_new"))
 
     text = "No channels found. Click below to add one." if count == 0 else "Your Managed Channels:"
     if message_id:
@@ -1240,11 +1236,11 @@ def get_plans(message):
         ch_name = message.forward_from_chat.title
         msg = send_prompt(ADMIN_ID,
             f"Channel Detected: *{ch_name}*\n\nEnter plans in format (Days:Hours:Mins:Price):\n`D:H:M:Price, D:H:M:Price` \n\n"
-            "Example:\n`1:0:0:99, 0:2:30:49`\n(1 Day for ₹99, and 2 hours 30 mins for ₹49)\n\n"
+            "Example:\n`1:0:0:99, 0:2:30:49`\n(1 Day for â‚¹99, and 2 hours 30 mins for â‚¹49)\n\n"
             "For a permanent plan, use `lifetime:Price` instead, e.g. `lifetime:999`", parse_mode="Markdown")
         bot.register_next_step_handler(msg, finalize_channel, ch_id, ch_name)
     else:
-        send_admin_reply("❌ Error: Message was not forwarded. Use /add to try again.")
+        send_admin_reply("âŒ Error: Message was not forwarded. Use /add to try again.")
 
 def finalize_channel(message, ch_id, ch_name):
     try:
@@ -1258,62 +1254,62 @@ def finalize_channel(message, ch_id, ch_name):
 
         channels_col.update_one({"channel_id": ch_id}, {"$set": {"name": ch_name, "plans": plans_dict, "admin_id": ADMIN_ID}}, upsert=True)
         bot_username = bot.get_me().username
-        send_admin_reply(f"✅ Plans saved!\n\nInvite Link:\n`https://t.me/{bot_username}?start={ch_id}`", parse_mode="Markdown")
+        send_admin_reply(f"âœ… Plans saved!\n\nInvite Link:\n`https://t.me/{bot_username}?start={ch_id}`", parse_mode="Markdown")
 
         # Now ask for a channel screenshot/banner
         msg = send_prompt(ADMIN_ID,
-            "📸 *Optional:* Send a screenshot or banner image of your channel so users can preview it before buying.\n\n"
+            "ðŸ“¸ *Optional:* Send a screenshot or banner image of your channel so users can preview it before buying.\n\n"
             "This image will be shown above the pricing when a user taps on this channel.\n\n"
             "Send a photo now, or type /skip to finish without one.", parse_mode="Markdown")
         bot.register_next_step_handler(msg, save_channel_screenshot, ch_id, True)
     except Exception:
-        send_admin_reply("❌ Invalid format. Please use `Days:Hours:Mins:Price` or `lifetime:Price`, comma-separated. Use /add to retry.")
+        send_admin_reply("âŒ Invalid format. Please use `Days:Hours:Mins:Price` or `lifetime:Price`, comma-separated. Use /add to retry.")
 
 def save_channel_screenshot(message, ch_id, is_initial=False):
     """Saves (or removes) the channel screenshot after finalize or editss flow."""
     if message.text and message.text.strip().lower() in ('/skip', 'skip'):
-        # Admin chose to skip — clear any existing screenshot
+        # Admin chose to skip â€” clear any existing screenshot
         channels_col.update_one({"channel_id": ch_id}, {"$unset": {"screenshot_file_id": ""}})
         if is_initial:
             msg = send_prompt(ADMIN_ID,
-                "📝 *Optional:* Send a short description or 'about' caption for your channel.\n\n"
+                "ðŸ“ *Optional:* Send a short description or 'about' caption for your channel.\n\n"
                 "This text will be shown to users when browsing this channel's plans.\n\n"
                 "Send the text now, or type /skip to finish without one.", parse_mode="Markdown")
             bot.register_next_step_handler(msg, save_channel_description, ch_id)
         else:
-            send_admin_reply("✅ Screenshot removed.")
+            send_admin_reply("âœ… Screenshot removed.")
         return
     if not message.photo:
-        # Not a photo and not a skip command — re-prompt
+        # Not a photo and not a skip command â€” re-prompt
         msg = send_prompt(ADMIN_ID,
-            "❌ That doesn’t look like a photo.\n\nPlease send an image of the channel, or type /skip to finish without one.")
+            "âŒ That doesnâ€™t look like a photo.\n\nPlease send an image of the channel, or type /skip to finish without one.")
         bot.register_next_step_handler(msg, save_channel_screenshot, ch_id, is_initial)
         return
     file_id = message.photo[-1].file_id  # highest resolution
     channels_col.update_one({"channel_id": ch_id}, {"$set": {"screenshot_file_id": file_id}})
     if is_initial:
         msg = send_prompt(ADMIN_ID,
-            "📝 *Optional:* Send a short description or 'about' caption for your channel.\n\n"
+            "ðŸ“ *Optional:* Send a short description or 'about' caption for your channel.\n\n"
             "This text will be shown to users when browsing this channel's plans.\n\n"
             "Send the text now, or type /skip to finish without one.", parse_mode="Markdown")
         bot.register_next_step_handler(msg, save_channel_description, ch_id)
     else:
-        send_admin_reply("✅ Screenshot saved! Users will now see the channel preview above pricing.")
+        send_admin_reply("âœ… Screenshot saved! Users will now see the channel preview above pricing.")
 
 def save_channel_description(message, ch_id):
     if message.text and message.text.strip().lower() in ('/skip', 'skip'):
         channels_col.update_one({"channel_id": ch_id}, {"$unset": {"description": ""}})
-        send_admin_reply("✅ Channel saved! No description set.")
+        send_admin_reply("âœ… Channel saved! No description set.")
         return
 
     if not message.text:
-        msg = send_prompt(ADMIN_ID, "❌ Please send text for the channel description, or type /skip to finish without one.")
+        msg = send_prompt(ADMIN_ID, "âŒ Please send text for the channel description, or type /skip to finish without one.")
         bot.register_next_step_handler(msg, save_channel_description, ch_id)
         return
 
     description = message.text.strip()
     channels_col.update_one({"channel_id": ch_id}, {"$set": {"description": description}})
-    send_admin_reply(f"✅ Channel saved with description!\n\n_{description}_", parse_mode="Markdown")
+    send_admin_reply(f"âœ… Channel saved with description!\n\n_{description}_", parse_mode="Markdown")
 
 # --- ADMIN: MANAGE A SPECIFIC CHANNEL ---
 
@@ -1323,27 +1319,27 @@ def manage_ch(call):
     ch_data = channels_col.find_one({"channel_id": ch_id})
     bot.answer_callback_query(call.id)
     if not ch_data:
-        send_admin_reply("❌ Channel not found (it may have been deleted.)")
+        send_admin_reply("âŒ Channel not found (it may have been deleted.)")
         return
 
     bot_username = bot.get_me().username
     link = f"https://t.me/{bot_username}?start={ch_id}"
 
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✏️ Edit Plans", callback_data=f"editplans_{ch_id}"))
-    markup.add(InlineKeyboardButton("📝 Edit About/Description", callback_data=f"editdesc_{ch_id}"))
-    markup.add(InlineKeyboardButton("📸 Update Screenshot", callback_data=f"editss_{ch_id}"))
-    markup.add(InlineKeyboardButton("🗑 Delete Channel", callback_data=f"delch_{ch_id}"))
-    markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="back_channels"))
+    markup.add(InlineKeyboardButton("âœï¸ Edit Plans", callback_data=f"editplans_{ch_id}"))
+    markup.add(InlineKeyboardButton("ðŸ“ Edit About/Description", callback_data=f"editdesc_{ch_id}"))
+    markup.add(InlineKeyboardButton("ðŸ“¸ Update Screenshot", callback_data=f"editss_{ch_id}"))
+    markup.add(InlineKeyboardButton("ðŸ—‘ Delete Channel", callback_data=f"delch_{ch_id}"))
+    markup.add(InlineKeyboardButton("â¬…ï¸ Back to Channels", callback_data="back_channels"))
 
-    ss_status = "✅ Screenshot set" if ch_data.get('screenshot_file_id') else "❌ No screenshot yet"
+    ss_status = "âœ… Screenshot set" if ch_data.get('screenshot_file_id') else "âŒ No screenshot yet"
     desc_status = ch_data.get('description', 'None set')
     edit_menu(call.message.chat.id, call.message.message_id,
-        f"⚙️ Settings for: *{ch_data['name']}*\n\n"
-        f"🔗 Invite Link:\n`{link}`\n\n"
-        f"📝 Description:\n_{desc_status}_\n\n"
-        f"💰 Current Plans:\n{format_plans_text(ch_data['plans'])}\n\n"
-        f"🖼 {ss_status}",
+        f"âš™ï¸ Settings for: *{ch_data['name']}*\n\n"
+        f"ðŸ”— Invite Link:\n`{link}`\n\n"
+        f"ðŸ“ Description:\n_{desc_status}_\n\n"
+        f"ðŸ’° Current Plans:\n{format_plans_text(ch_data['plans'])}\n\n"
+        f"ðŸ–¼ {ss_status}",
         reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('editss_'))
@@ -1356,7 +1352,7 @@ def edit_screenshot_prompt(call):
     has_existing = bool(ch_data and ch_data.get('screenshot_file_id'))
     hint = " (or type /skip to *remove* the current one)" if has_existing else " (or type /skip to finish without one)"
     msg = send_prompt(ADMIN_ID,
-        f"📸 Send a new screenshot / banner image for *{ch_name}*{hint}.",
+        f"ðŸ“¸ Send a new screenshot / banner image for *{ch_name}*{hint}.",
         parse_mode="Markdown")
     bot.register_next_step_handler(msg, save_channel_screenshot, ch_id)
 
@@ -1370,24 +1366,24 @@ def edit_description_prompt(call):
     has_existing = bool(ch_data and ch_data.get('description'))
     hint = " (or type /skip to *remove* the current description)" if has_existing else " (or type /skip to finish without one)"
     msg = send_prompt(ADMIN_ID,
-        f"📝 Send a new description / about caption for *{ch_name}*{hint}.",
+        f"ðŸ“ Send a new description / about caption for *{ch_name}*{hint}.",
         parse_mode="Markdown")
     bot.register_next_step_handler(msg, save_channel_description_edit, ch_id)
 
 def save_channel_description_edit(message, ch_id):
     if message.text and message.text.strip().lower() in ('/skip', 'skip'):
         channels_col.update_one({"channel_id": ch_id}, {"$unset": {"description": ""}})
-        send_admin_reply("✅ Description removed.")
+        send_admin_reply("âœ… Description removed.")
         return
 
     if not message.text:
-        msg = send_prompt(ADMIN_ID, "❌ Please send text for the channel description, or type /skip to finish without one.")
+        msg = send_prompt(ADMIN_ID, "âŒ Please send text for the channel description, or type /skip to finish without one.")
         bot.register_next_step_handler(msg, save_channel_description_edit, ch_id)
         return
 
     description = message.text.strip()
     channels_col.update_one({"channel_id": ch_id}, {"$set": {"description": description}})
-    send_admin_reply(f"✅ Description updated!\n\n_{description}_", parse_mode="Markdown")
+    send_admin_reply(f"âœ… Description updated!\n\n_{description}_", parse_mode="Markdown")
 
 
 
@@ -1399,10 +1395,10 @@ def confirm_delete_channel(call):
     if not ch_data:
         return
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ Yes, Delete", callback_data=f"delchconfirm_{ch_id}"))
-    markup.add(InlineKeyboardButton("❌ Cancel", callback_data=f"manage_{ch_id}"))
+    markup.add(InlineKeyboardButton("âœ… Yes, Delete", callback_data=f"delchconfirm_{ch_id}"))
+    markup.add(InlineKeyboardButton("âŒ Cancel", callback_data=f"manage_{ch_id}"))
     edit_menu(call.message.chat.id, call.message.message_id,
-        f"⚠️ Are you sure you want to delete *{ch_data['name']}*? This cannot be undone.",
+        f"âš ï¸ Are you sure you want to delete *{ch_data['name']}*? This cannot be undone.",
         reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('delchconfirm_'))
@@ -1424,12 +1420,12 @@ def edit_plans_menu(call):
 
     markup = InlineKeyboardMarkup()
     for t, pr in ch_data['plans'].items():
-        markup.add(InlineKeyboardButton(f"{format_label(t)} - ₹{pr}", callback_data=f"editplan_{ch_id}_{t}"))
-    markup.add(InlineKeyboardButton("➕ Add New Plan", callback_data=f"addplan_{ch_id}"))
-    markup.add(InlineKeyboardButton("⬅️ Back", callback_data=f"manage_{ch_id}"))
+        markup.add(InlineKeyboardButton(f"{format_label(t)} - â‚¹{pr}", callback_data=f"editplan_{ch_id}_{t}"))
+    markup.add(InlineKeyboardButton("âž• Add New Plan", callback_data=f"addplan_{ch_id}"))
+    markup.add(InlineKeyboardButton("â¬…ï¸ Back", callback_data=f"manage_{ch_id}"))
 
     edit_menu(call.message.chat.id, call.message.message_id,
-        f"✏️ Edit Plans for *{ch_data['name']}*\n\nTap a plan below to edit its price/duration, or add a new one:",
+        f"âœï¸ Edit Plans for *{ch_data['name']}*\n\nTap a plan below to edit its price/duration, or add a new one:",
         reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('editplan_'))
@@ -1443,13 +1439,13 @@ def edit_single_plan(call):
     price = ch_data['plans'][t]
 
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("💲 Edit Price", callback_data=f"editprice_{ch_id}_{t}"))
-    markup.add(InlineKeyboardButton("⏱ Edit Duration", callback_data=f"editdur_{ch_id}_{t}"))
-    markup.add(InlineKeyboardButton("🗑 Delete Plan", callback_data=f"delplan_{ch_id}_{t}"))
-    markup.add(InlineKeyboardButton("⬅️ Back", callback_data=f"editplans_{ch_id}"))
+    markup.add(InlineKeyboardButton("ðŸ’² Edit Price", callback_data=f"editprice_{ch_id}_{t}"))
+    markup.add(InlineKeyboardButton("â± Edit Duration", callback_data=f"editdur_{ch_id}_{t}"))
+    markup.add(InlineKeyboardButton("ðŸ—‘ Delete Plan", callback_data=f"delplan_{ch_id}_{t}"))
+    markup.add(InlineKeyboardButton("â¬…ï¸ Back", callback_data=f"editplans_{ch_id}"))
 
     edit_menu(call.message.chat.id, call.message.message_id,
-        f"Plan: *{format_label(t)}* — ₹{price}\n\nWhat would you like to do?",
+        f"Plan: *{format_label(t)}* â€” â‚¹{price}\n\nWhat would you like to do?",
         reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('editprice_'))
@@ -1463,10 +1459,10 @@ def edit_price_prompt(call):
 def save_new_price(message, ch_id, t):
     new_price = message.text.strip()
     if not new_price.isdigit():
-        send_admin_reply("❌ Invalid price. Please enter numbers only. Use /channels to try again.")
+        send_admin_reply("âŒ Invalid price. Please enter numbers only. Use /channels to try again.")
         return
     channels_col.update_one({"channel_id": ch_id}, {"$set": {f"plans.{t}": new_price}})
-    send_admin_reply(f"✅ Price updated to ₹{new_price} for the {format_label(t)} plan.")
+    send_admin_reply(f"âœ… Price updated to â‚¹{new_price} for the {format_label(t)} plan.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('editdur_'))
 def edit_duration_prompt(call):
@@ -1480,17 +1476,17 @@ def save_new_duration(message, ch_id, old_t):
     try:
         new_t = parse_duration_only(message.text)
     except:
-        send_admin_reply("❌ Invalid duration. Please use `Days:Hours:Mins`, e.g. `1:2:30`, or `lifetime`. Use /channels to try again.")
+        send_admin_reply("âŒ Invalid duration. Please use `Days:Hours:Mins`, e.g. `1:2:30`, or `lifetime`. Use /channels to try again.")
         return
     ch_data = channels_col.find_one({"channel_id": ch_id})
     price = ch_data['plans'].get(old_t)
     if price is None:
-        send_admin_reply("❌ That plan no longer exists.")
+        send_admin_reply("âŒ That plan no longer exists.")
         return
     # Remove old key, add new key with the same price
     channels_col.update_one({"channel_id": ch_id}, {"$unset": {f"plans.{old_t}": ""}})
     channels_col.update_one({"channel_id": ch_id}, {"$set": {f"plans.{new_t}": price}})
-    send_admin_reply(f"✅ Duration updated to {format_label(new_t)} (price stays ₹{price}).")
+    send_admin_reply(f"âœ… Duration updated to {format_label(new_t)} (price stays â‚¹{price}).")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('delplan_'))
 def delete_plan(call):
@@ -1508,16 +1504,16 @@ def add_plan_prompt(call):
     ch_id = int(call.data.split('_')[1])
     bot.answer_callback_query(call.id)
     # Awaiting a text reply -> never auto-vanish, even though reached via button tap
-    msg = send_prompt(ADMIN_ID, "Send the new plan in format `Days:Hours:Mins:Price`.\n\nExample: `0:3:0:49` (3 hours for ₹49)\n\nFor a permanent plan, use `lifetime:Price`, e.g. `lifetime:999`", parse_mode="Markdown")
+    msg = send_prompt(ADMIN_ID, "Send the new plan in format `Days:Hours:Mins:Price`.\n\nExample: `0:3:0:49` (3 hours for â‚¹49)\n\nFor a permanent plan, use `lifetime:Price`, e.g. `lifetime:999`", parse_mode="Markdown")
     bot.register_next_step_handler(msg, save_new_plan, ch_id)
 
 def save_new_plan(message, ch_id):
     try:
         total_minutes, price = parse_duration_and_price(message.text)
         channels_col.update_one({"channel_id": ch_id}, {"$set": {f"plans.{total_minutes}": price}})
-        send_admin_reply(f"✅ New plan added: {format_label(total_minutes)} — ₹{price}")
+        send_admin_reply(f"âœ… New plan added: {format_label(total_minutes)} â€” â‚¹{price}")
     except:
-        send_admin_reply("❌ Invalid format. Please use `Days:Hours:Mins:Price` or `lifetime:Price`. Use /channels to try again.")
+        send_admin_reply("âŒ Invalid format. Please use `Days:Hours:Mins:Price` or `lifetime:Price`. Use /channels to try again.")
 
 # --- USER: SHOPPING CART ---
 
@@ -1527,10 +1523,10 @@ def cart_add_handler(call):
     _, ch_id, t = call.data.split('_')
     ch_id = int(ch_id)
     ch_data = add_to_cart(call.from_user.id, ch_id, t)
-    bot.answer_callback_query(call.id, "Added to cart! 🛒")
+    bot.answer_callback_query(call.id, "Added to cart! ðŸ›’")
     if not ch_data:
-        edit_menu(call.message.chat.id, call.message.message_id, "❌ That plan is no longer available.",
-                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse")),
+        edit_menu(call.message.chat.id, call.message.message_id, "âŒ That plan is no longer available.",
+                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("ðŸ“º Browse Channels", callback_data="cart_browse")),
                   message_obj=call.message)
         return
     # Option selected -> the plan-picker message instantly becomes the cart summary (no lingering message)
@@ -1552,9 +1548,9 @@ def cart_browse_handler(call):
 def cart_clear_ask_handler(call):
     bot.answer_callback_query(call.id)
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ Yes, Clear Cart", callback_data="cart_clear_confirm"))
-    markup.add(InlineKeyboardButton("❌ Cancel", callback_data="cart_view"))
-    edit_menu(call.message.chat.id, call.message.message_id, "⚠️ Clear your entire cart?", reply_markup=markup, message_obj=call.message)
+    markup.add(InlineKeyboardButton("âœ… Yes, Clear Cart", callback_data="cart_clear_confirm"))
+    markup.add(InlineKeyboardButton("âŒ Cancel", callback_data="cart_view"))
+    edit_menu(call.message.chat.id, call.message.message_id, "âš ï¸ Clear your entire cart?", reply_markup=markup, message_obj=call.message)
 
 @bot.callback_query_handler(func=lambda call: call.data == "cart_clear_confirm")
 def cart_clear_confirm_handler(call):
@@ -1565,8 +1561,8 @@ def cart_clear_confirm_handler(call):
 
 # --- USER: CHECKOUT & PAYMENT ---
 
-QR_BRAND_HEX = (11, 83, 148)    # deep blue — the QR's data modules
-QR_ACCENT_HEX = (5, 51, 102)    # darker navy — the three corner finder patterns
+QR_BRAND_HEX = (11, 83, 148)    # deep blue â€” the QR's data modules
+QR_ACCENT_HEX = (5, 51, 102)    # darker navy â€” the three corner finder patterns
 QR_BRAND_CSS = '#0B5394'
 QR_ACCENT_CSS = '#053366'
 QR_LOGO_TEXT = 'AB'
@@ -1604,7 +1600,7 @@ def _qr_logo_font(size):
 
 def _make_ab_logo(size, brand_hex=QR_BRAND_HEX):
     """Render a crisp rounded-square 'AB' logo: soft drop shadow, clean white tile
-    with a thin brand ring, and bold brand-blue text — all anti-aliased for a
+    with a thin brand ring, and bold brand-blue text â€” all anti-aliased for a
     sharp, modern look. Transparent background, ready for pasting."""
     img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
     radius = int(size * 0.26)
@@ -1678,16 +1674,16 @@ def cart_checkout_handler(call):
     })
     token = str(result.inserted_id)
 
-    lines = [f"• {escape_markdown(i['name'])} — {format_label(i['t'])} — ₹{i['price']}" for i in items]
+    lines = [f"â€¢ {escape_markdown(i['name'])} â€” {format_label(i['t'])} â€” â‚¹{i['price']}" for i in items]
     caption = (
-        "🧾 *Checkout Summary*\n" + "\n".join(lines) +
-        f"\n\n💰 *Total: ₹{total}*\nUPI ID: `{UPI_ID}`\n\n"
+        "ðŸ§¾ *Checkout Summary*\n" + "\n".join(lines) +
+        f"\n\nðŸ’° *Total: â‚¹{total}*\nUPI ID: `{UPI_ID}`\n\n"
         "Please complete the payment and tap 'I Have Paid', then send a screenshot to the admin."
     )
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ I Have Paid", callback_data=f"coutpaid_{token}"))
-    markup.add(InlineKeyboardButton("❌ Cancel Payment", callback_data=f"coutcancel_{token}"))
-    markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
+    markup.add(InlineKeyboardButton("âœ… I Have Paid", callback_data=f"coutpaid_{token}"))
+    markup.add(InlineKeyboardButton("âŒ Cancel Payment", callback_data=f"coutcancel_{token}"))
+    markup.add(InlineKeyboardButton("ðŸ“ž Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
 
     # Payment QR shown for QR_SHOW_SECONDS initially; once 'I Have Paid' is tapped the timer
     # is reset to PAYMENT_VANISH_SECONDS so the user can still come back and scan if needed.
@@ -1703,8 +1699,8 @@ def cart_checkout_handler(call):
         except Exception:
             pass
         edit_menu(call.message.chat.id, call.message.message_id,
-            "❌ Couldn't show the payment QR right now. Please try again.",
-            reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse")),
+            "âŒ Couldn't show the payment QR right now. Please try again.",
+            reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("ðŸ“º Browse Channels", callback_data="cart_browse")),
             message_obj=call.message)
         return
 
@@ -1712,7 +1708,7 @@ def cart_checkout_handler(call):
 def cout_paid_handler(call):
     token = call.data.split('_', 1)[1]
     record_seen_user(call.from_user)
-    bot.answer_callback_query(call.id, "✅ Got it! Please send your payment screenshot now.")
+    bot.answer_callback_query(call.id, "âœ… Got it! Please send your payment screenshot now.")
 
     # Keep QR alive for PAYMENT_VANISH_SECONDS (30s) after 'I Have Paid' is tapped so the user
     # can still scan it if they need to go back and complete the payment.
@@ -1720,7 +1716,7 @@ def cout_paid_handler(call):
 
     # Awaiting the screenshot -> never auto-vanish
     msg = send_prompt(call.message.chat.id,
-        "📸 Please send a screenshot of your payment receipt now.\n\n"
+        "ðŸ“¸ Please send a screenshot of your payment receipt now.\n\n"
         "If you tapped 'I Have Paid' by mistake, type /cancel to cancel the payment.")
     bot.register_next_step_handler(msg, receive_cart_screenshot, token)
 
@@ -1728,7 +1724,7 @@ def receive_cart_screenshot(message, token):
     # Let the user bail out of the payment flow at any point instead of being stuck
     if message.text and message.text.strip().lower() in ('/cancel', 'cancel', '/cancle', 'cancle', '/stop', 'stop', '/abort', 'abort'):
         if _cancel_pending_checkout(token, message.from_user.id):
-            send_command_reply(message, "✅ Payment cancelled. Your items are back in your cart.")
+            send_command_reply(message, "âœ… Payment cancelled. Your items are back in your cart.")
         else:
             send_command_reply(message, "This checkout is no longer active.")
         show_all_channels(message.chat.id, message.from_user.id)
@@ -1736,7 +1732,7 @@ def receive_cart_screenshot(message, token):
 
     if not message.photo:
         msg = send_prompt(message.chat.id,
-            "❌ That doesn't look like a photo. Please send a screenshot image of your payment receipt.\n\n"
+            "âŒ That doesn't look like a photo. Please send a screenshot image of your payment receipt.\n\n"
             "If you tapped 'I Have Paid' by mistake, type /cancel to cancel the payment.")
         bot.register_next_step_handler(msg, receive_cart_screenshot, token)
         return
@@ -1746,46 +1742,46 @@ def receive_cart_screenshot(message, token):
     except Exception:
         doc = None
     if not doc:
-        bot.send_message(message.chat.id, "❌ This checkout has expired or was already processed. Please use /buy to start again.")
+        bot.send_message(message.chat.id, "âŒ This checkout has expired or was already processed. Please use /buy to start again.")
         return
 
     user = message.from_user
     file_id = message.photo[-1].file_id  # highest resolution version
 
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ Approve All", callback_data=f"coutapp_{token}"))
-    markup.add(InlineKeyboardButton("❌ Reject", callback_data=f"coutrej_{token}"))
+    markup.add(InlineKeyboardButton("âœ… Approve All", callback_data=f"coutapp_{token}"))
+    markup.add(InlineKeyboardButton("âŒ Reject", callback_data=f"coutrej_{token}"))
 
     username_tag = f"@{user.username}" if user.username else "No username"
-    lines = [f"• {escape_markdown(i['name'])} — {format_label(i['t'])} — ₹{i['price']}" for i in doc['items']]
+    lines = [f"â€¢ {escape_markdown(i['name'])} â€” {format_label(i['t'])} â€” â‚¹{i['price']}" for i in doc['items']]
     caption = (
-        "🔔 *Payment Verification Required!*\n\n"
+        "ðŸ”” *Payment Verification Required!*\n\n"
         f"User: {escape_markdown(user.first_name)} ({username_tag})\n"
         f"User ID: `{user.id}`\n\n"
         + "\n".join(lines) +
-        f"\n\n💰 *Total: ₹{doc['total']}*"
+        f"\n\nðŸ’° *Total: â‚¹{doc['total']}*"
     )
     # Not auto-vanished yet: only vanishes shortly AFTER the admin approves/rejects (see below)
     try:
         bot.send_photo(ADMIN_ID, file_id, caption=caption, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
-        # Don't leave the user hanging mid-flow — tell them delivery failed and ping the admin
+        # Don't leave the user hanging mid-flow â€” tell them delivery failed and ping the admin
         try:
-            bot.send_message(message.chat.id, "❌ Couldn't deliver your receipt to the admin right now. Please try again or contact the admin.")
+            bot.send_message(message.chat.id, "âŒ Couldn't deliver your receipt to the admin right now. Please try again or contact the admin.")
         except Exception:
             pass
         try:
-            err_msg = bot.send_message(ADMIN_ID, f"❌ Failed to deliver a payment screenshot: {e}")
+            err_msg = bot.send_message(ADMIN_ID, f"âŒ Failed to deliver a payment screenshot: {e}")
             schedule_delete(ADMIN_ID, err_msg.message_id, ADMIN_REPLY_VANISH_SECONDS)
         except Exception:
             pass
         return
 
-    u_markup = InlineKeyboardMarkup().add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
-    conf_msg = bot.send_message(message.chat.id, "✅ Your receipt has been sent for verification. Please wait for Admin approval.\nApproval time : 5-10 minutes \nBe Patient", reply_markup=u_markup)
+    u_markup = InlineKeyboardMarkup().add(InlineKeyboardButton("ðŸ“ž Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
+    conf_msg = bot.send_message(message.chat.id, "âœ… Your receipt has been sent for verification. Please wait for Admin approval.\nApproval time : 5-10 minutes \nBe Patient", reply_markup=u_markup)
     schedule_delete(message.chat.id, conf_msg.message_id, COMMAND_VANISH_SECONDS)
 
-    # Cart has now moved into the pending checkout — clear it so a fresh /buy starts empty
+    # Cart has now moved into the pending checkout â€” clear it so a fresh /buy starts empty
     user_carts.pop(message.from_user.id, None)
 
 def _restore_cart_items(user_id, items):
@@ -1827,7 +1823,7 @@ def cout_cancel_handler(call):
     token = call.data.split('_', 1)[1]
     bot.answer_callback_query(call.id, "Payment cancelled.")
     _cancel_pending_checkout(token, call.from_user.id)
-    # Back to browsing — the QR photo message gets replaced by the channel list
+    # Back to browsing â€” the QR photo message gets replaced by the channel list
     edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message)
 
 @bot.message_handler(commands=['cancel'])
@@ -1842,7 +1838,7 @@ def cancel_command_handler(message):
         cancelled = 0
     user_carts.pop(user_id, None)
     if cancelled:
-        send_command_reply(message, "✅ Payment cancelled. Your pending checkout has been removed. Use /buy to start again.")
+        send_command_reply(message, "âœ… Payment cancelled. Your pending checkout has been removed. Use /buy to start again.")
     else:
         send_command_reply(message, "You don't have any pending payment right now.")
 
@@ -1856,13 +1852,13 @@ def cout_reject_handler(call):
         doc = None
     if doc:
         try:
-            rej_msg = bot.send_message(doc['user_id'], "❌ Your payment could not be verified. Please contact the admin for help.")
+            rej_msg = bot.send_message(doc['user_id'], "âŒ Your payment could not be verified. Please contact the admin for help.")
             schedule_delete(doc['user_id'], rej_msg.message_id, COMMAND_VANISH_SECONDS)
         except: pass
         pending_checkouts_col.delete_one({"_id": ObjectId(token)})
     # Vanishes shortly after the decision is made (not before)
     edit_caption_menu(call.message.chat.id, call.message.message_id,
-        "❌ Rejected this checkout.\n(this message will vanish shortly)",
+        "âŒ Rejected this checkout.\n(this message will vanish shortly)",
         delay=DECISION_VANISH_SECONDS)
 
 # --- APPROVAL & EXPIRY ---
@@ -1897,7 +1893,7 @@ def cout_approve_handler(call):
             try:
                 bot.unban_chat_member(ch_id, u_id, only_if_banned=True)
             except Exception:
-                pass  # Not in channel / already not banned — safe to ignore
+                pass  # Not in channel / already not banned â€” safe to ignore
 
             if t == "lifetime":
                 link = bot.create_chat_invite_link(ch_id, member_limit=1)  # no expiry
@@ -1906,7 +1902,7 @@ def cout_approve_handler(call):
                     {"$set": {"expiry": None, "lifetime": True, "reminded_24h": True, "reminded_1h": True}},
                     upsert=True
                 )
-                result_lines.append(f"• {name} — Lifetime ♾️\nJoin Link: {link.invite_link}")
+                result_lines.append(f"â€¢ {name} â€” Lifetime â™¾ï¸\nJoin Link: {link.invite_link}")
             else:
                 mins = int(t)
                 expiry_datetime = datetime.now() + timedelta(minutes=mins)
@@ -1917,17 +1913,17 @@ def cout_approve_handler(call):
                     {"$set": {"expiry": expiry_datetime.timestamp(), "lifetime": False, "reminded_24h": False, "reminded_1h": False}},
                     upsert=True
                 )
-                result_lines.append(f"• {name} — {format_label(t)}\nJoin Link: {link.invite_link}")
+                result_lines.append(f"â€¢ {name} â€” {format_label(t)}\nJoin Link: {link.invite_link}")
 
             # Log the sale for /stats (itemized, prunable via /cleanup)
             payments_col.insert_one({
                 "user_id": u_id, "channel_id": ch_id, "minutes": t,
                 "amount": price, "timestamp": datetime.now()
             })
-            # Also bump lifetime counters — these stay accurate even after old payment logs are pruned
+            # Also bump lifetime counters â€” these stay accurate even after old payment logs are pruned
             counters_col.update_one({"_id": "stats"}, {"$inc": {"total_sales": 1, "total_revenue": price}}, upsert=True)
         except Exception as e:
-            error_lines.append(f"• {name}: {e}")
+            error_lines.append(f"â€¢ {name}: {e}")
 
     # Always close out the checkout so it can never stay stuck half-processed.
     user_carts.pop(u_id, None)
@@ -1939,15 +1935,15 @@ def cout_approve_handler(call):
     if result_lines:
         try:
             bot.send_message(u_id,
-                "🥳 *Payment Approved!*\n\n" + "\n\n".join(result_lines) +
-                "\n\n⚠️ Note: Each link/access expires per its own plan (unless marked Lifetime).\n\nEnjoyyy!!!",
+                "ðŸ¥³ *Payment Approved!*\n\n" + "\n\n".join(result_lines) +
+                "\n\nâš ï¸ Note: Each link/access expires per its own plan (unless marked Lifetime).\n\nEnjoyyy!!!",
                 parse_mode="Markdown")
             # Approval message stays for a bit longer so user can read and copy the join link
-            # (no schedule_delete here — this is an important message the user needs to act on)
+            # (no schedule_delete here â€” this is an important message the user needs to act on)
         except Exception:
             try:
                 bot.send_message(u_id,
-                    "🥳 Payment Approved!\n\n" + "\n\n".join(result_lines) +
+                    "ðŸ¥³ Payment Approved!\n\n" + "\n\n".join(result_lines) +
                     "\n\nNote: Each link/access expires per its own plan (unless marked Lifetime).")
             except Exception:
                 pass
@@ -1955,12 +1951,12 @@ def cout_approve_handler(call):
     if error_lines:
         try:
             bot.send_message(u_id,
-                "⚠️ Some of your purchases could not be approved:\n\n" + "\n".join(error_lines) +
+                "âš ï¸ Some of your purchases could not be approved:\n\n" + "\n".join(error_lines) +
                 "\n\nPlease contact the admin to resolve this.")
         except Exception:
             pass
         try:
-            err_msg = bot.send_message(ADMIN_ID, "⚠️ Partial approval errors:\n" + "\n".join(error_lines))
+            err_msg = bot.send_message(ADMIN_ID, "âš ï¸ Partial approval errors:\n" + "\n".join(error_lines))
             schedule_delete(ADMIN_ID, err_msg.message_id, ADMIN_REPLY_VANISH_SECONDS)
         except Exception:
             pass
@@ -1968,7 +1964,7 @@ def cout_approve_handler(call):
     # Vanishes shortly after the decision is made (not before)
     try:
         edit_caption_menu(call.message.chat.id, call.message.message_id,
-            f"✅ Approved checkout for user {u_id} ({len(doc['items'])} channel(s)).\n(this message will vanish shortly)",
+            f"âœ… Approved checkout for user {u_id} ({len(doc['items'])} channel(s)).\n(this message will vanish shortly)",
             delay=DECISION_VANISH_SECONDS)
     except Exception:
         pass
@@ -1995,12 +1991,12 @@ def stats_handler(message):
     month_revenue = sum(p.get('amount', 0) for p in payments_col.find({"timestamp": {"$gte": month_start}}))
 
     text = (
-        "📊 *Bot Stats*\n\n"
-        f"📺 Channels: {total_channels}\n"
-        f"👥 Active Subscriptions: {active_subs}\n"
-        f"🧾 Total Sales: {total_sales}\n"
-        f"💰 Total Revenue: ₹{total_revenue}\n"
-        f"📅 This Month's Revenue: ₹{month_revenue}"
+        "ðŸ“Š *Bot Stats*\n\n"
+        f"ðŸ“º Channels: {total_channels}\n"
+        f"ðŸ‘¥ Active Subscriptions: {active_subs}\n"
+        f"ðŸ§¾ Total Sales: {total_sales}\n"
+        f"ðŸ’° Total Revenue: â‚¹{total_revenue}\n"
+        f"ðŸ“… This Month's Revenue: â‚¹{month_revenue}"
     )
     send_command_reply(message, text, parse_mode="Markdown")
 
@@ -2010,7 +2006,7 @@ def stats_handler(message):
 def dbstats_handler(message):
     """Sends DB storage breakdown. The /dbstats command message is deleted immediately,
     and the reply vanishes after COMMAND_VANISH_SECONDS.
-    Plain text (no Markdown) is used deliberately — collection names like 'seen_users' contain
+    Plain text (no Markdown) is used deliberately â€” collection names like 'seen_users' contain
     underscores, which Telegram's legacy Markdown parser misreads as unclosed italic markers."""
     try:
         stats = db.command("dbStats")
@@ -2019,7 +2015,7 @@ def dbstats_handler(message):
         index_mb = stats.get('indexSize', 0) / (1024 * 1024)
 
         lines = [
-            "🗄 Database Storage\n",
+            "ðŸ—„ Database Storage\n",
             f"Data size: {data_mb:.2f} MB",
             f"Storage size (on disk): {storage_mb:.2f} MB",
             f"Index size: {index_mb:.2f} MB",
@@ -2031,9 +2027,9 @@ def dbstats_handler(message):
                 cstats = db.command("collStats", name)
                 csize = cstats.get('size', 0) / (1024 * 1024)
                 ccount = cstats.get('count', 0)
-                lines.append(f"• {name}: {ccount} docs — {csize:.2f} MB")
+                lines.append(f"â€¢ {name}: {ccount} docs â€” {csize:.2f} MB")
             except Exception:
-                lines.append(f"• {name}: 0 docs — 0.00 MB")
+                lines.append(f"â€¢ {name}: 0 docs â€” 0.00 MB")
 
         lines.append("\nUse /cleanup to free up space.")
         # Dismiss previous, send new reply scheduled to vanish
@@ -2042,7 +2038,7 @@ def dbstats_handler(message):
         schedule_delete(message.chat.id, reply.message_id, COMMAND_VANISH_SECONDS)
         track_msg(message.from_user.id, reply)
     except Exception as e:
-        send_command_reply(message, f"❌ Couldn't fetch DB stats: {e}")
+        send_command_reply(message, f"âŒ Couldn't fetch DB stats: {e}")
 
 @bot.message_handler(commands=['cleanup'], func=lambda m: m.from_user.id == ADMIN_ID)
 def cleanup_handler(message):
@@ -2059,22 +2055,22 @@ def show_cleanup_menu(chat_id, message_id=None, user_id=None):
     old_seenusers_count = seen_users_col.count_documents({"last_seen": {"$lt": seenusers_cutoff}})
 
     text = (
-        "🧹 *Free Up Database Space*\n\n"
-        f"🧾 Old payment logs (older than {CLEANUP_PAYMENTS_DAYS} days): *{old_payments_count}* records\n"
-        "   _(Your Total Sales/Revenue in /stats are unaffected — those are tracked separately and won't change.)_\n\n"
-        f"👤 Inactive users (not seen in {CLEANUP_SEENUSERS_DAYS}+ days): *{old_seenusers_count}* records\n"
-        "   _(Only affects who /broadcast can reach — active subscribers are never touched.)_\n\n"
+        "ðŸ§¹ *Free Up Database Space*\n\n"
+        f"ðŸ§¾ Old payment logs (older than {CLEANUP_PAYMENTS_DAYS} days): *{old_payments_count}* records\n"
+        "   _(Your Total Sales/Revenue in /stats are unaffected â€” those are tracked separately and won't change.)_\n\n"
+        f"ðŸ‘¤ Inactive users (not seen in {CLEANUP_SEENUSERS_DAYS}+ days): *{old_seenusers_count}* records\n"
+        "   _(Only affects who /broadcast can reach â€” active subscribers are never touched.)_\n\n"
         "Tap below to delete a category. This cannot be undone."
     )
     markup = InlineKeyboardMarkup()
     if old_payments_count > 0:
-        markup.add(InlineKeyboardButton(f"🗑 Delete {old_payments_count} old payment logs", callback_data="cleanuppay_ask"))
+        markup.add(InlineKeyboardButton(f"ðŸ—‘ Delete {old_payments_count} old payment logs", callback_data="cleanuppay_ask"))
     if old_seenusers_count > 0:
-        markup.add(InlineKeyboardButton(f"🗑 Delete {old_seenusers_count} inactive users", callback_data="cleanupseen_ask"))
+        markup.add(InlineKeyboardButton(f"ðŸ—‘ Delete {old_seenusers_count} inactive users", callback_data="cleanupseen_ask"))
     if old_payments_count == 0 and old_seenusers_count == 0:
-        markup.add(InlineKeyboardButton("✅ Nothing to clean up right now", callback_data="cleanup_refresh"))
+        markup.add(InlineKeyboardButton("âœ… Nothing to clean up right now", callback_data="cleanup_refresh"))
     else:
-        markup.add(InlineKeyboardButton("🔄 Refresh counts", callback_data="cleanup_refresh"))
+        markup.add(InlineKeyboardButton("ðŸ”„ Refresh counts", callback_data="cleanup_refresh"))
 
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
@@ -2096,11 +2092,11 @@ def cb_cleanup_payments_ask(call):
     cutoff = datetime.now() - timedelta(days=CLEANUP_PAYMENTS_DAYS)
     count = payments_col.count_documents({"timestamp": {"$lt": cutoff}})
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ Yes, Delete Them", callback_data="cleanuppay_confirm"))
-    markup.add(InlineKeyboardButton("❌ Cancel", callback_data="cleanup_refresh"))
+    markup.add(InlineKeyboardButton("âœ… Yes, Delete Them", callback_data="cleanuppay_confirm"))
+    markup.add(InlineKeyboardButton("âŒ Cancel", callback_data="cleanup_refresh"))
     edit_menu(call.message.chat.id, call.message.message_id,
-        f"⚠️ Delete *{count}* payment logs older than {CLEANUP_PAYMENTS_DAYS} days?\n\n"
-        f"Your lifetime Total Sales/Revenue in /stats will stay accurate — only the itemized old records are removed.",
+        f"âš ï¸ Delete *{count}* payment logs older than {CLEANUP_PAYMENTS_DAYS} days?\n\n"
+        f"Your lifetime Total Sales/Revenue in /stats will stay accurate â€” only the itemized old records are removed.",
         reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data == "cleanuppay_confirm")
@@ -2109,7 +2105,7 @@ def cb_cleanup_payments_confirm(call):
     cutoff = datetime.now() - timedelta(days=CLEANUP_PAYMENTS_DAYS)
     result = payments_col.delete_many({"timestamp": {"$lt": cutoff}})
     edit_menu(call.message.chat.id, call.message.message_id,
-        f"✅ Deleted {result.deleted_count} old payment logs.\n\nUse /dbstats to see updated storage usage.",
+        f"âœ… Deleted {result.deleted_count} old payment logs.\n\nUse /dbstats to see updated storage usage.",
         reply_markup=None)
 
 @bot.callback_query_handler(func=lambda call: call.data == "cleanupseen_ask")
@@ -2118,11 +2114,11 @@ def cb_cleanup_seenusers_ask(call):
     cutoff = datetime.now() - timedelta(days=CLEANUP_SEENUSERS_DAYS)
     count = seen_users_col.count_documents({"last_seen": {"$lt": cutoff}})
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ Yes, Delete Them", callback_data="cleanupseen_confirm"))
-    markup.add(InlineKeyboardButton("❌ Cancel", callback_data="cleanup_refresh"))
+    markup.add(InlineKeyboardButton("âœ… Yes, Delete Them", callback_data="cleanupseen_confirm"))
+    markup.add(InlineKeyboardButton("âŒ Cancel", callback_data="cleanup_refresh"))
     edit_menu(call.message.chat.id, call.message.message_id,
-        f"⚠️ Delete *{count}* inactive users (not seen in {CLEANUP_SEENUSERS_DAYS}+ days)?\n\n"
-        f"They just won't be reachable by future /broadcast messages — if they message the bot again, they'll be re-tracked automatically.",
+        f"âš ï¸ Delete *{count}* inactive users (not seen in {CLEANUP_SEENUSERS_DAYS}+ days)?\n\n"
+        f"They just won't be reachable by future /broadcast messages â€” if they message the bot again, they'll be re-tracked automatically.",
         reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data == "cleanupseen_confirm")
@@ -2131,7 +2127,7 @@ def cb_cleanup_seenusers_confirm(call):
     cutoff = datetime.now() - timedelta(days=CLEANUP_SEENUSERS_DAYS)
     result = seen_users_col.delete_many({"last_seen": {"$lt": cutoff}})
     edit_menu(call.message.chat.id, call.message.message_id,
-        f"✅ Deleted {result.deleted_count} inactive user records.\n\nUse /dbstats to see updated storage usage.",
+        f"âœ… Deleted {result.deleted_count} inactive user records.\n\nUse /dbstats to see updated storage usage.",
         reply_markup=None)
 
 @bot.message_handler(commands=['broadcast'], func=lambda m: m.from_user.id == ADMIN_ID)
@@ -2144,12 +2140,12 @@ def broadcast_start(message):
 
 def do_broadcast(message):
     if not message.text:
-        send_admin_reply("❌ Please send plain text for the broadcast (photos/stickers/etc. aren't supported yet). Use /broadcast to try again.")
+        send_admin_reply("âŒ Please send plain text for the broadcast (photos/stickers/etc. aren't supported yet). Use /broadcast to try again.")
         return
 
     user_ids = seen_users_col.distinct("user_id")
     if not user_ids:
-        send_admin_reply("⚠️ No users have interacted with the bot yet — broadcast not sent to anyone.")
+        send_admin_reply("âš ï¸ No users have interacted with the bot yet â€” broadcast not sent to anyone.")
         return
 
     sent, failed = 0, 0
@@ -2162,11 +2158,11 @@ def do_broadcast(message):
             failed += 1
             errors.append(f"{uid}: {e}")
 
-    result = f"✅ Broadcast sent to {sent} users. Failed: {failed}."
+    result = f"âœ… Broadcast sent to {sent} users. Failed: {failed}."
     if errors:
         # Show up to 5 concrete error reasons so you can see WHY sends failed (e.g. blocked bot)
         result += "\n\nFailure details (first 5):\n" + "\n".join(errors[:5])
-    # Broadcast result is important info — keep slightly longer than regular messages
+    # Broadcast result is important info â€” keep slightly longer than regular messages
     res_msg = bot.send_message(ADMIN_ID, result)
     schedule_delete(ADMIN_ID, res_msg.message_id, 30)
 
@@ -2175,10 +2171,10 @@ def removeuser_handler(message):
     if not message.from_user:
         return
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
-        send_command_reply(message, f"❌ Access denied. Your User ID (`{message.from_user.id}`) is not configured as ADMIN_ID.", parse_mode="Markdown")
+        send_command_reply(message, f"âŒ Access denied. Your User ID (`{message.from_user.id}`) is not configured as ADMIN_ID.", parse_mode="Markdown")
         return
     if message.chat.type != 'private':
-        _safe_reply(message, "⚠️ /removeuser only works in a private chat with the bot.\n\nIn groups, use `/remove` to kick a member.", parse_mode="Markdown")
+        _safe_reply(message, "âš ï¸ /removeuser only works in a private chat with the bot.\n\nIn groups, use `/remove` to kick a member.", parse_mode="Markdown")
         return
 
     # Dismiss previous bot reply
@@ -2211,7 +2207,7 @@ def removeuser_handler(message):
             if ch_filter is not None:
                 subs = [s for s in subs if int(s['channel_id']) == ch_filter]
             if not subs:
-                send_admin_reply("ℹ️ No active subscribers to remove.")
+                send_admin_reply("â„¹ï¸ No active subscribers to remove.")
                 return
             count = 0
             failed = []
@@ -2222,9 +2218,9 @@ def removeuser_handler(message):
                 else:
                     failed.append(f"{s['channel_id']}: {detail}")
                 time.sleep(0.05)
-            msg = f"✅ Removed *{count}* active subscriber record(s) across your channels."
+            msg = f"âœ… Removed *{count}* active subscriber record(s) across your channels."
             if failed:
-                msg += "\n\n⚠️ Some bans failed:\n" + "\n".join(failed[:5])
+                msg += "\n\nâš ï¸ Some bans failed:\n" + "\n".join(failed[:5])
             send_admin_reply(msg, parse_mode="Markdown")
             return
 
@@ -2250,20 +2246,20 @@ def removeuser_handler(message):
                         failed.append(f"{s['channel_id']}: {detail}")
                     time.sleep(0.05)
                 try:
-                    rev_msg = bot.send_message(target_uid, "⚠️ Your subscription access has been revoked by the admin.")
+                    rev_msg = bot.send_message(target_uid, "âš ï¸ Your subscription access has been revoked by the admin.")
                     schedule_delete(target_uid, rev_msg.message_id, COMMAND_VANISH_SECONDS)
                 except Exception:
                     pass
-                msg = f"✅ Removed subscription for user `{target_uid}` ({count} channel subscription(s) cleared)."
+                msg = f"âœ… Removed subscription for user `{target_uid}` ({count} channel subscription(s) cleared)."
                 if failed:
-                    msg += "\n\n⚠️ Some bans failed:\n" + "\n".join(failed[:5])
+                    msg += "\n\nâš ï¸ Some bans failed:\n" + "\n".join(failed[:5])
                 send_admin_reply(msg, parse_mode="Markdown")
                 return
             else:
-                send_admin_reply(f"⚠️ No subscriptions found for `{escape_markdown(target)}` ({target_uid}).", parse_mode="Markdown")
+                send_admin_reply(f"âš ï¸ No subscriptions found for `{escape_markdown(target)}` ({target_uid}).", parse_mode="Markdown")
                 return
         else:
-            send_admin_reply(f"❌ Could not resolve `{escape_markdown(target)}`. Check the spelling (usernames are case-insensitive), try their numeric User ID, or use `/removeuser` without arguments to pick from the menu.", parse_mode="Markdown")
+            send_admin_reply(f"âŒ Could not resolve `{escape_markdown(target)}`. Check the spelling (usernames are case-insensitive), try their numeric User ID, or use `/removeuser` without arguments to pick from the menu.", parse_mode="Markdown")
             return
 
     show_active_users(message.chat.id, user_id=message.from_user.id)
@@ -2278,13 +2274,13 @@ def group_remove_handler(message):
         return
 
     if message.chat.type not in ('group', 'supergroup', 'channel'):
-        _safe_reply(message, "❌ /remove only works in groups or channels.")
+        _safe_reply(message, "âŒ /remove only works in groups or channels.")
         return
 
     chat_id = message.chat.id
 
     if not _is_chat_admin_message(message):
-        _safe_reply(message, "❌ Only chat administrators can use /remove.")
+        _safe_reply(message, "âŒ Only chat administrators can use /remove.")
         return
 
     raw_text = message.text or getattr(message, 'caption', None) or ''
@@ -2293,36 +2289,36 @@ def group_remove_handler(message):
     if message.reply_to_message:
         target = message.reply_to_message
         if getattr(target, 'sender_chat', None) is not None:
-            _safe_reply(message, "❌ Cannot remove an anonymous admin or channel identity post.")
+            _safe_reply(message, "âŒ Cannot remove an anonymous admin or channel identity post.")
             return
         target_user = target.from_user
         if not target_user:
-            _safe_reply(message, "❌ Could not identify the user from that message.")
+            _safe_reply(message, "âŒ Could not identify the user from that message.")
             return
         if target_user.is_bot or target_user.id == GROUP_ANONYMOUS_BOT_ID:
-            _safe_reply(message, "❌ Cannot remove a bot or anonymous admin.")
+            _safe_reply(message, "âŒ Cannot remove a bot or anonymous admin.")
             return
 
         admin_ids = _get_protected_admin_ids(chat_id)
         if target_user.id in admin_ids:
-            _safe_reply(message, "❌ Cannot remove a chat administrator.")
+            _safe_reply(message, "âŒ Cannot remove a chat administrator.")
             return
 
         removed, detail = _kick_from_group(chat_id, target_user.id)
         if removed:
-            _safe_reply(message, f"✅ Removed {target_user.first_name or 'user'} (`{target_user.id}`) from this chat.\n_{detail}_", parse_mode="Markdown")
+            _safe_reply(message, f"âœ… Removed {target_user.first_name or 'user'} (`{target_user.id}`) from this chat.\n_{detail}_", parse_mode="Markdown")
         else:
-            _safe_reply(message, f"❌ Failed to remove user: {detail}")
+            _safe_reply(message, f"âŒ Failed to remove user: {detail}")
         return
 
     args = raw_text.split()[1:] if raw_text else []
     if not args:
         _safe_reply(message,
-            "💡 *Usage in this group/channel:*\n\n"
-            "• Reply to someone's message with `/remove`\n"
-            "• `/remove @username`\n"
-            "• `/remove <user_id>`\n"
-            "• `/remove all` — remove all non-admin members/subscribers of this chat\n\n"
+            "ðŸ’¡ *Usage in this group/channel:*\n\n"
+            "â€¢ Reply to someone's message with `/remove`\n"
+            "â€¢ `/remove @username`\n"
+            "â€¢ `/remove <user_id>`\n"
+            "â€¢ `/remove all` â€” remove all non-admin members/subscribers of this chat\n\n"
             "_The bot must be an admin with Ban users permission._",
             parse_mode="Markdown"
         )
@@ -2352,7 +2348,7 @@ def group_remove_handler(message):
         chat_members_col.delete_many({"chat_id": {"$in": [int(chat_id), str(chat_id)]}, "user_id": {"$nin": list(admin_ids)}})
 
         _safe_reply(message,
-            f"🧹 *Mass removal complete*\n\n"
+            f"ðŸ§¹ *Mass removal complete*\n\n"
             f"Subscribers found: *{len(subscriber_ids)}*\n"
             f"Members seen in chat: *{len(seen_ids)}*\n"
             f"Removed: *{removed_count}*\n"
@@ -2368,13 +2364,13 @@ def group_remove_handler(message):
         target_id = int(arg)
         admin_ids = _get_protected_admin_ids(chat_id)
         if target_id in admin_ids:
-            _safe_reply(message, "❌ Cannot remove a chat administrator.")
+            _safe_reply(message, "âŒ Cannot remove a chat administrator.")
             return
         removed, detail = _kick_from_group(chat_id, target_id)
         if removed:
-            _safe_reply(message, f"✅ Removed user `{target_id}` from this chat.\n_{detail}_", parse_mode="Markdown")
+            _safe_reply(message, f"âœ… Removed user `{target_id}` from this chat.\n_{detail}_", parse_mode="Markdown")
         else:
-            _safe_reply(message, f"❌ Failed to remove user `{target_id}`: {detail}", parse_mode="Markdown")
+            _safe_reply(message, f"âŒ Failed to remove user `{target_id}`: {detail}", parse_mode="Markdown")
         return
 
     # Case 4: /remove @username
@@ -2386,28 +2382,28 @@ def group_remove_handler(message):
         )
         if not target_id:
             _safe_reply(message,
-                f"❌ User `{arg}` not found in my records.\n\n"
+                f"âŒ User `{arg}` not found in my records.\n\n"
                 "The bot can only see users who message/join after it was added.\n"
                 "Try:\n"
-                "• Reply to their message with `/remove`\n"
-                "• Use `/remove <user_id>`\n"
-                "• Run `/sync` first to collect member data",
+                "â€¢ Reply to their message with `/remove`\n"
+                "â€¢ Use `/remove <user_id>`\n"
+                "â€¢ Run `/sync` first to collect member data",
                 parse_mode="Markdown"
             )
             return
         admin_ids = _get_protected_admin_ids(chat_id)
         if target_id in admin_ids:
-            _safe_reply(message, "❌ Cannot remove a chat administrator.")
+            _safe_reply(message, "âŒ Cannot remove a chat administrator.")
             return
         display = f"@{resolved_name}" if resolved_name else str(target_id)
         removed, detail = _kick_from_group(chat_id, target_id)
         if removed:
-            _safe_reply(message, f"✅ Removed {display} (`{target_id}`) from this chat.\n_{detail}_", parse_mode="Markdown")
+            _safe_reply(message, f"âœ… Removed {display} (`{target_id}`) from this chat.\n_{detail}_", parse_mode="Markdown")
         else:
-            _safe_reply(message, f"❌ Failed to remove {display}: {detail}", parse_mode="Markdown")
+            _safe_reply(message, f"âŒ Failed to remove {display}: {detail}", parse_mode="Markdown")
         return
 
-    _safe_reply(message, "❌ Invalid argument. Use `/remove @username`, `/remove <user_id>`, `/remove all`, or reply to a message.", parse_mode="Markdown")
+    _safe_reply(message, "âŒ Invalid argument. Use `/remove @username`, `/remove <user_id>`, `/remove all`, or reply to a message.", parse_mode="Markdown")
 
 
 @bot.chat_member_handler(func=lambda update: True)
@@ -2455,14 +2451,14 @@ def on_my_chat_member_update(update):
 @bot.message_handler(commands=['sync'])
 @bot.channel_post_handler(commands=['sync'])
 def sync_handler(message):
-    """/sync — in a group/channel any chat admin can trigger a member sync; in a
+    """/sync â€” in a group/channel any chat admin can trigger a member sync; in a
     private DM the bot owner can list tracked chats or re-sync one chat."""
     chat = message.chat
 
     # ---- Group / channel: chat admins trigger a member sync ----
     if getattr(chat, 'type', None) in ('group', 'supergroup', 'channel'):
         if not _is_chat_admin_message(message):
-            _safe_reply(message, "❌ Only chat administrators can use /sync.")
+            _safe_reply(message, "âŒ Only chat administrators can use /sync.")
             return
 
         chat_id = chat.id
@@ -2504,22 +2500,22 @@ def sync_handler(message):
                 continue
             if not uid:
                 # Username-only record (imported via /import but not yet resolved to a
-                # numeric ID) — show it so imported members are visible after a sync.
+                # numeric ID) â€” show it so imported members are visible after a sync.
                 if uname:
-                    user_lines.append(f"• @{escape_markdown(uname)} — ⏳ awaiting numeric ID")
+                    user_lines.append(f"â€¢ @{escape_markdown(uname)} â€” â³ awaiting numeric ID")
                 continue
             name = escape_markdown(m.get('first_name') or 'Unknown')
             tag = ""
             if uid in admin_ids:
-                tag = " 👑(admin)"
+                tag = " ðŸ‘‘(admin)"
             if uname:
-                user_lines.append(f"• {name} (@{escape_markdown(uname)}) — `{uid}`{tag}")
+                user_lines.append(f"â€¢ {name} (@{escape_markdown(uname)}) â€” `{uid}`{tag}")
             else:
-                user_lines.append(f"• {name} — `{uid}`{tag}")
+                user_lines.append(f"â€¢ {name} â€” `{uid}`{tag}")
 
         if not user_lines:
             _safe_reply(message,
-                "ℹ️ *Sync Complete* — but no members found yet.\n\n"
+                "â„¹ï¸ *Sync Complete* â€” but no members found yet.\n\n"
                 "The bot can only see users who message or join after it was added (plus admins).\n"
                 "Silent pre-existing members will appear here once they send a message or join via the bot's invite link.",
                 parse_mode="Markdown",
@@ -2529,13 +2525,13 @@ def sync_handler(message):
 
         # First message carries the header plus the user list; if that would exceed
         # ~3500 chars (Telegram caps a message at ~4096), the remainder is sent as
-        # "👥" continuation chunks. Names/usernames are escaped so a stray '_' in a
+        # "ðŸ‘¥" continuation chunks. Names/usernames are escaped so a stray '_' in a
         # member's name can't make Telegram reject the whole message.
-        header = f"✅ *Sync Complete!*\n📊 Stored *{len(user_lines)}* user(s) in the database.\n\n*Synced users are:*\n"
+        header = f"âœ… *Sync Complete!*\nðŸ“Š Stored *{len(user_lines)}* user(s) in the database.\n\n*Synced users are:*\n"
         messages = [header]
         for line in user_lines:
             if len(messages[-1]) + len(line) + 1 > 3500:
-                messages.append("👥 ")
+                messages.append("ðŸ‘¥ ")
             messages[-1] += line + "\n"
         for text in messages:
             _safe_reply(message, text, parse_mode="Markdown", delay=SYNC_VANISH_SECONDS)
@@ -2543,7 +2539,7 @@ def sync_handler(message):
 
     # ---- Private DM (bot owner only): tracked chats overview / targeted sync ----
     if not message.from_user or not ADMIN_ID or message.from_user.id != ADMIN_ID:
-        send_command_reply(message, "❌ Access denied.")
+        send_command_reply(message, "âŒ Access denied.")
         return
 
     args = message.text.split()[1:]
@@ -2551,22 +2547,22 @@ def sync_handler(message):
         try:
             chat_id = int(args[0].strip())
         except ValueError:
-            send_command_reply(message, "❌ Invalid chat id. Usage: `/sync` or `/sync <chat_id>`", parse_mode="Markdown")
+            send_command_reply(message, "âŒ Invalid chat id. Usage: `/sync` or `/sync <chat_id>`", parse_mode="Markdown")
             return
         sync_chat_admins(chat_id)
         count = chat_members_col.count_documents({"chat_id": chat_id})
-        send_command_reply(message, f"✅ Re-synced admins for chat `{chat_id}`.\nKnown members there: {count}", parse_mode="Markdown")
+        send_command_reply(message, f"âœ… Re-synced admins for chat `{chat_id}`.\nKnown members there: {count}", parse_mode="Markdown")
         return
 
     chats = list(tracked_chats_col.find({"active": True}))
     if not chats:
-        send_command_reply(message, "ℹ️ No tracked chats yet. Add the bot to a group/channel and it will be recorded automatically.")
+        send_command_reply(message, "â„¹ï¸ No tracked chats yet. Add the bot to a group/channel and it will be recorded automatically.")
         return
-    lines = ["📋 *Chats the bot is in:*"]
+    lines = ["ðŸ“‹ *Chats the bot is in:*"]
     for c in chats:
         title = c.get('title') or c.get('type') or 'chat'
         n = chat_members_col.count_documents({"chat_id": c['chat_id']})
-        lines.append(f"• {title} (`{c['chat_id']}`) — {n} members tracked")
+        lines.append(f"â€¢ {title} (`{c['chat_id']}`) â€” {n} members tracked")
     send_command_reply(message, "\n".join(lines), parse_mode="Markdown")
 
 @bot.message_handler(commands=['import'])
@@ -2586,41 +2582,41 @@ def import_members_handler(message):
     Each list line accepts: 123456789 / @username / Name @username /
     Name @username (123456789). User IDs are stored directly; usernames are
     resolved to a numeric ID via Telegram when possible and otherwise stored
-    as username-only records — no interaction from those users is required."""
+    as username-only records â€” no interaction from those users is required."""
     chat = message.chat
     chat_type = getattr(chat, 'type', None)
     is_chat = chat_type in ('group', 'supergroup', 'channel')
 
     if is_chat:
         if not _is_chat_admin_message(message):
-            _safe_reply(message, "❌ Only chat administrators can use /import.")
+            _safe_reply(message, "âŒ Only chat administrators can use /import.")
             return
         chat_id = chat.id
         args = message.text.split()[1:]
         list_args = args
     else:
         if not message.from_user or not ADMIN_ID or message.from_user.id != ADMIN_ID:
-            send_command_reply(message, "❌ Access denied.")
+            send_command_reply(message, "âŒ Access denied.")
             return
         args = message.text.split()[1:]
         if not args:
             send_command_reply(message,
-                "📥 *Import Member List*\n\n"
+                "ðŸ“¥ *Import Member List*\n\n"
                 "Send `/import <chat_id>` as a reply to a text message or a `.txt`/`.csv` "
                 "file containing the member list (copy it from the group's member list "
                 "in the Telegram app).\n\n"
                 "Each line can be:\n"
-                "• `123456789`\n"
-                "• `@username`\n"
-                "• `Name @username`\n"
-                "• `Name @username (123456789)`\n\n"
+                "â€¢ `123456789`\n"
+                "â€¢ `@username`\n"
+                "â€¢ `Name @username`\n"
+                "â€¢ `Name @username (123456789)`\n\n"
                 "Example: `/import -100123456789` replied to your list file.",
                 parse_mode="Markdown")
             return
         try:
             chat_id = int(args[0].strip())
         except ValueError:
-            send_command_reply(message, "❌ Invalid chat id. Usage: `/import <chat_id>`", parse_mode="Markdown")
+            send_command_reply(message, "âŒ Invalid chat id. Usage: `/import <chat_id>`", parse_mode="Markdown")
             return
         list_args = args[1:]
 
@@ -2637,7 +2633,7 @@ def import_members_handler(message):
                 downloaded = bot.download_file(file_info.file_path)
                 raw_text = downloaded.decode('utf-8', errors='replace')
             except Exception as e:
-                _safe_reply(message, f"❌ Could not read the file: {e}")
+                _safe_reply(message, f"âŒ Could not read the file: {e}")
                 return
     if not raw_text:
         raw_text = " ".join(list_args).replace(',', ' ').replace(';', '\n')
@@ -2645,11 +2641,11 @@ def import_members_handler(message):
     if not raw_text.strip():
         if is_chat:
             _safe_reply(message,
-                "❌ No member list found. Reply to a text message / file, or paste the list "
+                "âŒ No member list found. Reply to a text message / file, or paste the list "
                 "inline after /import.\nUsage: `/import @user1 123456789`", parse_mode="Markdown")
         else:
             send_command_reply(message,
-                "❌ No member list found. Reply to a text message / file, or paste the list "
+                "âŒ No member list found. Reply to a text message / file, or paste the list "
                 "inline after the chat id.\nUsage: `/import <chat_id> @user1 123456789`",
                 parse_mode="Markdown")
         return
@@ -2661,52 +2657,140 @@ def import_members_handler(message):
     if total == 0:
         if is_chat:
             _safe_reply(message,
-                "❌ No valid entries found in that input.\n\n"
+                "âŒ No valid entries found in that input.\n\n"
                 "Each line must contain a user ID or an `@username` (e.g. `@john_doe`).",
                 parse_mode="Markdown")
         else:
             send_command_reply(message,
-                "❌ No valid entries found in that input.\n\n"
+                "âŒ No valid entries found in that input.\n\n"
                 "Each line must contain a user ID or an `@username` (e.g. `@john_doe`).",
                 parse_mode="Markdown")
         return
 
-    unresolved = total - saved
-    summary = (
-        f"✅ *Import Complete!*\n"
-        f"📊 Stored *{saved}* entr{'y' if saved == 1 else 'ies'} for chat `{chat_id}`"
-        f"{f' ({unresolved} pending username resolution)' if unresolved else ''}."
-    )
+    summary = (f"âœ… *Import Complete!*\n"
+               f"ðŸ“Š Stored *{saved}* entr{'y' if saved == 1 else 'ies'} for chat `{chat_id}`.\n"
+               f"â€¢ Every username / user ID is now saved to the database â€” no user interaction needed.\n")
     if is_chat:
         _safe_reply(message, summary, parse_mode="Markdown")
     else:
         send_command_reply(message, summary, parse_mode="Markdown")
 
+def show_active_users(chat_id, message_id=None, user_id=None):
+    now = datetime.now().timestamp()
+    subs = [s for s in users_col.find({}) if is_active_subscription(s, now)]
+    markup = InlineKeyboardMarkup()
+
+    header = (
+        "ðŸ—‘ *Remove Subscriber Access*\n\n"
+        "ðŸ’¡ *Usage options:*\n"
+        "â€¢ Tap any user button below to remove access\n"
+        "â€¢ `/removeuser <user_id>` (e.g. `/removeuser 123456789`)\n"
+        "â€¢ `/removeuser @username` (e.g. `/removeuser @john_doe`)\n\n"
+    )
+
+    if not subs:
+        text = header + "â„¹ï¸ *Active Subscribers:* No active subscribers right now."
+        markup = None
+    else:
+        text = header + "ðŸ‘¥ *Active Subscribers:* Tap a user below to remove them immediately:"
+        for s in subs:
+            ch = channels_col.find_one({"channel_id": s['channel_id']})
+            ch_name = ch['name'] if ch else "Unknown Channel"
+
+            seen_u = seen_users_col.find_one({"user_id": s['user_id']})
+            if seen_u and seen_u.get('first_name'):
+                display_name = seen_u['first_name']
+                if seen_u.get('username'):
+                    display_name += f" (@{seen_u['username']})"
+            else:
+                display_name = str(s['user_id'])
+
+            if s.get('lifetime'):
+                time_str = "Lifetime â™¾ï¸"
+            else:
+                remaining = s['expiry'] - now
+                time_str = format_time_left(remaining)
+            markup.add(InlineKeyboardButton(f"ðŸ—‘ {display_name} â€” {ch_name} ({time_str} left)",
+                                             callback_data=f"rmuser_{s['user_id']}_{s['channel_id']}"))
+
+    if message_id:
+        # Reached by tapping a button -> auto-vanish
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        # Direct /removeuser command: send and schedule vanish after 15 s
+        reply = bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
+        schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
+        if user_id:
+            track_msg(user_id, reply)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('rmuser_') and not call.data.startswith('rmuserconfirm_') and call.data != 'rmuser_back')
+def confirm_remove_user(call):
+    try:
+        u_id, ch_id = parse_rmuser_callback(call.data)
+    except (ValueError, IndexError):
+        bot.answer_callback_query(call.id, "Invalid selection. Use /remove again.")
+        return
+    ch_data = channels_col.find_one({"channel_id": ch_id})
+    ch_name = escape_markdown(ch_data['name']) if ch_data else "Unknown Channel"
+    bot.answer_callback_query(call.id)
+
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("âœ… Yes, Remove Now", callback_data=f"rmuserconfirm_{u_id}_{ch_id}"))
+    markup.add(InlineKeyboardButton("âŒ Cancel", callback_data="rmuser_back"))
+    edit_menu(call.message.chat.id, call.message.message_id,
+        f"âš ï¸ Remove user `{u_id}` from *{ch_name}* right now, before their plan expires?",
+        reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data == "rmuser_back")
+def rmuser_back(call):
+    bot.answer_callback_query(call.id)
+    show_active_users(call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('rmuserconfirm_'))
+def remove_user_now(call):
+    try:
+        u_id, ch_id = parse_rmuser_callback(call.data)
+    except (ValueError, IndexError):
+        bot.answer_callback_query(call.id, "Invalid selection. Use /remove again.")
+        return
+
+    removed, detail = _kick_from_group(ch_id, u_id)
+    if not removed:
+        bot.answer_callback_query(call.id, "Could not remove user.")
+        send_admin_reply(f"âŒ Failed to remove user `{u_id}` from chat `{ch_id}`.\n\n{escape_markdown(detail)}", parse_mode="Markdown")
+        show_active_users(call.message.chat.id, call.message.message_id)
+        return
+
+    bot.answer_callback_query(call.id, "User removed.")
+
+    try:
+        rev_msg = bot.send_message(u_id, "âš ï¸ Your access has been revoked by the admin.")
+        schedule_delete(u_id, rev_msg.message_id, COMMAND_VANISH_SECONDS)
+    except Exception:
+        pass
+
+    send_admin_reply(f"âœ… Removed user `{u_id}` from chat `{ch_id}`. {escape_markdown(detail)}", parse_mode="Markdown")
+    show_active_users(call.message.chat.id, call.message.message_id)
+
 # Automate Kicking
 def kick_expired_users():
     now = datetime.now().timestamp()
     # Lifetime subscribers have expiry=None and are never kicked
-    expired_users = list(users_col.find({"expiry": {"$lte": now}, "lifetime": {"$ne": True}}))
+    expired_users = users_col.find({"expiry": {"$lte": now}, "lifetime": {"$ne": True}})
     bot_username = bot.get_me().username
 
     for user in expired_users:
         try:
-            removed, detail = _kick_from_group(user['channel_id'], user['user_id'])
+            removed, _ = _kick_from_group(user['channel_id'], user['user_id'])
+            if not removed:
+                continue
 
             rejoin_url = f"https://t.me/{bot_username}?start={user['channel_id']}"
-            markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🔄 Re-join / Renew", url=rejoin_url))
-            try:
-                bot.send_message(user['user_id'], "⚠️ Your subscription has expired.\n\nTo join again or renew, please click the button below:", reply_markup=markup)
-            except Exception:
-                pass
+            markup = InlineKeyboardMarkup().add(InlineKeyboardButton("ðŸ”„ Re-join / Renew", url=rejoin_url))
 
-            # _kick_from_group already deletes the users_col record when removal
-            # succeeds; if it failed (e.g. bot lost admin rights), still drop the
-            # record so an un-kickable stale entry doesn't get retried forever.
-            if not removed:
-                users_col.delete_one({"_id": user['_id']})
-        except Exception:
-            pass
+            exp_msg = bot.send_message(user['user_id'], "âš ï¸ Your subscription has expired.\n\nTo join again or renew, please click the button below:", reply_markup=markup)
+            users_col.delete_one({"_id": user['_id']})
+        except: pass
 
 # Automate Expiry Reminders (24h and 1h before a plan expires)
 def send_expiry_reminders():
@@ -2717,11 +2801,11 @@ def send_expiry_reminders():
         ch = channels_col.find_one({"channel_id": user['channel_id']})
         ch_name = ch['name'] if ch else "your channel"
         rejoin_url = f"https://t.me/{bot_username}?start={user['channel_id']}"
-        markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🔄 Renew Now", url=rejoin_url))
+        markup = InlineKeyboardMarkup().add(InlineKeyboardButton("ðŸ”„ Renew Now", url=rejoin_url))
         try:
             bot.send_message(
                 user['user_id'],
-                f"⏰ *Reminder:* your subscription to *{ch_name}* expires in {format_time_left(remaining)}.\n\n"
+                f"â° *Reminder:* your subscription to *{ch_name}* expires in {format_time_left(remaining)}.\n\n"
                 f"Renew now so you don't lose access!",
                 reply_markup=markup, parse_mode="Markdown"
             )
@@ -2755,7 +2839,7 @@ def bootstrap_counters():
         existing_sales = payments_col.count_documents({})
         existing_revenue = sum(p.get('amount', 0) for p in payments_col.find({}))
         counters_col.insert_one({"_id": "stats", "total_sales": existing_sales, "total_revenue": existing_revenue})
-        print(f"Bootstrapped counters from existing history: {existing_sales} sales, ₹{existing_revenue} revenue.")
+        print(f"Bootstrapped counters from existing history: {existing_sales} sales, â‚¹{existing_revenue} revenue.")
 
 if __name__ == '__main__':
     keep_alive()
@@ -2768,42 +2852,20 @@ if __name__ == '__main__':
     bot.remove_webhook()
     # Small pause so that if a previous deploy's instance is still shutting down
     # (common on Render during a redeploy), it has time to release the getUpdates
-    # connection before this instance starts polling — avoids a 409 Conflict.
+    # connection before this instance starts polling â€” avoids a 409 Conflict.
     import time
     time.sleep(2)
     setup_commands()
     print("Bot is running...")
     # skip_pending=True: ignore any updates that piled up while no instance was polling
     # (e.g. during a redeploy), so old messages aren't reprocessed on restart.
-    #
-    # infinity_polling normally already retries on most errors, but a 409 Conflict
-    # (another getUpdates poller still active — e.g. the previous Render deploy
-    # hasn't fully stopped yet) can surface as an unhandled ApiTelegramException
-    # that kills the whole process. Render then restarts the dyno immediately,
-    # which just repeats the same race. Wrap it in a retry loop with backoff so a
-    # transient overlap self-heals instead of crash-looping the service.
-    backoff = 3
-    while True:
-        try:
-            bot.infinity_polling(
-                timeout=20,
-                long_polling_timeout=10,
-                skip_pending=True,
-                allowed_updates=[
-                    'message', 'edited_message', 'callback_query',
-                    'channel_post', 'edited_channel_post',
-                    'chat_member', 'my_chat_member',
-                ],
-            )
-            break  # infinity_polling only returns on a clean stop
-        except telebot.apihelper.ApiTelegramException as e:
-            if e.error_code == 409:
-                print(f"⚠️ 409 Conflict (another poller still active) — retrying in {backoff}s...")
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 60)
-                continue
-            raise
-        except Exception as e:
-            print(f"⚠️ Polling crashed unexpectedly: {e} — retrying in {backoff}s...")
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 60)
+    bot.infinity_polling(
+        timeout=20,
+        long_polling_timeout=10,
+        skip_pending=True,
+        allowed_updates=[
+            'message', 'edited_message', 'callback_query',
+            'channel_post', 'edited_channel_post',
+            'chat_member', 'my_chat_member',
+        ],
+    )
