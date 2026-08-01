@@ -2775,13 +2775,35 @@ if __name__ == '__main__':
     print("Bot is running...")
     # skip_pending=True: ignore any updates that piled up while no instance was polling
     # (e.g. during a redeploy), so old messages aren't reprocessed on restart.
-    bot.infinity_polling(
-        timeout=20,
-        long_polling_timeout=10,
-        skip_pending=True,
-        allowed_updates=[
-            'message', 'edited_message', 'callback_query',
-            'channel_post', 'edited_channel_post',
-            'chat_member', 'my_chat_member',
-        ],
-    )
+    #
+    # infinity_polling normally already retries on most errors, but a 409 Conflict
+    # (another getUpdates poller still active — e.g. the previous Render deploy
+    # hasn't fully stopped yet) can surface as an unhandled ApiTelegramException
+    # that kills the whole process. Render then restarts the dyno immediately,
+    # which just repeats the same race. Wrap it in a retry loop with backoff so a
+    # transient overlap self-heals instead of crash-looping the service.
+    backoff = 3
+    while True:
+        try:
+            bot.infinity_polling(
+                timeout=20,
+                long_polling_timeout=10,
+                skip_pending=True,
+                allowed_updates=[
+                    'message', 'edited_message', 'callback_query',
+                    'channel_post', 'edited_channel_post',
+                    'chat_member', 'my_chat_member',
+                ],
+            )
+            break  # infinity_polling only returns on a clean stop
+        except telebot.apihelper.ApiTelegramException as e:
+            if e.error_code == 409:
+                print(f"⚠️ 409 Conflict (another poller still active) — retrying in {backoff}s...")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+                continue
+            raise
+        except Exception as e:
+            print(f"⚠️ Polling crashed unexpectedly: {e} — retrying in {backoff}s...")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
