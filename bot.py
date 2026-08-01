@@ -887,10 +887,11 @@ def _parse_member_line(line):
 def import_chat_members(chat_id, text):
     """Bulk-import a member list (usernames / user IDs) into chat_members_col.
 
-    Returns (imported, unresolved): imported is a list of {"user_id", "username"}
-    dicts, unresolved is a list of usernames that could not be mapped to a user ID."""
+    Returns a list of {"user_id", "username"} dicts. User IDs are stored as-is;
+    usernames are stored too — resolved to a numeric ID when possible, otherwise
+    kept as a username-only record (user_id=None) so importing by username never
+    requires the user to have interacted with the bot."""
     imported = []
-    unresolved = []
     for raw_line in text.splitlines():
         user_id, username = _parse_member_line(raw_line)
         if user_id:
@@ -900,37 +901,39 @@ def import_chat_members(chat_id, text):
             if resolved_id:
                 imported.append({"user_id": resolved_id, "username": resolved_name or username})
             else:
-                unresolved.append(username)
-    return imported, unresolved
+                imported.append({"user_id": None, "username": username})
+    return imported
 
-def store_imported_members(chat_id, imported, unresolved):
-    """Persist an import result. Returns the number of members stored as usable
-    (i.e. resolved to a numeric user ID that /remove can act on)."""
+def store_imported_members(chat_id, imported):
+    """Persist an import result. Returns the number of members stored.
+    Usernames that couldn't be resolved to a numeric ID are still stored as
+    username-only records so the import never requires user interaction."""
     saved = 0
     for item in imported:
         uid = item["user_id"]
         uname = item.get("username")
-        track_chat_member(chat_id, uid, uname, None)
-        try:
-            seen_users_col.update_one(
-                {"user_id": uid},
-                {"$set": {"user_id": uid, "username": uname or "", "last_seen": datetime.now()}},
-                upsert=True
-            )
-        except Exception:
-            pass
-        saved += 1
-    if unresolved:
-        try:
-            for u in unresolved:
-                chat_members_col.update_one(
-                    {"chat_id": chat_id, "user_id": None, "username": u},
-                    {"$set": {"chat_id": chat_id, "user_id": None, "username": u,
-                              "unresolved": True, "last_seen": datetime.now()}},
+        if uid:
+            track_chat_member(chat_id, uid, uname, None)
+            try:
+                seen_users_col.update_one(
+                    {"user_id": uid},
+                    {"$set": {"user_id": uid, "username": uname or "", "last_seen": datetime.now()}},
                     upsert=True
                 )
-        except Exception:
-            pass
+            except Exception:
+                pass
+            saved += 1
+        elif uname:
+            try:
+                chat_members_col.update_one(
+                    {"chat_id": chat_id, "user_id": None, "username": uname},
+                    {"$set": {"chat_id": chat_id, "user_id": None, "username": uname,
+                              "last_seen": datetime.now()}},
+                    upsert=True
+                )
+            except Exception:
+                pass
+            saved += 1
     return saved
 
 def _channel_subscriber_ids(chat_id):
@@ -2517,8 +2520,8 @@ def import_members_handler(message):
 
     Each list line accepts: 123456789 / @username / Name @username /
     Name @username (123456789). User IDs are stored directly; usernames are
-    resolved via Telegram when possible. Pre-existing group members that the
-    bot could not otherwise see become removable via /remove after import."""
+    resolved to a numeric ID via Telegram when possible and otherwise stored
+    as username-only records — no interaction from those users is required."""
     chat = message.chat
     chat_type = getattr(chat, 'type', None)
     is_chat = chat_type in ('group', 'supergroup', 'channel')
@@ -2586,10 +2589,10 @@ def import_members_handler(message):
                 parse_mode="Markdown")
         return
 
-    imported, unresolved = import_chat_members(chat_id, raw_text)
-    saved = store_imported_members(chat_id, imported, unresolved)
+    imported = import_chat_members(chat_id, raw_text)
+    saved = store_imported_members(chat_id, imported)
 
-    total = len(imported) + len(unresolved)
+    total = len(imported)
     if total == 0:
         if is_chat:
             _safe_reply(message,
@@ -2604,11 +2607,8 @@ def import_members_handler(message):
         return
 
     summary = (f"✅ *Import Complete!*\n"
-               f"📊 Read *{total}* entr{'y' if total == 1 else 'ies'} for chat `{chat_id}`.\n"
-               f"• Stored: *{saved}* — usable by `/remove @username` & `/remove all`\n")
-    if unresolved:
-        summary += (f"• Unresolved usernames: *{len(unresolved)}* — not removable yet, since the bot "
-                    f"hasn't met those users. They'll become usable once they message the bot.\n")
+               f"📊 Stored *{saved}* entr{'y' if saved == 1 else 'ies'} for chat `{chat_id}`.\n"
+               f"• Every username / user ID is now saved to the database — no user interaction needed.\n")
     if is_chat:
         _safe_reply(message, summary, parse_mode="Markdown")
     else:
