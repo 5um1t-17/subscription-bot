@@ -52,7 +52,7 @@ FACE_EMOJIS = [
 # All Telegram-supported reaction emojis (Bot API 7.x) — used to auto-react to every incoming message.
 # Telegram only accepts reactions from this specific set; arbitrary Unicode will be rejected.
 REACT_EMOJIS = [
-    "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
+    "👍", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
     "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡",
     "🥱", "🥴", "😍", "🐳", "🌚", "🌭", "💯", "🤣", "⚡", "🍌",
     "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "😈", "😴", "😭",
@@ -528,7 +528,7 @@ def _build_plan_selection(ch_data):
 
     markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="cart_browse"))
     markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
-    desc_part = f"\n\n📝 *About:* {ch_data['description']}" if ch_data.get('description') else ""
+    desc_part = f"\n\n📝 *About:* _*{ch_data['description']}*_" if ch_data.get('description') else ""
     text = f"Yoo \n\nAb yaha tak agaya hai to plan bhi lele dalle 😁 \n\nYou are joining: *{ch_data['name']}*.{desc_part}\n\nPlease select a subscription plan below:"
     return text, markup
 
@@ -635,8 +635,8 @@ def build_channel_list(user_id):
         markup.add(InlineKeyboardButton(f"🛒 View Cart ({len(items)}) — ₹{total}", callback_data="cart_view"))
 
     markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
-    text = ("👋 Welcome Dallo !\n\nShaana banne ki Koshish mat karna  😂😂\n\nPlease select a channel/group you'd like to join.\n\n"
-            "💡 You can add multiple channels to your cart and pay for all of them at once!")
+    text = ("👋 *Welcome Dallo !* \n\nShaana banne ki Koshish mat karna  😂😂\n\nPlease select a channel/group you'd like to join.\n\n"
+            "💡 _*You can add multiple channels to your cart and pay for all of them at once!*_")
     return text, markup
 
 def show_all_channels(chat_id, user_id):
@@ -1682,7 +1682,7 @@ def cart_checkout_handler(call):
     caption = (
         "🧾 *Checkout Summary*\n" + "\n".join(lines) +
         f"\n\n💰 *Total: ₹{total}*\nUPI ID: `{UPI_ID}`\n\n"
-        "Please complete the payment and tap 'I Have Paid', then send a screenshot to the admin."
+        "_*Please complete the payment and tap 'I Have Paid', then send a screenshot to the admin.*_"
     )
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ I Have Paid", callback_data=f"coutpaid_{token}"))
