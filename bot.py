@@ -664,7 +664,7 @@ def edit_all_channels(chat_id, message_id, user_id, message_obj=None):
                   reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}")),
                   message_obj=message_obj)
         return
-    edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown", message_obj=message_obj)
+    edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=message_obj)
 
 
 def format_time_left(seconds):
@@ -1719,10 +1719,11 @@ def cout_paid_handler(call):
     # can still scan it if they need to go back and complete the payment.
     schedule_delete(call.message.chat.id, call.message.message_id, PAYMENT_VANISH_SECONDS)
 
-    # Awaiting the screenshot -> never auto-vanish
+    # Awaiting the screenshot -> auto-vanish after 60 seconds
     msg = send_prompt(call.message.chat.id,
         "📸 Please send a screenshot of your payment receipt now.\n\n"
         "If you tapped 'I Have Paid' by mistake, type /cancel to cancel the payment.")
+    schedule_delete(call.message.chat.id, msg.message_id, 60)
     bot.register_next_step_handler(msg, receive_cart_screenshot, token)
 
 def receive_cart_screenshot(message, token):
@@ -1739,6 +1740,7 @@ def receive_cart_screenshot(message, token):
         msg = send_prompt(message.chat.id,
             "❌ That doesn't look like a photo. Please send a screenshot image of your payment receipt.\n\n"
             "If you tapped 'I Have Paid' by mistake, type /cancel to cancel the payment.")
+        schedule_delete(message.chat.id, msg.message_id, 60)
         bot.register_next_step_handler(msg, receive_cart_screenshot, token)
         return
 
