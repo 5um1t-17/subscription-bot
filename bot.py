@@ -4,6 +4,7 @@ import random
 import re
 import time
 import io
+from html import escape
 import telebot
 import segno
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -52,7 +53,7 @@ FACE_EMOJIS = [
 # All Telegram-supported reaction emojis (Bot API 7.x) — used to auto-react to every incoming message.
 # Telegram only accepts reactions from this specific set; arbitrary Unicode will be rejected.
 REACT_EMOJIS = [
-    "👍", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
+    "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
     "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡",
     "🥱", "🥴", "😍", "🐳", "🌚", "🌭", "💯", "🤣", "⚡", "🍌",
     "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "😈", "😴", "😭",
@@ -528,8 +529,8 @@ def _build_plan_selection(ch_data):
 
     markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="cart_browse"))
     markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
-    desc_part = f"\n\n📝 *About:* _*{ch_data['description']}*_" if ch_data.get('description') else ""
-    text = f"Yoo \n\nAb yaha tak agaya hai to plan bhi lele dalle 😁 \n\nYou are joining: *{ch_data['name']}*.{desc_part}\n\nPlease select a subscription plan below:"
+    desc_part = f"\n\n📝 <b>About:</b> <b><i>{escape(ch_data['description'])}</i></b>" if ch_data.get('description') else ""
+    text = f"Yoo \n\nAb yaha tak agaya hai to plan bhi lele dalle 😁 \n\nYou are joining: <b>{escape(ch_data['name'])}</b>.{desc_part}\n\nPlease select a subscription plan below:"
     return text, markup
 
 def send_plan_selection(chat_id, ch_data):
@@ -543,7 +544,7 @@ def send_plan_selection(chat_id, ch_data):
             return
         except Exception:
             pass  # fallback to text if photo fails
-    bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+    bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
 
 def edit_plan_selection(chat_id, message_id, ch_data):
     """Used when a user taps a channel button.
@@ -560,14 +561,14 @@ def edit_plan_selection(chat_id, message_id, ch_data):
         except Exception:
             pass
         try:
-            msg = bot.send_photo(chat_id, screenshot, caption=text, reply_markup=markup, parse_mode="Markdown")
+            msg = bot.send_photo(chat_id, screenshot, caption=text, reply_markup=markup, parse_mode="HTML")
             schedule_delete(chat_id, msg.message_id, MENU_VANISH_SECONDS)
         except Exception:
             # Screenshot broken — fallback to plain text
-            fallback = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+            fallback = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
             schedule_delete(chat_id, fallback.message_id, MENU_VANISH_SECONDS)
     else:
-        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML")
 
 # --- SHOPPING CART (multi-channel checkout) ---
 
@@ -635,8 +636,8 @@ def build_channel_list(user_id):
         markup.add(InlineKeyboardButton(f"🛒 View Cart ({len(items)}) — ₹{total}", callback_data="cart_view"))
 
     markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
-    text = ("👋 *Welcome Dallo !* \n\nShaana banne ki Koshish mat karna  😂😂\n\nPlease select a channel/group you'd like to join.\n\n"
-            "💡 _*You can add multiple channels to your cart and pay for all of them at once!*_")
+    text = ("👋 <b>Welcome Dallo !</b> \n\nShaana banne ki Koshish mat karna  😂😂\n\nPlease select a channel/group you'd like to join.\n\n"
+            "💡 <b><i>You can add multiple channels to your cart and pay for all of them at once!</i></b>")
     return text, markup
 
 def show_all_channels(chat_id, user_id):
@@ -650,7 +651,7 @@ def show_all_channels(chat_id, user_id):
         schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
         track_msg(user_id, reply)
         return
-    reply = bot.send_message(chat_id, text, reply_markup=markup)
+    reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
     schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
     track_msg(user_id, reply)
 
@@ -663,7 +664,7 @@ def edit_all_channels(chat_id, message_id, user_id, message_obj=None):
                   reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}")),
                   message_obj=message_obj)
         return
-    edit_menu(chat_id, message_id, text, reply_markup=markup, message_obj=message_obj)
+    edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown", message_obj=message_obj)
 
 
 def format_time_left(seconds):
@@ -1680,9 +1681,9 @@ def cart_checkout_handler(call):
 
     lines = [f"• {escape_markdown(i['name'])} — {format_label(i['t'])} — ₹{i['price']}" for i in items]
     caption = (
-        "🧾 *Checkout Summary*\n" + "\n".join(lines) +
-        f"\n\n💰 *Total: ₹{total}*\nUPI ID: `{UPI_ID}`\n\n"
-        "_*Please complete the payment and tap 'I Have Paid', then send a screenshot to the admin.*_"
+        "🧾 <b>Checkout Summary</b>\n" + "\n".join(lines) +
+        f"\n\n💰 <b>Total: ₹{total}</b>\nUPI ID: <code>{UPI_ID}</code>\n\n"
+        "<b><i>Please complete the payment and tap 'I Have Paid', then send a screenshot to the admin.</i></b>"
     )
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ I Have Paid", callback_data=f"coutpaid_{token}"))
@@ -1694,7 +1695,7 @@ def cart_checkout_handler(call):
     try:
         qr_file = _make_payment_qr(UPI_ID, total)
         msg = bot.send_photo(call.message.chat.id, InputFile(qr_file, 'payment_qr.png'),
-                             caption=caption, reply_markup=markup, parse_mode="Markdown")
+                             caption=caption, reply_markup=markup, parse_mode="HTML")
         schedule_delete(call.message.chat.id, msg.message_id, QR_SHOW_SECONDS)
     except Exception:
         # If the QR can't be shown, clean up the checkout instead of leaving it stuck.
