@@ -53,7 +53,7 @@ FACE_EMOJIS = [
 # All Telegram-supported reaction emojis (Bot API 7.x) — used to auto-react to every incoming message.
 # Telegram only accepts reactions from this specific set; arbitrary Unicode will be rejected.
 REACT_EMOJIS = [
-    "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
+    "👍", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
     "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡",
     "🥱", "🥴", "😍", "🐳", "🌚", "🌭", "💯", "🤣", "⚡", "🍌",
     "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "😈", "😴", "😭",
@@ -272,6 +272,7 @@ DECISION_VANISH_SECONDS = 15    # how long the approval/rejection receipt stays 
 ADMIN_REPLY_VANISH_SECONDS = 10 # how long admin confirmation/error replies stay before auto-deleting
 SYNC_VANISH_SECONDS = 60        # how long /sync's long member-list replies stay before auto-deleting
 QR_SHOW_SECONDS = 90            # how long the initial QR is shown before 'I Have Paid' is clicked
+DEFAULT_VANISH_SECONDS = 90     # fallback for bot messages/replies that don't have a custom vanish rule
 
 pending_deletes = {}  # (chat_id, message_id) -> Timer
 last_bot_msg = {}    # user_id -> (chat_id, message_id)  — for animated dismissal of old replies
@@ -296,6 +297,41 @@ def schedule_delete(chat_id, message_id, delay=MENU_VANISH_SECONDS):
     timer.daemon = True
     pending_deletes[key] = timer
     timer.start()
+
+_original_send_message = bot.send_message
+_original_reply_to = bot.reply_to
+_original_send_photo = bot.send_photo
+
+def _vanishing_send_message(chat_id, text, *args, **kwargs):
+    vanish_delay = kwargs.pop('vanish_delay', DEFAULT_VANISH_SECONDS)
+    msg = _original_send_message(chat_id, text, *args, **kwargs)
+    if msg and getattr(msg, 'message_id', None) and vanish_delay is not None:
+        schedule_delete(chat_id, msg.message_id, vanish_delay)
+    return msg
+
+
+def _vanishing_reply_to(message, text, *args, **kwargs):
+    vanish_delay = kwargs.pop('vanish_delay', DEFAULT_VANISH_SECONDS)
+    msg = _original_reply_to(message, text, *args, **kwargs)
+    if msg and getattr(msg, 'message_id', None) and vanish_delay is not None:
+        try:
+            schedule_delete(msg.chat.id, msg.message_id, vanish_delay)
+        except Exception:
+            pass
+    return msg
+
+
+def _vanishing_send_photo(chat_id, photo, *args, **kwargs):
+    vanish_delay = kwargs.pop('vanish_delay', DEFAULT_VANISH_SECONDS)
+    msg = _original_send_photo(chat_id, photo, *args, **kwargs)
+    if msg and getattr(msg, 'message_id', None) and vanish_delay is not None:
+        schedule_delete(chat_id, msg.message_id, vanish_delay)
+    return msg
+
+
+bot.send_message = _vanishing_send_message
+bot.reply_to = _vanishing_reply_to
+bot.send_photo = _vanishing_send_photo
 
 def send_menu(chat_id, text, reply_markup=None, parse_mode=None, delay=MENU_VANISH_SECONDS):
     """Send a button-driven menu message; it self-deletes after `delay` seconds of inactivity."""
@@ -2173,6 +2209,53 @@ def do_broadcast(message):
     res_msg = bot.send_message(ADMIN_ID, result)
     schedule_delete(ADMIN_ID, res_msg.message_id, 30)
 
+def show_active_users(chat_id, user_id=None):
+    """Show a simple list of active subscribers for the admin to remove manually.
+    This is the fallback when /removeuser is used without arguments."""
+    now = datetime.now().timestamp()
+    admin_channel_ids = _admin_channel_ids()
+    if not admin_channel_ids:
+        bot.send_message(chat_id, "ℹ️ No channels are registered for this admin yet.")
+        return
+
+    subs = []
+    for s in users_col.find({}):
+        if not is_active_subscription(s, now):
+            continue
+        try:
+            ch_id = int(s['channel_id'])
+            if ch_id in admin_channel_ids:
+                subs.append(s)
+        except (TypeError, ValueError):
+            continue
+
+    if not subs:
+        bot.send_message(chat_id, "ℹ️ No active subscribers found to remove.")
+        return
+
+    lines = ["👤 Active subscribers:"]
+    for s in sorted(subs, key=lambda x: (x.get('channel_id', ''), x.get('user_id', 0))):
+        ch_name = "Unknown channel"
+        try:
+            ch = channels_col.find_one({"channel_id": int(s['channel_id'])})
+            if ch:
+                ch_name = ch.get('name') or f"Channel {s['channel_id']}"
+        except Exception:
+            pass
+
+        uid = s.get('user_id')
+        uname = s.get('username') or ""
+        if uname:
+            lines.append(f"• {uid} — @{uname} — {ch_name}")
+        else:
+            lines.append(f"• {uid} — {ch_name}")
+
+    text = "\n".join(lines[:40])
+    if len(lines) > 40:
+        text += "\n\nUse `/removeuser <user_id>` or `/removeuser <username>` to remove one directly."
+    bot.send_message(chat_id, text, parse_mode="Markdown")
+
+
 @bot.message_handler(commands=['removeuser'])
 def removeuser_handler(message):
     if not message.from_user:
@@ -2276,7 +2359,7 @@ def removeuser_handler(message):
 @bot.channel_post_handler(commands=['remove'])
 def group_remove_handler(message):
     """In groups/channels: any chat admin can kick members. In private DM: same as /removeuser for bot owner."""
-    if message.chat.type == 'private':
+    if getattr(message.chat, 'type', None) == 'private':
         removeuser_handler(message)
         return
 
