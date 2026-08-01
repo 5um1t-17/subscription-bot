@@ -273,8 +273,10 @@ ADMIN_REPLY_VANISH_SECONDS = 10 # how long admin confirmation/error replies stay
 SYNC_VANISH_SECONDS = 60        # how long /sync's long member-list replies stay before auto-deleting
 QR_SHOW_SECONDS = 90            # how long the initial QR is shown before 'I Have Paid' is clicked
 DEFAULT_VANISH_SECONDS = 90     # fallback for bot messages/replies that don't have a custom vanish rule
+APPROVAL_LINK_VANISH_SECONDS = 5 * 60 * 60  # 5 hours for a payment-approved join-link message
 
 pending_deletes = {}  # (chat_id, message_id) -> Timer
+pending_review_messages = {}  # token -> {'user_chat_id':..., 'user_msg_id':..., 'admin_chat_id':..., 'admin_msg_id':...}
 last_bot_msg = {}    # user_id -> (chat_id, message_id)  — for animated dismissal of old replies
 
 def cancel_delete(chat_id, message_id):
@@ -332,6 +334,19 @@ def _vanishing_send_photo(chat_id, photo, *args, **kwargs):
 bot.send_message = _vanishing_send_message
 bot.reply_to = _vanishing_reply_to
 bot.send_photo = _vanishing_send_photo
+
+def _clear_pending_review_messages(token):
+    entry = pending_review_messages.pop(token, None)
+    if not entry:
+        return
+    for chat_id, msg_id in ((entry.get('user_chat_id'), entry.get('user_msg_id')), (entry.get('admin_chat_id'), entry.get('admin_msg_id'))):
+        if chat_id and msg_id:
+            cancel_delete(chat_id, msg_id)
+            try:
+                bot.delete_message(chat_id, msg_id)
+            except Exception:
+                pass
+
 
 def send_menu(chat_id, text, reply_markup=None, parse_mode=None, delay=MENU_VANISH_SECONDS):
     """Send a button-driven menu message; it self-deletes after `delay` seconds of inactivity."""
@@ -1806,7 +1821,7 @@ def receive_cart_screenshot(message, token):
     )
     # Not auto-vanished yet: only vanishes shortly AFTER the admin approves/rejects (see below)
     try:
-        bot.send_photo(ADMIN_ID, file_id, caption=caption, reply_markup=markup, parse_mode="Markdown")
+        admin_msg = bot.send_photo(ADMIN_ID, file_id, caption=caption, reply_markup=markup, parse_mode="Markdown", vanish_delay=None)
     except Exception as e:
         # Don't leave the user hanging mid-flow — tell them delivery failed and ping the admin
         try:
@@ -1821,8 +1836,13 @@ def receive_cart_screenshot(message, token):
         return
 
     u_markup = InlineKeyboardMarkup().add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
-    conf_msg = bot.send_message(message.chat.id, "✅ Your receipt has been sent for verification. Please wait for Admin approval.\nApproval time : 5-10 minutes \nBe Patient", reply_markup=u_markup)
-    schedule_delete(message.chat.id, conf_msg.message_id, COMMAND_VANISH_SECONDS)
+    conf_msg = bot.send_message(message.chat.id, "✅ Your receipt has been sent for verification. Please wait for Admin approval.\nApproval time : 5-10 minutes \nBe Patient", reply_markup=u_markup, vanish_delay=None)
+    pending_review_messages[token] = {
+        'user_chat_id': message.chat.id,
+        'user_msg_id': conf_msg.message_id,
+        'admin_chat_id': ADMIN_ID,
+        'admin_msg_id': getattr(admin_msg, 'message_id', None),
+    }
 
     # Cart has now moved into the pending checkout — clear it so a fresh /buy starts empty
     user_carts.pop(message.from_user.id, None)
@@ -1895,10 +1915,11 @@ def cout_reject_handler(call):
         doc = None
     if doc:
         try:
-            rej_msg = bot.send_message(doc['user_id'], "❌ Your payment could not be verified. Please contact the admin for help.")
+            rej_msg = bot.send_message(doc['user_id'], "❌ Your payment could not be verified. Please contact the admin for help.", vanish_delay=None)
             schedule_delete(doc['user_id'], rej_msg.message_id, COMMAND_VANISH_SECONDS)
         except: pass
         pending_checkouts_col.delete_one({"_id": ObjectId(token)})
+    _clear_pending_review_messages(token)
     # Vanishes shortly after the decision is made (not before)
     edit_caption_menu(call.message.chat.id, call.message.message_id,
         "❌ Rejected this checkout.\n(this message will vanish shortly)",
@@ -1939,7 +1960,7 @@ def cout_approve_handler(call):
                 pass  # Not in channel / already not banned — safe to ignore
 
             if t == "lifetime":
-                link = bot.create_chat_invite_link(ch_id, member_limit=1)  # no expiry
+                link = bot.create_chat_invite_link(ch_id, member_limit=1)  # single-use invite; expires on first join
                 users_col.update_one(
                     {"user_id": u_id, "channel_id": ch_id},
                     {"$set": {"expiry": None, "lifetime": True, "reminded_24h": True, "reminded_1h": True}},
@@ -1947,7 +1968,7 @@ def cout_approve_handler(call):
                 )
                 result_lines.append(f"• {name} — Lifetime ♾️\nJoin Link: {link.invite_link}")
             else:
-                mins = int(t)
+                mins = min(int(t), 300)
                 expiry_datetime = datetime.now() + timedelta(minutes=mins)
                 expiry_ts = int(expiry_datetime.timestamp())
                 link = bot.create_chat_invite_link(ch_id, member_limit=1, expire_date=expiry_ts)
@@ -1977,17 +1998,17 @@ def cout_approve_handler(call):
 
     if result_lines:
         try:
-            bot.send_message(u_id,
+            appr_msg = bot.send_message(u_id,
                 "🥳 *Payment Approved!*\n\n" + "\n\n".join(result_lines) +
                 "\n\n⚠️ Note: Each link/access expires per its own plan (unless marked Lifetime).\n\nEnjoyyy!!!",
-                parse_mode="Markdown")
-            # Approval message stays for a bit longer so user can read and copy the join link
-            # (no schedule_delete here — this is an important message the user needs to act on)
+                parse_mode="Markdown", vanish_delay=None)
+            schedule_delete(u_id, appr_msg.message_id, APPROVAL_LINK_VANISH_SECONDS)
         except Exception:
             try:
-                bot.send_message(u_id,
+                appr_msg = bot.send_message(u_id,
                     "🥳 Payment Approved!\n\n" + "\n\n".join(result_lines) +
-                    "\n\nNote: Each link/access expires per its own plan (unless marked Lifetime).")
+                    "\n\nNote: Each link/access expires per its own plan (unless marked Lifetime).", vanish_delay=None)
+                schedule_delete(u_id, appr_msg.message_id, APPROVAL_LINK_VANISH_SECONDS)
             except Exception:
                 pass
 
@@ -2003,6 +2024,8 @@ def cout_approve_handler(call):
             schedule_delete(ADMIN_ID, err_msg.message_id, ADMIN_REPLY_VANISH_SECONDS)
         except Exception:
             pass
+
+    _clear_pending_review_messages(token)
 
     # Vanishes shortly after the decision is made (not before)
     try:
