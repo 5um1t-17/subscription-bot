@@ -355,14 +355,23 @@ def _safe_reply(message, text, parse_mode=None, delay=COMMAND_VANISH_SECONDS):
     """reply_to works in supergroups, but plain channels don't support message
     replies — there it silently fails and the admin sees nothing. Fall back to
     sending a regular message in that case. The reply auto-vanishes after
-    `delay` seconds (default 20 s), keeping group/channel chat clean."""
-    try:
-        msg = bot.reply_to(message, text, parse_mode=parse_mode)
-    except Exception:
+    `delay` seconds (default 20 s), keeping group/channel chat clean.
+    If a Markdown-formatted message is rejected by Telegram (e.g. an unescaped
+    character in a user's name breaks entity parsing), it is re-sent as plain
+    text instead of being silently dropped."""
+    def _send_with(parse):
         try:
-            msg = bot.send_message(message.chat.id, text, parse_mode=parse_mode)
+            return bot.reply_to(message, text, parse_mode=parse)
         except Exception:
-            return None
+            try:
+                return bot.send_message(message.chat.id, text, parse_mode=parse)
+            except Exception:
+                return None
+
+    msg = _send_with(parse_mode)
+    if msg is None and parse_mode:
+        # Telegram rejected the Markdown — resend without formatting
+        msg = _send_with(None)
     if msg and getattr(message.chat, 'type', None) in ('group', 'supergroup', 'channel'):
         schedule_delete(message.chat.id, msg.message_id, delay)
     return msg
@@ -2437,20 +2446,23 @@ def sync_handler(message):
         user_lines = []
         for m in members:
             uid = m.get('user_id')
-            if not uid or uid == bot_uid:
-                continue
-            name = m.get('first_name') or 'Unknown'
             uname = m.get('username')
+            if uid == bot_uid:
+                continue
+            if not uid:
+                # Username-only record (imported via /import but not yet resolved to a
+                # numeric ID) — show it so imported members are visible after a sync.
+                if uname:
+                    user_lines.append(f"• @{escape_markdown(uname)} — ⏳ awaiting numeric ID")
+                continue
+            name = escape_markdown(m.get('first_name') or 'Unknown')
             tag = ""
             if uid in admin_ids:
                 tag = " 👑(admin)"
             if uname:
-                user_lines.append(f"• {name} (@{uname}) — `{uid}`{tag}")
+                user_lines.append(f"• {name} (@{escape_markdown(uname)}) — `{uid}`{tag}")
             else:
                 user_lines.append(f"• {name} — `{uid}`{tag}")
-
-        header = f"✅ *Sync Complete!*\n📊 Stored *{len(user_lines)}* user(s) in the database.\n\n*Synced users are:*\n"
-        _safe_reply(message, header, parse_mode="Markdown", delay=SYNC_VANISH_SECONDS)
 
         if not user_lines:
             _safe_reply(message,
@@ -2462,18 +2474,18 @@ def sync_handler(message):
             )
             return
 
-        # Telegram caps a message at ~4096 chars — send the list in chunks
-        chunk = []
-        chunk_len = 0
+        # First message carries the header plus the user list; if that would exceed
+        # ~3500 chars (Telegram caps a message at ~4096), the remainder is sent as
+        # "👥" continuation chunks. Names/usernames are escaped so a stray '_' in a
+        # member's name can't make Telegram reject the whole message.
+        header = f"✅ *Sync Complete!*\n📊 Stored *{len(user_lines)}* user(s) in the database.\n\n*Synced users are:*\n"
+        messages = [header]
         for line in user_lines:
-            chunk_len += len(line) + 1
-            if chunk_len > 3500 and chunk:
-                _safe_reply(message, "👥 " + "\n".join(chunk), parse_mode="Markdown", delay=SYNC_VANISH_SECONDS)
-                chunk = []
-                chunk_len = len(line) + 1
-            chunk.append(line)
-        if chunk:
-            _safe_reply(message, "👥 " + "\n".join(chunk), parse_mode="Markdown", delay=SYNC_VANISH_SECONDS)
+            if len(messages[-1]) + len(line) + 1 > 3500:
+                messages.append("👥 ")
+            messages[-1] += line + "\n"
+        for text in messages:
+            _safe_reply(message, text, parse_mode="Markdown", delay=SYNC_VANISH_SECONDS)
         return
 
     # ---- Private DM (bot owner only): tracked chats overview / targeted sync ----
