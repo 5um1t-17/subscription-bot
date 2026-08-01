@@ -707,8 +707,10 @@ def _sleep_retry_after(e):
     time.sleep(max(0.5, retry_after))
 
 def remove_user_from_chat(chat_id, user_id):
-    """Ban a user from a channel/group so they lose access immediately.
-    Returns (removed: bool, detail: str). Keeps the ban in place so old invite links can't be reused."""
+    """Kick a user from a channel/group so they lose access immediately.
+    Returns (removed: bool, detail: str). The user is unbanned right after the
+    kick so they are not kept on a permanent block list — they can rejoin the
+    group/channel again in the future."""
     chat_id = int(chat_id)
     user_id = int(user_id)
 
@@ -736,7 +738,12 @@ def remove_user_from_chat(chat_id, user_id):
     for attempt in range(3):
         try:
             bot.ban_chat_member(chat_id, user_id)
-            # Deliberately do NOT unban — they are unbanned only when a new plan is approved.
+            # Kick is done. Immediately unban so the user is NOT kept on a permanent
+            # block list — they can rejoin the group/channel again in the future.
+            try:
+                bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
+            except Exception:
+                pass
             return True, "Removed from chat."
         except telebot.apihelper.ApiTelegramException as e:
             if e.error_code == 429:
@@ -883,14 +890,42 @@ def _parse_member_line(line):
     """Parse one member-list line into (user_id, username); either may be None.
 
     Accepts: 123456789 / @username / Name @username / Name @username (123456789)
-    / 123456789 Name, etc. Lines starting with '#' or '//' are skipped as comments."""
+    / 123456789 Name, etc. CSV lines like "ID,username,First,Last" are parsed
+    too. Lines starting with '#' or '//' are skipped as comments."""
     line = line.strip()
     if not line or line.startswith('#') or line.startswith('//'):
         return None, None
+    if ',' in line:
+        return _parse_csv_member_line(line)
     ids = [int(x) for x in _MEMBER_LINE_RE_ID.findall(line)]
     unames = [u for u in _MEMBER_LINE_RE_USERNAME.findall(line)]
     user_id = ids[0] if ids else None
     username = unames[0] if unames else None
+    return user_id, username
+
+def _parse_csv_member_line(line):
+    """Parse a comma-separated row: User ID,Username,First Name,Last Name.
+    The header row is skipped. Only the ID and username columns are kept."""
+    fields = [f.strip() for f in line.split(',')]
+    if fields and fields[0].lower().startswith('user id'):
+        return None, None
+    user_id = None
+    username = None
+    for i, field in enumerate(fields):
+        if not field:
+            continue
+        if i == 0:
+            try:
+                user_id = int(field)
+                continue
+            except ValueError:
+                pass
+        if username is None:
+            candidate = field.lstrip('@')
+            if len(candidate) >= 5 and re.fullmatch(r'[A-Za-z0-9_]+', candidate):
+                username = candidate
+        if user_id is not None and username is not None:
+            break
     return user_id, username
 
 def import_chat_members(chat_id, text):
@@ -1005,7 +1040,9 @@ def _admin_active_subscriber_ids():
     return ids
 
 def _kick_from_group(chat_id, user_id):
-    """Remove user from this group/channel. Keeps ban so they cannot rejoin with old links."""
+    """Remove user from this group/channel. The user is unbanned right after the
+    kick (see remove_user_from_chat) so they are not kept on a block list and
+    can rejoin the group/channel again in the future."""
     removed, detail = remove_user_from_chat(chat_id, user_id)
     if removed:
         users_col.delete_one({"user_id": user_id, "channel_id": chat_id})
@@ -1535,6 +1572,19 @@ QR_ACCENT_CSS = '#053366'
 QR_LOGO_TEXT = 'AB'
 _BUNDLED_FONT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'fonts', 'Poppins-Bold.ttf')
 
+# Curated dark palettes for the payment QR. A different colour is picked at random
+# on every QR generation so each invoice looks distinct while staying scannable.
+QR_COLOR_PALETTES = [
+    ((11, 83, 148), (5, 51, 102), '#0B5394', '#053366'),  # deep blue
+    ((11, 100, 60), (4, 62, 36), '#0B643C', '#043E24'),  # forest green
+    ((132, 20, 66), (82, 8, 38), '#841442', '#520826'),  # crimson
+    ((90, 24, 154), (54, 12, 96), '#5A189A', '#360C60'),  # royal purple
+    ((146, 58, 0), (92, 34, 0), '#923A00', '#5C2200'),   # burnt orange
+    ((0, 77, 105), (0, 46, 64), '#004D69', '#002E40'),   # teal
+    ((72, 45, 120), (42, 26, 72), '#482D78', '#2A1A48'), # violet
+    ((104, 72, 0), (62, 42, 0), '#684800', '#3E2A00'),   # amber-brown
+]
+
 def _qr_logo_font(size):
     """Bold font for the 'AB' logo: prefer the bundled Poppins-Bold, else a system
     TTF, else Pillow's scalable built-in default font."""
@@ -1552,7 +1602,7 @@ def _qr_logo_font(size):
     except TypeError:
         return ImageFont.load_default()
 
-def _make_ab_logo(size):
+def _make_ab_logo(size, brand_hex=QR_BRAND_HEX):
     """Render a crisp rounded-square 'AB' logo: soft drop shadow, clean white tile
     with a thin brand ring, and bold brand-blue text — all anti-aliased for a
     sharp, modern look. Transparent background, ready for pasting."""
@@ -1574,7 +1624,7 @@ def _make_ab_logo(size):
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle(
         [pad, pad, size - 1 - pad, size - 1 - pad], radius=radius,
-        fill=(255, 255, 255, 255), outline=QR_BRAND_HEX + (255,), width=ring)
+        fill=(255, 255, 255, 255), outline=brand_hex + (255,), width=ring)
 
     # 3) Bold 'AB' in brand blue, optically centered
     font = _qr_logo_font(int(size * 0.46))
@@ -1582,23 +1632,25 @@ def _make_ab_logo(size):
     bbox = draw.textbbox((0, 0), QR_LOGO_TEXT, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     draw.text(((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]),
-              QR_LOGO_TEXT, fill=QR_BRAND_HEX + (255,), font=font)
+              QR_LOGO_TEXT, fill=brand_hex + (255,), font=font)
     return img
 
 def _make_payment_qr(upi_id, amount):
     """Generate a styled, logo-embedded payment QR (UPI deep link) as a BytesIO
     PNG stream ready for send_photo. High error correction keeps the centered
     'AB' logo from breaking scanning; a crisp scale + two-tone finder patterns
-    give it a sharp, modern look."""
+    give it a sharp, modern look. A random colour palette is picked on every
+    call so each generated QR looks different."""
     data = f"upi://pay?pa={upi_id}&am={amount}&cu=INR"
+    brand_hex, accent_hex, brand_css, accent_css = random.choice(QR_COLOR_PALETTES)
     buf = io.BytesIO()
     segno.make(data, error='h').save(
         buf, kind='png', scale=14, border=3,
-        dark=QR_BRAND_CSS, light='#FFFFFF',
-        finder_dark=QR_ACCENT_CSS, finder_light='#FFFFFF')
+        dark=brand_css, light='#FFFFFF',
+        finder_dark=accent_css, finder_light='#FFFFFF')
     buf.seek(0)
     img = Image.open(buf).convert('RGB')
-    logo = _make_ab_logo(int(img.size[0] * 0.23))
+    logo = _make_ab_logo(int(img.size[0] * 0.23), brand_hex=brand_hex)
     img.paste(logo, ((img.size[0] - logo.size[0]) // 2, (img.size[1] - logo.size[1]) // 2), logo)
     out = io.BytesIO()
     img.save(out, format='PNG')
@@ -1840,7 +1892,8 @@ def cout_approve_handler(call):
         name = item['name']
         try:
             # Unban the user first in case they were previously kicked/expired and are repurchasing.
-            # This is the ONLY place where a banned user gets unban — tied to a real payment approval.
+            # remove_user_from_chat already unbans right after a kick, so this is just a safety
+            # net for any user who was banned before that change.
             try:
                 bot.unban_chat_member(ch_id, u_id, only_if_banned=True)
             except Exception:
@@ -2618,130 +2671,42 @@ def import_members_handler(message):
                 parse_mode="Markdown")
         return
 
-    summary = (f"✅ *Import Complete!*\n"
-               f"📊 Stored *{saved}* entr{'y' if saved == 1 else 'ies'} for chat `{chat_id}`.\n"
-               f"• Every username / user ID is now saved to the database — no user interaction needed.\n")
+    unresolved = total - saved
+    summary = (
+        f"✅ *Import Complete!*\n"
+        f"📊 Stored *{saved}* entr{'y' if saved == 1 else 'ies'} for chat `{chat_id}`"
+        f"{f' ({unresolved} pending username resolution)' if unresolved else ''}."
+    )
     if is_chat:
         _safe_reply(message, summary, parse_mode="Markdown")
     else:
         send_command_reply(message, summary, parse_mode="Markdown")
 
-def show_active_users(chat_id, message_id=None, user_id=None):
-    now = datetime.now().timestamp()
-    subs = [s for s in users_col.find({}) if is_active_subscription(s, now)]
-    markup = InlineKeyboardMarkup()
-
-    header = (
-        "🗑 *Remove Subscriber Access*\n\n"
-        "💡 *Usage options:*\n"
-        "• Tap any user button below to remove access\n"
-        "• `/removeuser <user_id>` (e.g. `/removeuser 123456789`)\n"
-        "• `/removeuser @username` (e.g. `/removeuser @john_doe`)\n\n"
-    )
-
-    if not subs:
-        text = header + "ℹ️ *Active Subscribers:* No active subscribers right now."
-        markup = None
-    else:
-        text = header + "👥 *Active Subscribers:* Tap a user below to remove them immediately:"
-        for s in subs:
-            ch = channels_col.find_one({"channel_id": s['channel_id']})
-            ch_name = ch['name'] if ch else "Unknown Channel"
-
-            seen_u = seen_users_col.find_one({"user_id": s['user_id']})
-            if seen_u and seen_u.get('first_name'):
-                display_name = seen_u['first_name']
-                if seen_u.get('username'):
-                    display_name += f" (@{seen_u['username']})"
-            else:
-                display_name = str(s['user_id'])
-
-            if s.get('lifetime'):
-                time_str = "Lifetime ♾️"
-            else:
-                remaining = s['expiry'] - now
-                time_str = format_time_left(remaining)
-            markup.add(InlineKeyboardButton(f"🗑 {display_name} — {ch_name} ({time_str} left)",
-                                             callback_data=f"rmuser_{s['user_id']}_{s['channel_id']}"))
-
-    if message_id:
-        # Reached by tapping a button -> auto-vanish
-        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
-    else:
-        # Direct /removeuser command: send and schedule vanish after 15 s
-        reply = bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
-        schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
-        if user_id:
-            track_msg(user_id, reply)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('rmuser_') and not call.data.startswith('rmuserconfirm_') and call.data != 'rmuser_back')
-def confirm_remove_user(call):
-    try:
-        u_id, ch_id = parse_rmuser_callback(call.data)
-    except (ValueError, IndexError):
-        bot.answer_callback_query(call.id, "Invalid selection. Use /remove again.")
-        return
-    ch_data = channels_col.find_one({"channel_id": ch_id})
-    ch_name = escape_markdown(ch_data['name']) if ch_data else "Unknown Channel"
-    bot.answer_callback_query(call.id)
-
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ Yes, Remove Now", callback_data=f"rmuserconfirm_{u_id}_{ch_id}"))
-    markup.add(InlineKeyboardButton("❌ Cancel", callback_data="rmuser_back"))
-    edit_menu(call.message.chat.id, call.message.message_id,
-        f"⚠️ Remove user `{u_id}` from *{ch_name}* right now, before their plan expires?",
-        reply_markup=markup, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data == "rmuser_back")
-def rmuser_back(call):
-    bot.answer_callback_query(call.id)
-    show_active_users(call.message.chat.id, call.message.message_id)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('rmuserconfirm_'))
-def remove_user_now(call):
-    try:
-        u_id, ch_id = parse_rmuser_callback(call.data)
-    except (ValueError, IndexError):
-        bot.answer_callback_query(call.id, "Invalid selection. Use /remove again.")
-        return
-
-    removed, detail = _kick_from_group(ch_id, u_id)
-    if not removed:
-        bot.answer_callback_query(call.id, "Could not remove user.")
-        send_admin_reply(f"❌ Failed to remove user `{u_id}` from chat `{ch_id}`.\n\n{escape_markdown(detail)}", parse_mode="Markdown")
-        show_active_users(call.message.chat.id, call.message.message_id)
-        return
-
-    bot.answer_callback_query(call.id, "User removed.")
-
-    try:
-        rev_msg = bot.send_message(u_id, "⚠️ Your access has been revoked by the admin.")
-        schedule_delete(u_id, rev_msg.message_id, COMMAND_VANISH_SECONDS)
-    except Exception:
-        pass
-
-    send_admin_reply(f"✅ Removed user `{u_id}` from chat `{ch_id}`. {escape_markdown(detail)}", parse_mode="Markdown")
-    show_active_users(call.message.chat.id, call.message.message_id)
-
 # Automate Kicking
 def kick_expired_users():
     now = datetime.now().timestamp()
     # Lifetime subscribers have expiry=None and are never kicked
-    expired_users = users_col.find({"expiry": {"$lte": now}, "lifetime": {"$ne": True}})
+    expired_users = list(users_col.find({"expiry": {"$lte": now}, "lifetime": {"$ne": True}}))
     bot_username = bot.get_me().username
 
     for user in expired_users:
         try:
-            removed, _ = _kick_from_group(user['channel_id'], user['user_id'])
-            if not removed:
-                continue
+            removed, detail = _kick_from_group(user['channel_id'], user['user_id'])
 
             rejoin_url = f"https://t.me/{bot_username}?start={user['channel_id']}"
             markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🔄 Re-join / Renew", url=rejoin_url))
+            try:
+                bot.send_message(user['user_id'], "⚠️ Your subscription has expired.\n\nTo join again or renew, please click the button below:", reply_markup=markup)
+            except Exception:
+                pass
 
-            exp_msg = bot.send_message(user['user_id'], "⚠️ Your subscription has expired.\n\nTo join again or renew, please click the button below:", reply_markup=markup)
-            users_col.delete_one({"_id": user['_id']})
-        except: pass
+            # _kick_from_group already deletes the users_col record when removal
+            # succeeds; if it failed (e.g. bot lost admin rights), still drop the
+            # record so an un-kickable stale entry doesn't get retried forever.
+            if not removed:
+                users_col.delete_one({"_id": user['_id']})
+        except Exception:
+            pass
 
 # Automate Expiry Reminders (24h and 1h before a plan expires)
 def send_expiry_reminders():
