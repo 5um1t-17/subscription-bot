@@ -1,0 +1,6 @@
+pyTelegramBotAPI>=4.15.0
+pymongo[srv]>=4.6.0
+apscheduler>=3.10.0
+flask>=3.0.0
+segno>=1.6.0
+Pillow>=10.1.0
