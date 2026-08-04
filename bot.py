@@ -2341,16 +2341,17 @@ def do_broadcast(message):
     except Exception:
         pass
 
-def show_active_users(chat_id, user_id=None, message=None):
-    """Show a simple list of active subscribers for the admin to remove manually.
+def show_active_users(chat_id, user_id=None, message=None, page=0, per_page=20):
+    """Show active subscribers as inline buttons for the admin to remove.
     This is the fallback when /removeuser is used without arguments."""
     now = datetime.now().timestamp()
     admin_channel_ids = _admin_channel_ids()
     if not admin_channel_ids:
+        text = "ℹ️ No channels are registered for this admin yet."
         if message:
-            send_command_reply(message, "ℹ️ No channels are registered for this admin yet.")
+            send_command_reply(message, text)
         else:
-            bot.send_message(chat_id, "ℹ️ No channels are registered for this admin yet.")
+            bot.send_message(chat_id, text)
         return
 
     subs = []
@@ -2365,14 +2366,21 @@ def show_active_users(chat_id, user_id=None, message=None):
             continue
 
     if not subs:
+        text = "ℹ️ No active subscribers found to remove."
         if message:
-            send_command_reply(message, "ℹ️ No active subscribers found to remove.")
+            send_command_reply(message, text)
         else:
-            bot.send_message(chat_id, "ℹ️ No active subscribers found to remove.")
+            bot.send_message(chat_id, text)
         return
 
-    lines = ["👤 Active subscribers:"]
-    for s in sorted(subs, key=lambda x: (x.get('channel_id', ''), x.get('user_id', 0))):
+    subs.sort(key=lambda x: (x.get('channel_id', ''), x.get('user_id', 0)))
+    total = len(subs)
+    start = page * per_page
+    end = min(start + per_page, total)
+    page_subs = subs[start:end]
+
+    lines = [f"👤 Active subscribers (showing {start+1}-{end} of {total}):"]
+    for s in page_subs:
         ch_name = "Unknown channel"
         try:
             ch = channels_col.find_one({"channel_id": int(s['channel_id'])})
@@ -2383,18 +2391,39 @@ def show_active_users(chat_id, user_id=None, message=None):
 
         uid = s.get('user_id')
         uname = s.get('username') or ""
-        if uname:
-            lines.append(f"• {uid} — @{uname} — {ch_name}")
-        else:
-            lines.append(f"• {uid} — {ch_name}")
+        name = escape_markdown(uname or str(uid))
+        ch_label = escape_markdown(ch_name)
+        display = f"@{uname}" if uname else f"`{uid}`"
+        lines.append(f"• {display} — {ch_label}")
 
-    text = "\n".join(lines[:40])
-    if len(lines) > 40:
-        text += "\n\nUse `/removeuser <user_id>` or `/removeuser <username>` to remove one directly."
+    text = "\n".join(lines)
+
+    markup = InlineKeyboardMarkup()
+    for s in page_subs:
+        uid = s.get('user_id')
+        uname = s.get('username')
+        ch_id = s.get('channel_id')
+        ch_name = "?"
+        try:
+            ch = channels_col.find_one({"channel_id": int(ch_id)})
+            if ch:
+                ch_name = ch.get('name') or "?"
+        except Exception:
+            pass
+        label = f"@{uname}" if uname else f"{uid}"
+        sublabel = f"{label} ({ch_name})"
+        if len(sublabel) > 30:
+            sublabel = label
+        markup.add(InlineKeyboardButton(f"❌ {sublabel}", callback_data=f"rmuser_{uid}"))
+
+    if total > per_page:
+        markup.add(InlineKeyboardButton("⬅️ Prev", callback_data=f"rmuserpage_{page-1}" if page > 0 else "noop"),
+                   InlineKeyboardButton("➡️ Next", callback_data=f"rmuserpage_{page+1}" if end < total else "noop"))
+
     if message:
-        send_command_reply(message, text, parse_mode="Markdown")
+        send_command_reply(message, text, reply_markup=markup, parse_mode="Markdown")
     else:
-        bot.send_message(chat_id, text, parse_mode="Markdown")
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
 
 @bot.message_handler(commands=['removeuser'])
@@ -2494,6 +2523,86 @@ def removeuser_handler(message):
             return
 
     show_active_users(message.chat.id, user_id=message.from_user.id, message=message)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "noop")
+def cb_noop(call):
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('rmuserpage_'))
+def cb_rmuser_page(call):
+    page = int(call.data.split('_')[1])
+    bot.answer_callback_query(call.id)
+    show_active_users(call.message.chat.id, user_id=call.from_user.id, message=None, page=page)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('rmuser_'))
+def cb_rmuser_confirm(call):
+    user_id = int(call.data.split('_')[1])
+    bot.answer_callback_query(call.id)
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("✅ Yes, Remove", callback_data=f"rmuserconfirm_{user_id}"))
+    markup.add(InlineKeyboardButton("❌ Cancel", callback_data="rmuser_cancel"))
+    edit_menu(call.message.chat.id, call.message.message_id,
+        f"⚠️ Are you sure you want to remove user `{user_id}`? This will kick them from all subscribed channels.",
+        reply_markup=markup, parse_mode="Markdown")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "rmuser_cancel")
+def cb_rmuser_cancel(call):
+    bot.answer_callback_query(call.id)
+    show_active_users(call.message.chat.id, user_id=call.from_user.id, message=None, page=0)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('rmuserconfirm_'))
+def cb_rmuser_do(call):
+    user_id = int(call.data.split('_')[1])
+    bot.answer_callback_query(call.id, "Removing...")
+    admin_channel_ids = _admin_channel_ids()
+    subs = []
+    for s in users_col.find({"user_id": user_id}):
+        try:
+            if int(s['channel_id']) in admin_channel_ids:
+                subs.append(s)
+        except (TypeError, ValueError):
+            continue
+
+    if not subs:
+        edit_menu(call.message.chat.id, call.message.message_id,
+            f"⚠️ No active subscriptions found for user `{user_id}`.",
+            reply_markup=None, parse_mode="Markdown")
+        return
+
+    count = 0
+    failed = []
+    for s in subs:
+        removed, detail = _kick_from_group(s['channel_id'], s['user_id'])
+        if removed:
+            count += 1
+        else:
+            failed.append(f"{s['channel_id']}: {detail}")
+        time.sleep(0.05)
+
+    try:
+        rev_msg = bot.send_message(user_id, "⚠️ Your subscription access has been revoked by the admin.")
+        schedule_delete(user_id, rev_msg.message_id, COMMAND_VANISH_SECONDS)
+    except Exception:
+        pass
+
+    msg = f"✅ Removed subscription for user `{user_id}` ({count} channel subscription(s) cleared)."
+    if failed:
+        msg += "\n\n⚠️ Some bans failed:\n" + "\n".join(failed[:5])
+
+    edit_menu(call.message.chat.id, call.message.message_id, msg, reply_markup=None, parse_mode="Markdown")
 
 
 @bot.message_handler(commands=['remove'])
