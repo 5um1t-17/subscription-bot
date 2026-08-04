@@ -1968,7 +1968,7 @@ def cout_reject_handler(call):
     if doc:
         try:
             rej_msg = bot.send_message(doc['user_id'], "❌ Your payment could not be verified. Please contact the admin for help.", vanish_delay=None)
-            schedule_delete(doc['user_id'], rej_msg.message_id, COMMAND_VANISH_SECONDS)
+            schedule_delete(doc['user_id'], rej_msg.message_id, APPROVAL_LINK_VANISH_SECONDS)
         except Exception:
             pass
         pending_checkouts_col.delete_one({"_id": ObjectId(token)})
