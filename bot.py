@@ -1858,7 +1858,7 @@ def receive_cart_screenshot(message, token):
     markup.add(InlineKeyboardButton("✅ Approve All", callback_data=f"coutapp_{token}"))
     markup.add(InlineKeyboardButton("❌ Reject", callback_data=f"coutrej_{token}"))
 
-    username_tag = f"@{user.username}" if user.username else "No username"
+    username_tag = f"@{escape_markdown(user.username)}" if user.username else "No username"
     lines = [f"• {escape_markdown(i['name'])} — {format_label(i['t'])} — ₹{i['price']}" for i in doc['items']]
     caption = (
         "🔔 *Payment Verification Required!*\n\n"
@@ -2019,7 +2019,7 @@ def cout_approve_handler(call):
                     {"$set": {"expiry": None, "lifetime": True, "reminded_24h": True, "reminded_1h": True}},
                     upsert=True
                 )
-                result_lines.append(f"• {name} — Lifetime ♾️\nJoin Link: {link.invite_link}")
+                result_lines.append(f"• {escape_markdown(name)} — Lifetime ♾️\nJoin Link: {link.invite_link}")
             else:
                 mins = int(t)
                 expiry_datetime = datetime.now() + timedelta(minutes=mins)
@@ -2030,7 +2030,7 @@ def cout_approve_handler(call):
                     {"$set": {"expiry": expiry_datetime.timestamp(), "lifetime": False, "reminded_24h": False, "reminded_1h": False}},
                     upsert=True
                 )
-                result_lines.append(f"• {name} — {format_label(t)}\nJoin Link: {link.invite_link}")
+                result_lines.append(f"• {escape_markdown(name)} — {format_label(t)}\nJoin Link: {link.invite_link}")
 
             # Log the sale for /stats (itemized, prunable via /cleanup)
             payments_col.insert_one({
@@ -2040,7 +2040,7 @@ def cout_approve_handler(call):
             # Also bump lifetime counters — these stay accurate even after old payment logs are pruned
             counters_col.update_one({"_id": "stats"}, {"$inc": {"total_sales": 1, "total_revenue": price}}, upsert=True)
         except Exception as e:
-            error_lines.append(f"• {name}: {e}")
+            error_lines.append(f"• {escape_markdown(name)}: {e}")
 
     # Always close out the checkout so it can never stay stuck half-processed.
     user_carts.pop(u_id, None)
@@ -2271,7 +2271,7 @@ def pending_checkouts_handler(message):
         total = doc.get('total', 0)
         screenshot_file_id = doc.get('screenshot_file_id')
 
-        username_tag = f"@{user_username}" if user_username else "No username"
+        username_tag = f"@{escape_markdown(user_username)}" if user_username else "No username"
         lines = [f"• {escape_markdown(i['name'])} — {format_label(i['t'])} — ₹{i['price']}" for i in items]
         caption = (
             f"🔔 *Pending Checkout*\n\n"
