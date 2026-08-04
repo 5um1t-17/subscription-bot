@@ -96,7 +96,7 @@ def reaction_worker():
                     try:
                         if hasattr(e, 'result_json') and e.result_json and 'parameters' in e.result_json:
                             retry_after = e.result_json['parameters'].get('retry_after', 2)
-                    except:
+                    except Exception:
                         pass
                     time.sleep(retry_after)
                     # Re-queue the reaction request
@@ -298,7 +298,8 @@ def schedule_delete(chat_id, message_id, delay=MENU_VANISH_SECONDS):
     def _delete():
         try:
             bot.delete_message(chat_id, message_id)
-        except: pass
+        except Exception:
+            pass
         pending_deletes.pop(key, None)
     timer = Timer(delay, _delete)
     timer.daemon = True
@@ -404,6 +405,8 @@ def send_admin_reply(text, parse_mode=None, reply_markup=None, delay=ADMIN_REPLY
     """Send a confirmation or error reply to the admin that auto-deletes after `delay` seconds
     (default 20 s). Used for one-shot result messages like '✅ Price updated' or '❌ Invalid format'
     so the admin chat stays clean without the admin having to manually dismiss anything."""
+    if not ADMIN_ID:
+        return None
     msg = bot.send_message(ADMIN_ID, text, parse_mode=parse_mode, reply_markup=reply_markup)
     schedule_delete(ADMIN_ID, msg.message_id, delay)
     return msg
@@ -453,17 +456,20 @@ def dismiss_previous(chat_id, user_id):
         # Frame 1 — shrinking text suggests motion
         try:
             bot.edit_message_text("💨  ·  ·  ·", prev_chat_id, prev_msg_id)
-        except: pass
+        except Exception:
+            pass
         time.sleep(1)
         # Frame 2 — almost gone
         try:
             bot.edit_message_text("·", prev_chat_id, prev_msg_id)
-        except: pass
+        except Exception:
+            pass
         time.sleep(1)
         # Delete
         try:
             bot.delete_message(prev_chat_id, prev_msg_id)
-        except: pass
+        except Exception:
+            pass
     t = Thread(target=_animate_out, daemon=True)
     t.start()
 
@@ -498,7 +504,7 @@ def record_seen_user(user):
             }},
             upsert=True
         )
-    except:
+    except Exception:
         pass
 
 # --- HELPERS ---
@@ -1177,7 +1183,8 @@ def start_handler(message):
             if ch_data:
                 send_plan_selection(message.chat.id, ch_data)
                 return
-        except: pass
+        except Exception:
+            pass
 
     # Admin Panel Greeting
     if user_id == ADMIN_ID:
@@ -1556,7 +1563,7 @@ def edit_duration_prompt(call):
 def save_new_duration(message, ch_id, old_t):
     try:
         new_t = parse_duration_only(message.text)
-    except:
+    except Exception:
         send_admin_reply("❌ Invalid duration. Please use `Days:Hours:Mins`, e.g. `1:2:30`, or `lifetime`. Use /channels to try again.")
         return
     ch_data = channels_col.find_one({"channel_id": ch_id})
@@ -1593,7 +1600,7 @@ def save_new_plan(message, ch_id):
         total_minutes, price = parse_duration_and_price(message.text)
         channels_col.update_one({"channel_id": ch_id}, {"$set": {f"plans.{total_minutes}": price}})
         send_admin_reply(f"✅ New plan added: {format_label(total_minutes)} — ₹{price}")
-    except:
+    except Exception:
         send_admin_reply("❌ Invalid format. Please use `Days:Hours:Mins:Price` or `lifetime:Price`. Use /channels to try again.")
 
 # --- USER: SHOPPING CART ---
@@ -1748,7 +1755,8 @@ def cart_checkout_handler(call):
     cancel_delete(call.message.chat.id, call.message.message_id)
     try:
         bot.delete_message(call.message.chat.id, call.message.message_id)
-    except: pass
+    except Exception:
+        pass
 
     result = pending_checkouts_col.insert_one({
         "user_id": user_id, "items": items, "total": total, "created_at": datetime.now()
@@ -1961,7 +1969,8 @@ def cout_reject_handler(call):
         try:
             rej_msg = bot.send_message(doc['user_id'], "❌ Your payment could not be verified. Please contact the admin for help.", vanish_delay=None)
             schedule_delete(doc['user_id'], rej_msg.message_id, COMMAND_VANISH_SECONDS)
-        except: pass
+        except Exception:
+            pass
         pending_checkouts_col.delete_one({"_id": ObjectId(token)})
     _clear_pending_review_messages(token)
     # Vanishes shortly after the decision is made (not before)
@@ -2326,8 +2335,11 @@ def do_broadcast(message):
         # Show up to 5 concrete error reasons so you can see WHY sends failed (e.g. blocked bot)
         result += "\n\nFailure details (first 5):\n" + "\n".join(errors[:5])
     # Broadcast result is important info — keep slightly longer than regular messages
-    res_msg = bot.send_message(ADMIN_ID, result)
-    schedule_delete(ADMIN_ID, res_msg.message_id, 30)
+    try:
+        res_msg = bot.send_message(ADMIN_ID, result)
+        schedule_delete(ADMIN_ID, res_msg.message_id, 30)
+    except Exception:
+        pass
 
 def show_active_users(chat_id, user_id=None, message=None):
     """Show a simple list of active subscribers for the admin to remove manually.
@@ -2902,13 +2914,16 @@ def kick_expired_users():
     now = datetime.now().timestamp()
     # Lifetime subscribers have expiry=None and are never kicked
     expired_users = list(users_col.find({"expiry": {"$lte": now}, "lifetime": {"$ne": True}}))
-    bot_username = bot.get_me().username
+    try:
+        bot_username = bot.get_me().username
+    except Exception:
+        bot_username = None
 
     for user in expired_users:
         try:
             removed, detail = _kick_from_group(user['channel_id'], user['user_id'])
 
-            rejoin_url = f"https://t.me/{bot_username}?start={user['channel_id']}"
+            rejoin_url = f"https://t.me/{bot_username}?start={user['channel_id']}" if bot_username else f"https://t.me/{bot_username}"
             markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🔄 Re-join / Renew", url=rejoin_url))
             try:
                 bot.send_message(user['user_id'], "⚠️ Your subscription has expired.\n\nTo join again or renew, please click the button below:", reply_markup=markup)
@@ -2926,12 +2941,15 @@ def kick_expired_users():
 # Automate Expiry Reminders (24h and 1h before a plan expires)
 def send_expiry_reminders():
     now = datetime.now().timestamp()
-    bot_username = bot.get_me().username
+    try:
+        bot_username = bot.get_me().username
+    except Exception:
+        bot_username = None
 
     def _notify(user, remaining, flag_field):
         ch = channels_col.find_one({"channel_id": user['channel_id']})
         ch_name = ch['name'] if ch else "your channel"
-        rejoin_url = f"https://t.me/{bot_username}?start={user['channel_id']}"
+        rejoin_url = f"https://t.me/{bot_username}?start={user['channel_id']}" if bot_username else f"https://t.me/{bot_username}"
         markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🔄 Renew Now", url=rejoin_url))
         try:
             bot.send_message(
@@ -2940,10 +2958,13 @@ def send_expiry_reminders():
                 f"Renew now so you don't lose access!",
                 reply_markup=markup, parse_mode="Markdown"
             )
-        except:
+        except Exception:
             pass
         # Mark as sent even if the DM failed (e.g. user blocked the bot), so we don't retry forever
-        users_col.update_one({"_id": user['_id']}, {"$set": {flag_field: True}})
+        try:
+            users_col.update_one({"_id": user['_id']}, {"$set": {flag_field: True}})
+        except Exception:
+            pass
 
     # 24-hour window: expiry is within the next 24h but more than 1h away, and not yet reminded
     # (lifetime subscribers have expiry=None and are excluded entirely)
