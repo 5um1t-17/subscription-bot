@@ -41,6 +41,11 @@ ADMIN_ID = int(admin_id_env) if admin_id_env and admin_id_env.isdigit() else 0
 UPI_ID = os.getenv('UPI_ID')
 CONTACT_USERNAME = os.getenv('CONTACT_USERNAME')
 
+def contact_admin_url():
+    if CONTACT_USERNAME:
+        return f"https://t.me/{CONTACT_USERNAME}"
+    return None
+
 # Emoji pool used to give each channel button a random face — picked fresh every time
 # the channel list is rendered so the list feels lively and each entry looks distinct.
 FACE_EMOJIS = [
@@ -579,7 +584,9 @@ def _build_plan_selection(ch_data):
         markup.add(InlineKeyboardButton(f"💳 {label} - ₹{p_price}", callback_data=f"cartadd_{ch_data['channel_id']}_{p_time}"))
 
     markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="cart_browse"))
-    markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
+    contact_url = contact_admin_url()
+    if contact_url:
+        markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
     desc_part = f"\n\n📝 <b>About:</b> <b><i>{escape(ch_data['description'])}</i></b>" if ch_data.get('description') else ""
     text = f"Yoo \n\nAb yaha tak agaya hai to plan bhi lele dalle 😁 \n\nYou are joining: <b>{escape(ch_data['name'])}</b>.{desc_part}\n\nPlease select a subscription plan below:"
     return text, markup
@@ -650,7 +657,9 @@ def build_cart_summary(user_id):
         text = "🛒 Your cart is empty.\n\nBrowse channels below to add a subscription."
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse"))
-        markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
+        contact_url = contact_admin_url()
+        if contact_url:
+            markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
         return text, markup
 
     lines = ["🛒 *Your Cart*\n"]
@@ -664,7 +673,9 @@ def build_cart_summary(user_id):
     markup.add(InlineKeyboardButton("➕ Add Another Channel", callback_data="cart_browse"))
     markup.add(InlineKeyboardButton(f"✅ Checkout & Pay ₹{total}", callback_data="cart_checkout"))
     markup.add(InlineKeyboardButton("🗑 Clear Cart", callback_data="cart_clear_ask"))
-    markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
+    contact_url = contact_admin_url()
+    if contact_url:
+        markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
     return text, markup
 
 def build_channel_list(user_id):
@@ -686,7 +697,9 @@ def build_channel_list(user_id):
         total = cart_total(items)
         markup.add(InlineKeyboardButton(f"🛒 View Cart ({len(items)}) — ₹{total}", callback_data="cart_view"))
 
-    markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
+    contact_url = contact_admin_url()
+    if contact_url:
+        markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
     text = ("👋 <b>Welcome Dallo !</b> \n\nShaana banne ki Koshish mat karna  😂😂\n\nPlease select a channel/group you'd like to join.\n\n"
             "💡 <b><i>You can add multiple channels to your cart and pay for all of them at once!</i></b>")
     return text, markup
@@ -697,8 +710,12 @@ def show_all_channels(chat_id, user_id):
     on the next command."""
     text, markup = build_channel_list(user_id)
     if text is None:
+        contact_url = contact_admin_url()
+        reply_markup = InlineKeyboardMarkup()
+        if contact_url:
+            reply_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
         reply = bot.send_message(chat_id, "No channels are available right now. Please check back later, or contact the admin.",
-                          reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}")))
+                          reply_markup=reply_markup)
         schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
         track_msg(user_id, reply)
         return
@@ -711,8 +728,12 @@ def edit_all_channels(chat_id, message_id, user_id, message_obj=None):
     (used for 'Back to Channels' / 'Add Another Channel' taps)."""
     text, markup = build_channel_list(user_id)
     if text is None:
+        contact_url = contact_admin_url()
+        reply_markup = InlineKeyboardMarkup()
+        if contact_url:
+            reply_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
         edit_menu(chat_id, message_id, "No channels are available right now. Please check back later, or contact the admin.",
-                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}")),
+                  reply_markup=reply_markup,
                   message_obj=message_obj)
         return
     edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=message_obj)
@@ -1214,7 +1235,10 @@ def myplans_handler(message):
 @bot.message_handler(commands=['help'])
 def help_handler(message):
     record_seen_user(message.from_user)
-    markup = InlineKeyboardMarkup().add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
+    contact_url = contact_admin_url()
+    markup = InlineKeyboardMarkup()
+    if contact_url:
+        markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
     send_command_reply(message,
         "ℹ️ *How this works:*\n\n"
         "1. Use /buy to see available channels\n"
@@ -1739,7 +1763,9 @@ def cart_checkout_handler(call):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ I Have Paid", callback_data=f"coutpaid_{token}"))
     markup.add(InlineKeyboardButton("❌ Cancel Payment", callback_data=f"coutcancel_{token}"))
-    markup.add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
+    contact_url = contact_admin_url()
+    if contact_url:
+        markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
 
     # Payment QR shown for QR_SHOW_SECONDS initially; once 'I Have Paid' is tapped the timer
     # is reset to PAYMENT_VANISH_SECONDS so the user can still come back and scan if needed.
@@ -1835,7 +1861,10 @@ def receive_cart_screenshot(message, token):
             pass
         return
 
-    u_markup = InlineKeyboardMarkup().add(InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}"))
+    contact_url = contact_admin_url()
+    u_markup = InlineKeyboardMarkup()
+    if contact_url:
+        u_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
     conf_msg = bot.send_message(message.chat.id, "✅ Your receipt has been sent for verification. Please wait for Admin approval.\nApproval time : 5-10 minutes \nBe Patient", reply_markup=u_markup, vanish_delay=None)
     pending_review_messages[token] = {
         'user_chat_id': message.chat.id,
@@ -1968,7 +1997,7 @@ def cout_approve_handler(call):
                 )
                 result_lines.append(f"• {name} — Lifetime ♾️\nJoin Link: {link.invite_link}")
             else:
-                mins = min(int(t), 300)
+                mins = int(t)
                 expiry_datetime = datetime.now() + timedelta(minutes=mins)
                 expiry_ts = int(expiry_datetime.timestamp())
                 link = bot.create_chat_invite_link(ch_id, member_limit=1, expire_date=expiry_ts)
