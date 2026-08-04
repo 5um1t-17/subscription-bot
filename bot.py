@@ -1141,6 +1141,7 @@ def setup_commands():
         BotCommand("cleanup", "Free up database space"),
         BotCommand("import", "Import member list for a group/channel"),
         BotCommand("sync", "Tracked chats & re-sync members"),
+        BotCommand("pending", "Review pending payment checkouts"),
     ]
     group_admin_commands = [
         BotCommand("remove", "Remove user(s) from this group/channel"),
@@ -1832,6 +1833,19 @@ def receive_cart_screenshot(message, token):
     user = message.from_user
     file_id = message.photo[-1].file_id  # highest resolution version
 
+    try:
+        pending_checkouts_col.update_one(
+            {"_id": ObjectId(token)},
+            {"$set": {
+                "screenshot_file_id": file_id,
+                "user_chat_id": message.chat.id,
+                "user_name": user.first_name,
+                "user_username": user.username,
+            }}
+        )
+    except Exception:
+        pass
+
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ Approve All", callback_data=f"coutapp_{token}"))
     markup.add(InlineKeyboardButton("❌ Reject", callback_data=f"coutrej_{token}"))
@@ -1849,17 +1863,18 @@ def receive_cart_screenshot(message, token):
     try:
         admin_msg = bot.send_photo(ADMIN_ID, file_id, caption=caption, reply_markup=markup, parse_mode="Markdown", vanish_delay=None)
     except Exception as e:
-        # Don't leave the user hanging mid-flow — tell them delivery failed and ping the admin
+        # Photo delivery failed — fall back to a text summary for the admin instead of aborting
         try:
-            bot.send_message(message.chat.id, "❌ Couldn't deliver your receipt to the admin right now. Please try again or contact the admin.")
+            text_caption = (
+                "🔔 *Payment Verification Required!* (screenshot delivery failed)\n\n"
+                f"User: {escape_markdown(user.first_name)} ({username_tag})\n"
+                f"User ID: `{user.id}`\n\n"
+                + "\n".join(lines) +
+                f"\n\n💰 *Total: ₹{doc['total']}*"
+            )
+            admin_msg = bot.send_message(ADMIN_ID, text_caption, reply_markup=markup, parse_mode="Markdown", vanish_delay=None)
         except Exception:
-            pass
-        try:
-            err_msg = bot.send_message(ADMIN_ID, f"❌ Failed to deliver a payment screenshot: {e}")
-            schedule_delete(ADMIN_ID, err_msg.message_id, ADMIN_REPLY_VANISH_SECONDS)
-        except Exception:
-            pass
-        return
+            admin_msg = None
 
     contact_url = contact_admin_url()
     u_markup = InlineKeyboardMarkup()
@@ -2225,6 +2240,59 @@ def cb_cleanup_seenusers_confirm(call):
         f"✅ Deleted {result.deleted_count} inactive user records.\n\nUse /dbstats to see updated storage usage.",
         reply_markup=None)
 
+@bot.message_handler(commands=['pending'], func=lambda m: m.from_user.id == ADMIN_ID)
+def pending_checkouts_handler(message):
+    """Show all pending checkouts awaiting admin approval, with screenshot if available."""
+    try:
+        pending = list(pending_checkouts_col.find({}).sort("created_at", -1))
+    except Exception:
+        pending = []
+
+    if not pending:
+        send_command_reply(message, "✅ No pending checkouts.")
+        return
+
+    for doc in pending:
+        token = str(doc['_id'])
+        user_id = doc.get('user_id')
+        user_chat_id = doc.get('user_chat_id', user_id)
+        user_name = doc.get('user_name', 'User')
+        user_username = doc.get('user_username')
+        items = doc.get('items', [])
+        total = doc.get('total', 0)
+        screenshot_file_id = doc.get('screenshot_file_id')
+
+        username_tag = f"@{user_username}" if user_username else "No username"
+        lines = [f"• {escape_markdown(i['name'])} — {format_label(i['t'])} — ₹{i['price']}" for i in items]
+        caption = (
+            f"🔔 *Pending Checkout*\n\n"
+            f"User: {escape_markdown(user_name)} ({username_tag})\n"
+            f"User ID: `{user_id}`\n\n"
+            + "\n".join(lines) +
+            f"\n\n💰 *Total: ₹{total}*"
+        )
+
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"coutapp_{token}"))
+        markup.add(InlineKeyboardButton("❌ Reject", callback_data=f"coutrej_{token}"))
+
+        try:
+            if screenshot_file_id:
+                msg = bot.send_photo(ADMIN_ID, screenshot_file_id, caption=caption, reply_markup=markup, parse_mode="Markdown", vanish_delay=None)
+            else:
+                msg = bot.send_message(ADMIN_ID, caption, reply_markup=markup, parse_mode="Markdown", vanish_delay=None)
+            pending_review_messages[token] = {
+                'user_chat_id': user_chat_id,
+                'user_msg_id': None,
+                'admin_chat_id': ADMIN_ID,
+                'admin_msg_id': msg.message_id,
+            }
+        except Exception as e:
+            try:
+                bot.send_message(ADMIN_ID, f"❌ Failed to show pending checkout {token}: {e}")
+            except Exception:
+                pass
+
 @bot.message_handler(commands=['broadcast'], func=lambda m: m.from_user.id == ADMIN_ID)
 def broadcast_start(message):
     # Dismiss previous bot reply
@@ -2261,13 +2329,16 @@ def do_broadcast(message):
     res_msg = bot.send_message(ADMIN_ID, result)
     schedule_delete(ADMIN_ID, res_msg.message_id, 30)
 
-def show_active_users(chat_id, user_id=None):
+def show_active_users(chat_id, user_id=None, message=None):
     """Show a simple list of active subscribers for the admin to remove manually.
     This is the fallback when /removeuser is used without arguments."""
     now = datetime.now().timestamp()
     admin_channel_ids = _admin_channel_ids()
     if not admin_channel_ids:
-        bot.send_message(chat_id, "ℹ️ No channels are registered for this admin yet.")
+        if message:
+            send_command_reply(message, "ℹ️ No channels are registered for this admin yet.")
+        else:
+            bot.send_message(chat_id, "ℹ️ No channels are registered for this admin yet.")
         return
 
     subs = []
@@ -2282,7 +2353,10 @@ def show_active_users(chat_id, user_id=None):
             continue
 
     if not subs:
-        bot.send_message(chat_id, "ℹ️ No active subscribers found to remove.")
+        if message:
+            send_command_reply(message, "ℹ️ No active subscribers found to remove.")
+        else:
+            bot.send_message(chat_id, "ℹ️ No active subscribers found to remove.")
         return
 
     lines = ["👤 Active subscribers:"]
@@ -2305,7 +2379,10 @@ def show_active_users(chat_id, user_id=None):
     text = "\n".join(lines[:40])
     if len(lines) > 40:
         text += "\n\nUse `/removeuser <user_id>` or `/removeuser <username>` to remove one directly."
-    bot.send_message(chat_id, text, parse_mode="Markdown")
+    if message:
+        send_command_reply(message, text, parse_mode="Markdown")
+    else:
+        bot.send_message(chat_id, text, parse_mode="Markdown")
 
 
 @bot.message_handler(commands=['removeuser'])
@@ -2404,7 +2481,7 @@ def removeuser_handler(message):
             send_admin_reply(f"❌ Could not resolve `{escape_markdown(target)}`. Check the spelling (usernames are case-insensitive), try their numeric User ID, or use `/removeuser` without arguments to pick from the menu.", parse_mode="Markdown")
             return
 
-    show_active_users(message.chat.id, user_id=message.from_user.id)
+    show_active_users(message.chat.id, user_id=message.from_user.id, message=message)
 
 
 @bot.message_handler(commands=['remove'])
