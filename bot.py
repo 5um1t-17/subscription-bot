@@ -18,8 +18,8 @@ from bson import ObjectId
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
-from threading import Thread, Timer
-from queue import Queue
+from threading import Thread, Timer, Lock
+from queue import Queue, Full as QueueFull
 
 # Telegram's built-in identity when a group admin posts with "Remain anonymous" on.
 GROUP_ANONYMOUS_BOT_ID = 1087968824
@@ -48,6 +48,33 @@ def contact_admin_url():
     if CONTACT_USERNAME:
         return f"https://t.me/{CONTACT_USERNAME}"
     return None
+
+def _redact(text):
+    """Strip configured secrets (token / mongo URI / its password) from any
+    string before it is logged or shown to the admin. Never expose credentials."""
+    if not text:
+        return text
+    text = str(text)
+    try:
+        for secret in (BOT_TOKEN, MONGO_URI):
+            if secret:
+                text = text.replace(secret, "[REDACTED]")
+        if MONGO_URI:
+            from urllib.parse import urlsplit, unquote
+            parts = urlsplit(MONGO_URI)
+            if parts.password:
+                text = text.replace(unquote(parts.password), "[REDACTED]")
+                text = text.replace(parts.password, "[REDACTED]")
+    except Exception:
+        pass
+    return text
+
+def _safe_log(tag, msg):
+    """Print a log line with any secrets redacted. Never crashes the caller."""
+    try:
+        print(f"[{tag}] {_redact(msg)}")
+    except Exception:
+        pass
 
 # Emoji pool used to give each channel button a random face — picked fresh every time
 # the channel list is rendered so the list feels lively and each entry looks distinct.
@@ -109,40 +136,82 @@ bot = telebot.TeleBot(BOT_TOKEN, use_class_middlewares=True)
 # Uses a single persistent background thread to send message reactions sequentially.
 # This prevents spawning separate threads for every message, avoids connection pool exhaustion,
 # and handles Telegram rate limits (429) gracefully by sleeping and retrying.
+#
+# Protection (bounded memory / bounded retries):
+#   - The queue is size-bounded (REACTION_QUEUE_MAX). When it is full under high
+#     traffic, new reactions are dropped and a warning is logged — the message
+#     handler itself is never blocked.
+#   - Identical pending tasks (same chat+message) are de-duplicated so the same
+#     message is never queued twice.
+#   - A single task is retried at most REACTION_MAX_RETRIES times on Telegram 429
+#     (with retry_after backoff) and then dropped — no infinite requeue loops.
+#   - All failures are handled inside the worker; a bad task can never crash the bot.
 
-reaction_queue = Queue()
+REACTION_QUEUE_MAX = 4000
+REACTION_MAX_RETRIES = 3
+
+reaction_queue = Queue(maxsize=REACTION_QUEUE_MAX)
+_reaction_queued_keys = set()
+_reaction_keys_lock = Lock()
+
+def _enqueue_reaction(chat_id, message_id):
+    """Queue a reaction task with dedup + a bounded queue. Never blocks the caller."""
+    key = (chat_id, message_id)
+    with _reaction_keys_lock:
+        if key in _reaction_queued_keys:
+            return
+        if reaction_queue.full():
+            _safe_log("reaction", f"queue full — dropping reaction for message {message_id} in chat {chat_id}")
+            return
+        _reaction_queued_keys.add(key)
+    try:
+        reaction_queue.put_nowait(key)
+    except QueueFull:
+        with _reaction_keys_lock:
+            _reaction_queued_keys.discard(key)
+        _safe_log("reaction", f"queue full — dropping reaction for message {message_id} in chat {chat_id}")
 
 def reaction_worker():
     import time
     while True:
         try:
             chat_id, message_id = reaction_queue.get()
-            try:
-                emoji = random.choice(REACT_EMOJIS)
-                bot.set_message_reaction(
-                    chat_id,
-                    message_id,
-                    reaction=[telebot.types.ReactionTypeEmoji(emoji)],
-                    is_big=False
-                )
-            except telebot.apihelper.ApiTelegramException as e:
-                # If we get rate limited (429), wait and retry
-                if e.error_code == 429:
-                    retry_after = 2
-                    try:
-                        if hasattr(e, 'result_json') and e.result_json and 'parameters' in e.result_json:
-                            retry_after = e.result_json['parameters'].get('retry_after', 2)
-                    except Exception:
-                        pass
-                    time.sleep(retry_after)
-                    # Re-queue the reaction request
-                    reaction_queue.put((chat_id, message_id))
-            except Exception:
-                pass
-            finally:
-                reaction_queue.task_done()
+        except Exception:
+            continue
+        try:
+            for attempt in range(REACTION_MAX_RETRIES):
+                try:
+                    emoji = random.choice(REACT_EMOJIS)
+                    bot.set_message_reaction(
+                        chat_id,
+                        message_id,
+                        reaction=[telebot.types.ReactionTypeEmoji(emoji)],
+                        is_big=False
+                    )
+                    break
+                except telebot.apihelper.ApiTelegramException as e:
+                    # If we get rate limited (429), wait and retry (bounded).
+                    if e.error_code == 429:
+                        retry_after = 2
+                        try:
+                            if hasattr(e, 'result_json') and e.result_json and 'parameters' in e.result_json:
+                                retry_after = e.result_json['parameters'].get('retry_after', 2)
+                        except Exception:
+                            pass
+                        time.sleep(max(0.5, float(retry_after or 2)))
+                        continue
+                    break  # permanent error — drop the task
+                except Exception:
+                    break
         except Exception:
             pass
+        finally:
+            with _reaction_keys_lock:
+                _reaction_queued_keys.discard((chat_id, message_id))
+            try:
+                reaction_queue.task_done()
+            except Exception:
+                pass
 
 # Start the auto-react worker thread
 Thread(target=reaction_worker, daemon=True).start()
@@ -184,7 +253,7 @@ class AutoReactMiddleware(BaseMiddleware):
 
         if message.from_user and message.from_user.is_bot and not is_anon_admin:
             return
-        reaction_queue.put((message.chat.id, message.message_id))
+        _enqueue_reaction(message.chat.id, message.message_id)
 
     def post_process(self, message, data, exception):
         pass
@@ -204,6 +273,7 @@ tracked_chats_col = db['tracked_chats']  # every group/channel the bot is a memb
 free_trials_col = db['free_trials']          # admin-configured free trial plans (logically separate from paid plans)
 free_trial_claims_col = db['free_trial_claims']  # PERMANENT "one trial ever" claim records (never deleted)
 free_trial_claims_history_col = db['free_trial_claims_history']  # archive of legacy duplicate claims moved during index migration
+revenue_ledger_col = db['revenue_ledger']    # exactly-once revenue/sale ledger (one doc per approved checkout item)
 
 def track_chat_member(chat_id, user_id, username=None, first_name=None):
     if not chat_id or not user_id:
@@ -1454,6 +1524,8 @@ def cb_trial_edit_name(call):
     bot.register_next_step_handler(msg, _trial_save_name, trial_id)
 
 def _trial_save_name(message, trial_id):
+    if not _message_admin_ok(message):
+        return
     name = (message.text or '').strip()
     if not name:
         send_admin_reply("❌ Name can't be empty.")
@@ -1478,6 +1550,8 @@ def cb_trial_edit_duration(call):
     bot.register_next_step_handler(msg, _trial_save_duration, trial_id)
 
 def _trial_save_duration(message, trial_id):
+    if not _message_admin_ok(message):
+        return
     try:
         t = parse_duration_only(message.text)
     except Exception:
@@ -1585,6 +1659,10 @@ def _active_paid_sub_for(user_id, ch_id):
         return sub
     return None
 
+class PaidSubscriptionActiveError(Exception):
+    """Raised when the final atomic trial write is blocked because the user now
+    has an active paid subscription (the trial must NOT downgrade/overwrite it)."""
+
 def _create_trial_invite(ch_id, expiry_ts):
     """Create a SINGLE-USE invite link (member_limit=1) that expires at the trial
     end. Retries on Telegram 429 rate limits. Returns the link or None if it kept
@@ -1657,19 +1735,49 @@ def _grant_trial_subscription(user_id, trial, claim, ch_id):
             }}
         )
 
-    users_col.update_one(
-        {"user_id": int(user_id), "channel_id": int(ch_id)},
-        {"$set": {
-            "expiry": expiry_dt.timestamp(),
-            "lifetime": False,
-            "reminded_24h": False,
-            "reminded_1h": False,
-            "subscription_type": "free_trial",
-            "trial_plan_id": trial['trial_id'],
-            "trial_claim_id": str(claim['_id']),
-        }},
-        upsert=True
-    )
+    # Write the active trial subscription with an ATOMIC paid-subscription guard.
+    # The final write only succeeds when the user/channel still has NO active paid
+    # subscription (lifetime, or an unexpired non-trial subscription). This closes
+    # the check-then-write race between a concurrent paid purchase and this trial
+    # grant: if a paid subscription appears mid-grant, the update matches nothing
+    # and we abort the trial instead of overwriting/downgrading the paid access.
+    now_ts = now.timestamp()
+    guard = {
+        "user_id": int(user_id),
+        "channel_id": int(ch_id),
+        "lifetime": {"$ne": True},
+        "$or": [
+            # Re-granting the same (already-trial) record on a retry.
+            {"subscription_type": "free_trial"},
+            # The existing record is already expired (or has no expiry recorded) —
+            # it is not active access, so it can be replaced by the trial.
+            {"expiry": {"$lte": now_ts}},
+            {"expiry": None},
+            {"expiry": {"$exists": False}},
+        ],
+    }
+    try:
+        res = users_col.update_one(
+            guard,
+            {"$set": {
+                "expiry": expiry_dt.timestamp(),
+                "lifetime": False,
+                "reminded_24h": False,
+                "reminded_1h": False,
+                "subscription_type": "free_trial",
+                "trial_plan_id": trial['trial_id'],
+                "trial_claim_id": str(claim['_id']),
+            },
+                "$setOnInsert": {"user_id": int(user_id), "channel_id": int(ch_id)}},
+            upsert=True,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Could not write trial subscription: {_redact(str(e))[:200]}") from e
+    if res.matched_count == 0 and res.upserted_id is None:
+        # An active paid subscription appeared (or already existed) — the trial
+        # must never overwrite it. Abort safely; the claim stays recoverable.
+        raise PaidSubscriptionActiveError(
+            "user now has an active paid subscription; trial grant aborted")
     return link_str, expiry_dt
 
 def _trial_already_claimed_markup(ch_id):
@@ -1895,11 +2003,23 @@ def _process_trial_claim(call, raw_trial_id):
     # ---- 3) Create (or reuse) single-use invite + active subscription ----
     try:
         link_str, expiry_dt = _grant_trial_subscription(int(user_id), trial, claim, ch_id)
+    except PaidSubscriptionActiveError as e:
+        # A paid subscription appeared during the grant — abort the trial safely,
+        # keep the (recoverable) claim, and never touch the paid subscription.
+        free_trial_claims_col.update_one({"_id": claim['_id']},
+                                         {"$set": {"status": "grant_failed", "grant_fail_reason": "paid_subscription_active",
+                                                   "last_error": _redact(str(e))[:200]}})
+        try:
+            bot.answer_callback_query(call.id, "You already have an active subscription for this channel.")
+        except Exception:
+            pass
+        _show_trial_active_paid(call, ch_id)
+        return
     except telebot.apihelper.ApiTelegramException as e:
         free_trial_claims_col.update_one({"_id": claim['_id']},
                                          {"$set": {"status": "grant_failed", "grant_fail_reason": "telegram_error",
-                                                   "last_error": str(e)[:200]}})
-        print(f"[free-trial] invite failed for claim {claim['_id']}: {e}")
+                                                   "last_error": _redact(str(e))[:200]}})
+        _safe_log("free-trial", f"invite failed for claim {claim['_id']}: {e}")
         try:
             bot.answer_callback_query(call.id, "Could not activate your free trial right now.")
         except Exception:
@@ -1909,8 +2029,8 @@ def _process_trial_claim(call, raw_trial_id):
     except Exception as e:
         free_trial_claims_col.update_one({"_id": claim['_id']},
                                          {"$set": {"status": "grant_failed", "grant_fail_reason": "unknown",
-                                                   "last_error": str(e)[:200]}})
-        print(f"[free-trial] unexpected error for claim {claim['_id']}: {e}")
+                                                   "last_error": _redact(str(e))[:200]}})
+        _safe_log("free-trial", f"unexpected error for claim {claim['_id']}: {e}")
         try:
             bot.answer_callback_query(call.id, "Could not activate your free trial right now.")
         except Exception:
@@ -2563,6 +2683,263 @@ def cart_clear_confirm_handler(call):
 
 # --- USER: CHECKOUT & PAYMENT ---
 
+# Idempotent, concurrency-safe payment approval state machine.
+#
+# A checkout's `status` transitions:
+#   pending -> processing -> completed   (all items granted, then record removed)
+#   pending/failed -> processing -> failed  (partial failure; unfinished items retryable)
+#   pending -> processed (legacy/reject claim; record removed)
+#
+# Per-item state lives in `items_status.<index>`:
+#   {status: pending|processing|completed|failed, invite_link, invite_expires_at,
+#    expires_at, payment_recorded, error, attempts}
+# A retry skips completed items and re-runs only unfinished ones.
+#
+# Exactly-once guarantees rely on MongoDB uniqueness, NOT app flags alone:
+#   - payments_col.checkout_item_id  (unique, sparse)  -> payment record once
+#   - revenue_ledger_col._id == checkout_item_id (unique) -> revenue counted once
+# The per-item status is a fast-path hint; the unique indexes are the source of
+# truth, so a crash can never cause double payment records or double revenue.
+PAYMENT_PROCESSING_STALE_SECONDS = 300  # a 'processing' checkout older than this is reclaimable after a crash
+_PENDING_ACTIVE_STATUSES = [
+    {"status": {"$exists": False}},
+    {"status": "pending"},
+    {"status": "processing"},
+    {"status": "failed"},
+]
+_RECOVERABLE_APPROVE_STATUSES = [
+    {"status": {"$exists": False}},
+    {"status": "pending"},
+    {"status": "failed"},
+]
+
+def _item_state(doc, idx):
+    """Return the persisted per-item state dict for item `idx`, or {} if unset."""
+    items_status = doc.get('items_status') or {}
+    return items_status.get(str(idx)) or {}
+
+def _set_item_state(token_id, idx, updates):
+    """Persist a per-item state field on the checkout doc. Safe dotted-path update."""
+    path = f"items_status.{int(idx)}"
+    pending_checkouts_col.update_one(
+        {"_id": token_id},
+        {"$set": {f"{path}.{k}": v for k, v in updates.items()}},
+    )
+
+def _ensure_stats_doc():
+    """Idempotently ensure the aggregate counters document exists. Called before
+    every revenue count so the guarded per-item update below can rely on it."""
+    try:
+        counters_col.update_one(
+            {"_id": "stats"},
+            {"$setOnInsert": {"total_sales": 0, "total_revenue": 0, "counted_items": {}}},
+            upsert=True,
+        )
+        return True
+    except Exception as e:
+        _safe_log("revenue", f"could not ensure stats document: {e}")
+        return False
+
+
+def _record_revenue_once(checkout_item_id, price, user_id, channel_id, minutes):
+    """Count a sale in the lifetime /stats counters exactly once, durably.
+
+    Exactly-once is guaranteed by a per-item claim key embedded on the stats
+    document (counted_items.<checkout_item_id>): only the update that ADDS that
+    key increments the counters, so retries and concurrent workers are no-ops.
+    The revenue_ledger document (one per approved checkout item, _id unique) is
+    kept as the durable audit/dedup source and its status advances to 'counted'
+    only after the counters increment has been confirmed.
+
+    Both failure windows are recoverable:
+      A) Mongo failure BEFORE the counters increment -> returns False, the caller
+         keeps the item retryable, and a later retry performs the increment once.
+      B) Crash AFTER the counters increment but BEFORE the ledger is marked
+         counted -> the counters already hold the claim; a retry's guarded update
+         is a no-op (matched 0) and simply re-confirms. Never double-counts.
+
+    Returns True when revenue is confirmed counted (by this call or a previous
+    one); False on a transient failure that must be retried."""
+    try:
+        revenue_ledger_col.insert_one({
+            "_id": checkout_item_id,
+            "amount": int(price),
+            "user_id": int(user_id),
+            "channel_id": int(channel_id),
+            "minutes": minutes,
+            "created_at": datetime.now(),
+            "status": "pending",
+            "counted_at": None,
+        })
+    except DuplicateKeyError:
+        pass  # ledger entry already exists from a previous attempt
+    except Exception as e:
+        _safe_log("revenue", f"could not create ledger entry {checkout_item_id}: {e}")
+        return False
+
+    if not _ensure_stats_doc():
+        return False
+
+    # Atomically add the per-item claim AND increment the counters in one update.
+    # matched_count==1 -> this call counted the item; ==0 -> already counted by a
+    # previous attempt / concurrent worker (a no-op, never a second increment).
+    try:
+        counters_col.update_one(
+            {"_id": "stats", "counted_items." + str(checkout_item_id): {"$exists": False}},
+            {"$inc": {"total_sales": 1, "total_revenue": int(price)},
+             "$set": {"counted_items." + str(checkout_item_id): True}},
+        )
+    except DuplicateKeyError:
+        pass  # claim already present from a previous attempt
+    except Exception as e:
+        _safe_log("revenue", f"could not count revenue for {checkout_item_id}: {e}")
+        return False  # window A: not counted yet — retry performs the increment once
+
+    # Window B: even if the process crashes right after the increment above, the
+    # counters already hold the claim. Marking the ledger 'counted' is audit-only;
+    # a failure here never blocks completion because the counters claim is the
+    # source of truth (a later retry re-confirms and re-marks it).
+    try:
+        revenue_ledger_col.update_one(
+            {"_id": checkout_item_id},
+            {"$set": {"status": "counted", "counted_at": datetime.now()}},
+        )
+    except Exception as e:
+        _safe_log("revenue", f"could not mark ledger counted for {checkout_item_id}: {e}")
+
+    return True
+
+def _process_paid_item(token, token_id, user_id, item, idx):
+    """Idempotently grant ONE paid item: invite (reused), subscription write,
+    payment record (exactly once) and revenue count (exactly once).
+
+    Persists each intermediate step so a crash mid-item resumes without
+    duplicating work. Returns the display line on success."""
+    ch_id = int(item['channel_id'])
+    t = item['t']
+    price = int(item['price'])
+    name = item.get('name') or str(ch_id)
+    checkout_item_id = f"{token}:{idx}"
+    st = dict(_item_state(pending_checkouts_col.find_one({"_id": token_id}) or {}, idx))
+
+    def _persist(**updates):
+        st.update(updates)
+        _set_item_state(token_id, idx, updates)
+
+    # 1) Single-use invite link — reuse a previously-persisted link on retry so a
+    #    crash after creating the invite never creates a second one.
+    if not st.get('invite_link'):
+        try:
+            bot.unban_chat_member(ch_id, user_id, only_if_banned=True)
+        except Exception:
+            pass
+        if t == "lifetime":
+            link = bot.create_chat_invite_link(ch_id, member_limit=1)
+            invite_link = link.invite_link
+            invite_expires = None
+        else:
+            mins = int(t)
+            if st.get('expires_at') is None:
+                expiry_ts = int((datetime.now() + timedelta(minutes=mins)).timestamp())
+                _persist(expires_at=expiry_ts)
+            else:
+                expiry_ts = int(st['expires_at'])
+            link = bot.create_chat_invite_link(ch_id, member_limit=1, expire_date=expiry_ts)
+            invite_link = link.invite_link
+            invite_expires = expiry_ts
+        _persist(invite_link=invite_link, invite_expires_at=invite_expires)
+    else:
+        # Invite already created and persisted by a previous attempt — reuse it,
+        # so a retry (e.g. after a payment/revenue failure) never makes a second link.
+        invite_link = st.get('invite_link')
+        invite_expires = st.get('invite_expires_at')
+
+    # 2) Subscription write — idempotent: reuse the persisted expires_at so a retry
+    #    never silently extends the plan past the originally-granted expiry.
+    if t == "lifetime":
+        users_col.update_one(
+            {"user_id": user_id, "channel_id": ch_id},
+            {"$set": {"expiry": None, "lifetime": True, "reminded_24h": True, "reminded_1h": True}},
+            upsert=True,
+        )
+        _persist(lifetime_granted=True)
+    else:
+        mins = int(t)
+        if st.get('expires_at') is None:
+            expiry_ts = int((datetime.now() + timedelta(minutes=mins)).timestamp())
+            _persist(expires_at=expiry_ts)
+        else:
+            expiry_ts = int(st['expires_at'])
+        users_col.update_one(
+            {"user_id": user_id, "channel_id": ch_id},
+            {"$set": {"expiry": expiry_ts, "lifetime": False, "reminded_24h": False, "reminded_1h": False}},
+            upsert=True,
+        )
+
+    # 3) Payment record — exactly once, enforced by the sparse unique index.
+    try:
+        payments_col.insert_one({
+            "checkout_item_id": checkout_item_id,
+            "user_id": user_id,
+            "channel_id": ch_id,
+            "minutes": t,
+            "amount": price,
+            "timestamp": datetime.now(),
+            "token": token,
+        })
+        _persist(payment_recorded=True)
+    except DuplicateKeyError:
+        pass  # already recorded by a previous attempt
+    except Exception as e:
+        _safe_log("payment", f"payment record write failed for {checkout_item_id}: {e}")
+        # A payment record must be present for a completed sale — treat as failure
+        # so the item stays retryable (the unique index still prevents duplicates).
+        raise
+
+    # 4) Revenue — exactly once, and CONFIRMED before the item may complete.
+    #    The item is only marked completed once the revenue/sale has been durably
+    #    counted (ledger + idempotent counters claim). On a transient MongoDB
+    #    failure the counters were NOT incremented and the item stays retryable;
+    #    the idempotent claim makes the eventual retry count exactly once.
+    if not _record_revenue_once(checkout_item_id, price, user_id, ch_id, t):
+        _safe_log("payment", f"revenue accounting could not be confirmed for {checkout_item_id}")
+        raise RuntimeError("revenue accounting could not be confirmed")
+
+    if t == "lifetime":
+        return f"• {escape_markdown(name)} — Lifetime ♾️\nJoin Link: {invite_link}"
+    return f"• {escape_markdown(name)} — {format_label(t)}\nJoin Link: {invite_link}"
+
+def _process_paid_checkout(doc):
+    """Run the idempotent per-item approval for a checkout that is now claimed
+    ('processing'). Returns (result_lines, error_lines, completed_count, item_count)."""
+    token = str(doc['_id'])
+    token_id = doc['_id']
+    u_id = doc['user_id']
+    items = doc.get('items', [])
+    result_lines = []
+    error_lines = []
+    completed = 0
+    for idx, item in enumerate(items):
+        key = str(idx)
+        state = _item_state(doc, idx)
+        if state.get('status') == 'completed':
+            completed += 1
+            continue
+        _set_item_state(token_id, key, {"status": "processing", "error": None,
+                                        "attempts": int(state.get('attempts') or 0) + 1})
+        try:
+            line = _process_paid_item(token, token_id, u_id, item, key)
+            result_lines.append(line)
+            _set_item_state(token_id, key, {"status": "completed", "error": None})
+            completed += 1
+        except Exception as e:
+            err_text = _redact(str(e))
+            _set_item_state(token_id, key, {"status": "failed", "error": err_text[:200]})
+            error_lines.append(f"• {escape_markdown(item.get('name') or item['channel_id'])}: {err_text}")
+            _safe_log("payment", f"item {key} of checkout {token} failed: {e}")
+    return result_lines, error_lines, completed, len(items)
+
+
 QR_BRAND_HEX = (11, 83, 148)    # deep blue — the QR's data modules
 QR_ACCENT_HEX = (5, 51, 102)    # darker navy — the three corner finder patterns
 QR_BRAND_CSS = '#0B5394'
@@ -2858,7 +3235,8 @@ def _restore_cart_items(user_id, items):
             existing.add(key)
 
 def _cancel_pending_checkout(token, user_id):
-    """Delete a pending checkout owned by `user_id`, restoring its items to the cart.
+    """Cancel a checkout owned by `user_id` while it is still pending (never while
+    it is being processed / already decided), restoring its items to the cart.
     Returns True if a checkout was cancelled."""
     try:
         doc = pending_checkouts_col.find_one({"_id": ObjectId(token)})
@@ -2871,12 +3249,21 @@ def _cancel_pending_checkout(token, user_id):
             return False
     except (TypeError, ValueError):
         return False
+    status = doc.get('status')
+    if status not in (None, 'pending'):
+        return False
+    # Atomically delete only if it is still pending (guards a racing approval).
     try:
-        _restore_cart_items(user_id, doc.get('items', []))
+        deleted = pending_checkouts_col.find_one_and_delete(
+            {"_id": ObjectId(token),
+             "$or": [{"status": {"$exists": False}}, {"status": "pending"}]}
+        )
     except Exception:
-        pass
+        deleted = None
+    if not deleted:
+        return False
     try:
-        pending_checkouts_col.delete_one({"_id": ObjectId(token)})
+        _restore_cart_items(user_id, deleted.get('items', []))
     except Exception:
         pass
     return True
@@ -2896,7 +3283,12 @@ def cancel_command_handler(message):
     record_seen_user(message.from_user)
     cancelled = 0
     try:
-        cancelled = pending_checkouts_col.delete_many({"user_id": user_id}).deleted_count
+        # Only cancel checkouts that are still pending (never one an admin is
+        # already processing or that partially failed — those stay retryable).
+        cancelled = pending_checkouts_col.delete_many(
+            {"user_id": user_id,
+             "$or": [{"status": {"$exists": False}}, {"status": "pending"}]}
+        ).deleted_count
     except Exception:
         cancelled = 0
     user_carts.pop(user_id, None)
@@ -2956,80 +3348,99 @@ def cout_approve_handler(call):
             pass
         return
     token = call.data.split('_', 1)[1]
-    # Atomic claim: only one of {approve, reject} can ever win a given checkout.
-    # The winner sets status='processed'; any racing duplicate approval or a later
-    # reject sees no claimable doc and is treated as "already processed". This
-    # guarantees a checkout is granted, subscribed, logged and counted exactly once.
+    try:
+        token_id = ObjectId(token)
+    except Exception:
+        try:
+            bot.answer_callback_query(call.id, "Invalid request.")
+        except Exception:
+            pass
+        return
+
+    now = datetime.now()
+    stale_ts = now.timestamp() - PAYMENT_PROCESSING_STALE_SECONDS
+
+    # ---- Atomic claim: only ONE approve (or reject) may ever win a checkout. ----
+    # Recoverable states are pending/failed (and legacy docs with no status).
+    # A concurrent duplicate approval sees no claimable doc and is blocked, so
+    # only one thread/instance ever processes a given checkout.
     try:
         doc = pending_checkouts_col.find_one_and_update(
-            {"_id": ObjectId(token),
-             "$or": [{"status": {"$exists": False}}, {"status": "pending"}]},
-            {"$set": {"status": "processed"}},
+            {"_id": token_id, "$or": _RECOVERABLE_APPROVE_STATUSES},
+            {"$set": {"status": "processing", "processing_started_at": now,
+                      "approved_by": ADMIN_ID, "approved_at": now}},
             return_document=ReturnDocument.AFTER,
         )
     except Exception:
         doc = None
+
     if not doc:
-        bot.answer_callback_query(call.id, "Already processed or expired.")
-        return
-    bot.answer_callback_query(call.id, "Approving...")
-
-    u_id = doc['user_id']
-    result_lines = []
-    error_lines = []
-
-    # Approve each channel independently so one failing channel (e.g. the bot lost admin
-    # rights there) never aborts the whole checkout and leaves it stuck in between.
-    for item in doc['items']:
-        ch_id = item['channel_id']
-        t = item['t']
-        price = item['price']
-        name = item['name']
+        # The claim from pending/failed failed: it may be currently 'processing'
+        # (in flight, or stale from a crashed process) or already decided.
         try:
-            # Unban the user first in case they were previously kicked/expired and are repurchasing.
-            # remove_user_from_chat already unbans right after a kick, so this is just a safety
-            # net for any user who was banned before that change.
+            cur = pending_checkouts_col.find_one({"_id": token_id})
+        except Exception:
+            cur = None
+        if cur is not None and cur.get('status') == 'processing':
+            started = cur.get('processing_started_at')
+            is_stale = started is None or _ts_of(started) <= stale_ts
+            if not is_stale:
+                try:
+                    bot.answer_callback_query(call.id, "This checkout is already being processed.")
+                except Exception:
+                    pass
+                return
+            # Stale 'processing' from a crashed process -> safely reclaim it.
             try:
-                bot.unban_chat_member(ch_id, u_id, only_if_banned=True)
+                doc = pending_checkouts_col.find_one_and_update(
+                    {"_id": token_id, "status": "processing",
+                     "$or": [{"processing_started_at": {"$exists": False}},
+                             {"processing_started_at": {"$lte": datetime.fromtimestamp(stale_ts)}}]},
+                    {"$set": {"status": "processing", "processing_started_at": now}},
+                    return_document=ReturnDocument.AFTER,
+                )
             except Exception:
-                pass  # Not in channel / already not banned — safe to ignore
+                doc = None
+            if not doc:
+                try:
+                    bot.answer_callback_query(call.id, "This checkout is already being processed.")
+                except Exception:
+                    pass
+                return
+        else:
+            try:
+                bot.answer_callback_query(call.id, "Already processed or expired.")
+            except Exception:
+                pass
+            return
 
-            if t == "lifetime":
-                link = bot.create_chat_invite_link(ch_id, member_limit=1)  # single-use invite; expires on first join
-                users_col.update_one(
-                    {"user_id": u_id, "channel_id": ch_id},
-                    {"$set": {"expiry": None, "lifetime": True, "reminded_24h": True, "reminded_1h": True}},
-                    upsert=True
-                )
-                result_lines.append(f"• {escape_markdown(name)} — Lifetime ♾️\nJoin Link: {link.invite_link}")
-            else:
-                mins = int(t)
-                expiry_datetime = datetime.now() + timedelta(minutes=mins)
-                expiry_ts = int(expiry_datetime.timestamp())
-                link = bot.create_chat_invite_link(ch_id, member_limit=1, expire_date=expiry_ts)
-                users_col.update_one(
-                    {"user_id": u_id, "channel_id": ch_id},
-                    {"$set": {"expiry": expiry_datetime.timestamp(), "lifetime": False, "reminded_24h": False, "reminded_1h": False}},
-                    upsert=True
-                )
-                result_lines.append(f"• {escape_markdown(name)} — {format_label(t)}\nJoin Link: {link.invite_link}")
-
-            # Log the sale for /stats (itemized, prunable via /cleanup)
-            payments_col.insert_one({
-                "user_id": u_id, "channel_id": ch_id, "minutes": t,
-                "amount": price, "timestamp": datetime.now()
-            })
-            # Also bump lifetime counters — these stay accurate even after old payment logs are pruned
-            counters_col.update_one({"_id": "stats"}, {"$inc": {"total_sales": 1, "total_revenue": price}}, upsert=True)
-        except Exception as e:
-            error_lines.append(f"• {escape_markdown(name)}: {e}")
-
-    # Always close out the checkout so it can never stay stuck half-processed.
-    user_carts.pop(u_id, None)
     try:
-        pending_checkouts_col.delete_one({"_id": ObjectId(token)})
+        bot.answer_callback_query(call.id, "Approving...")
     except Exception:
         pass
+
+    u_id = doc['user_id']
+    user_carts.pop(u_id, None)
+
+    # ---- Idempotent per-item approval (skips completed items; retries only the rest) ----
+    result_lines, error_lines, completed_count, item_count = _process_paid_checkout(doc)
+
+    # Only when EVERY item is confirmed does the checkout become 'completed' and
+    # get removed. A partial failure keeps the checkout with per-item state so the
+    # failed items remain retryable (tapping Approve again resumes them safely).
+    if completed_count == item_count and item_count > 0:
+        try:
+            pending_checkouts_col.update_one(
+                {"_id": token_id}, {"$set": {"status": "completed", "completed_at": now}})
+            pending_checkouts_col.delete_one({"_id": token_id})
+        except Exception as e:
+            _safe_log("payment", f"could not finalize completed checkout {token}: {e}")
+    else:
+        try:
+            pending_checkouts_col.update_one(
+                {"_id": token_id}, {"$set": {"status": "failed", "last_failure_at": now}})
+        except Exception as e:
+            _safe_log("payment", f"could not persist partial-failure state for {token}: {e}")
 
     if result_lines:
         try:
@@ -3055,7 +3466,9 @@ def cout_approve_handler(call):
         except Exception:
             pass
         try:
-            err_msg = bot.send_message(ADMIN_ID, "⚠️ Partial approval errors:\n" + "\n".join(error_lines))
+            err_msg = bot.send_message(ADMIN_ID,
+                "⚠️ Partial approval errors:\n" + "\n".join(error_lines) +
+                "\n\nThe failed items were NOT completed. Tap Approve again to retry only the unfinished items.")
             schedule_delete(ADMIN_ID, err_msg.message_id, ADMIN_REPLY_VANISH_SECONDS)
         except Exception:
             pass
@@ -3065,7 +3478,7 @@ def cout_approve_handler(call):
     # Vanishes shortly after the decision is made (not before)
     try:
         edit_caption_menu(call.message.chat.id, call.message.message_id,
-            f"✅ Approved checkout for user {u_id} ({len(doc['items'])} channel(s)).\n(this message will vanish shortly)",
+            f"✅ Approved checkout for user {u_id} ({item_count} channel(s), {completed_count} completed).\n(this message will vanish shortly)",
             delay=DECISION_VANISH_SECONDS)
     except Exception:
         pass
@@ -3139,7 +3552,7 @@ def dbstats_handler(message):
         schedule_delete(message.chat.id, reply.message_id, COMMAND_VANISH_SECONDS)
         track_msg(message.from_user.id, reply)
     except Exception as e:
-        send_command_reply(message, f"❌ Couldn't fetch DB stats: {e}")
+        send_command_reply(message, f"❌ Couldn't fetch DB stats: {_redact(str(e))}")
 
 @bot.message_handler(commands=['cleanup'], func=lambda m: m.from_user.id == ADMIN_ID)
 def cleanup_handler(message):
@@ -3243,9 +3656,11 @@ def cb_cleanup_seenusers_confirm(call):
 
 @bot.message_handler(commands=['pending'], func=lambda m: m.from_user.id == ADMIN_ID)
 def pending_checkouts_handler(message):
-    """Show all pending checkouts awaiting admin approval, with screenshot if available."""
+    """Show all checkouts still awaiting (or retrying) admin approval, with screenshot if available.
+    Completed checkouts are removed; partially-failed ones are shown so the admin can retry
+    only the unfinished items with Approve."""
     try:
-        pending = list(pending_checkouts_col.find({}).sort("created_at", -1))
+        pending = list(pending_checkouts_col.find({"$or": _PENDING_ACTIVE_STATUSES}).sort("created_at", -1))
     except Exception:
         pending = []
 
@@ -3262,15 +3677,20 @@ def pending_checkouts_handler(message):
         items = doc.get('items', [])
         total = doc.get('total', 0)
         screenshot_file_id = doc.get('screenshot_file_id')
+        status = doc.get('status') or 'pending'
 
         username_tag = f"@{escape_markdown(user_username)}" if user_username else "No username"
         lines = [f"• {escape_markdown(i['name'])} — {format_label(i['t'])} — ₹{i['price']}" for i in items]
+        status_hint = ""
+        if status == 'failed':
+            status_hint = "\n\n⚠️ _Some items failed — Approve again to retry only the unfinished items._"
         caption = (
-            f"🔔 *Pending Checkout*\n\n"
+            f"🔔 *Pending Checkout* ({status})\n\n"
             f"User: {escape_markdown(user_name)} ({username_tag})\n"
             f"User ID: `{user_id}`\n\n"
             + "\n".join(lines) +
-            f"\n\n💰 *Total: ₹{total}*"
+            f"\n\n💰 *Total: ₹{total}*" +
+            status_hint
         )
 
         markup = InlineKeyboardMarkup()
@@ -4060,8 +4480,8 @@ def kick_expired_users():
             {"status": "active", "trial_expiry": {"$lte": datetime.now()}},
             {"$set": {"status": "expired", "expired_at": datetime.now()}}
         )
-    except Exception:
-        pass
+    except Exception as e:
+        _safe_log("expiry", f"could not mark expired free-trial claims: {e}")
     # Lifetime subscribers have expiry=None and are never kicked
     expired_users = list(users_col.find({"expiry": {"$lte": now}, "lifetime": {"$ne": True}}))
     try:
@@ -4073,20 +4493,63 @@ def kick_expired_users():
         try:
             removed, detail = _kick_from_group(user['channel_id'], user['user_id'])
 
-            rejoin_url = f"https://t.me/{bot_username}?start={user['channel_id']}" if bot_username else f"https://t.me/{bot_username}"
-            markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🔄 Re-join / Renew", url=rejoin_url))
+            # _kick_from_group already deletes the users_col + chat_members record
+            # when Telegram confirms the user is removed OR already absent.
+            if removed:
+                rejoin_url = f"https://t.me/{bot_username}?start={user['channel_id']}" if bot_username else f"https://t.me/{bot_username}"
+                markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🔄 Re-join / Renew", url=rejoin_url))
+                try:
+                    bot.send_message(user['user_id'], "⚠️ Your subscription has expired.\n\nTo join again or renew, please click the button below:", reply_markup=markup)
+                except Exception:
+                    pass
+                continue
+
+            # ---- Telegram kick/remove FAILED ----
+            # CRITICAL: the subscription/expiry record is KEPT so the database never
+            # forgets a user who may still have Telegram access. The failure is
+            # persisted and retried on the next scheduler run (idempotently). Only a
+            # later successful removal (or confirmed absence) removes the record.
+            _safe_log("expiry", f"kick failed for user {user.get('user_id')} in channel {user.get('channel_id')}: {_redact(detail)}")
             try:
-                bot.send_message(user['user_id'], "⚠️ Your subscription has expired.\n\nTo join again or renew, please click the button below:", reply_markup=markup)
+                users_col.update_one(
+                    {"_id": user['_id']},
+                    {"$set": {
+                        "expiry_kick_failed": True,
+                        "last_expiry_kick_error": _redact(str(detail))[:200],
+                        "expiry_kick_attempts": int(user.get('expiry_kick_attempts') or 0) + 1,
+                        "expiry_notified": user.get('expiry_notified', False),
+                    }}
+                )
+            except Exception as e:
+                _safe_log("expiry", f"could not persist expiry-kick failure state for user {user.get('user_id')}: {e}")
+
+            # Send the expiry notice at most once per expiry window.
+            if not user.get('expiry_notified'):
+                rejoin_url = f"https://t.me/{bot_username}?start={user['channel_id']}" if bot_username else f"https://t.me/{bot_username}"
+                markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🔄 Re-join / Renew", url=rejoin_url))
+                try:
+                    bot.send_message(user['user_id'], "⚠️ Your subscription has expired.\n\nTo join again or renew, please click the button below:", reply_markup=markup)
+                except Exception:
+                    pass
+                try:
+                    users_col.update_one({"_id": user['_id']}, {"$set": {"expiry_notified": True}})
+                except Exception:
+                    pass
+        except Exception as e:
+            # Keep the record; mark retry state so the next scheduler run retries.
+            _safe_log("expiry", f"unexpected error processing expiry for user {user.get('user_id')}: {e}")
+            try:
+                users_col.update_one(
+                    {"_id": user['_id']},
+                    {"$set": {
+                        "expiry_kick_failed": True,
+                        "last_expiry_kick_error": _redact(str(e))[:200],
+                        "expiry_kick_attempts": int(user.get('expiry_kick_attempts') or 0) + 1,
+                        "expiry_notified": user.get('expiry_notified', False),
+                    }}
+                )
             except Exception:
                 pass
-
-            # _kick_from_group already deletes the users_col record when removal
-            # succeeds; if it failed (e.g. bot lost admin rights), still drop the
-            # record so an un-kickable stale entry doesn't get retried forever.
-            if not removed:
-                users_col.delete_one({"_id": user['_id']})
-        except Exception:
-            pass
 
 # Automate Expiry Reminders (24h and 1h before a plan expires)
 def send_expiry_reminders():
@@ -4181,9 +4644,9 @@ def _migrate_trial_claim_unique_index():
             groups = {}
         dups = {k: v for k, v in groups.items() if len(v) > 1}
         if dups:
-            print(f"[free-trial] WARNING: {len(dups)} (user, channel) keys have more "
-                  f"than one claim. Archiving all but the newest per key into the "
-                  f"history collection (claim records are never deleted).")
+            _safe_log("free-trial", f"WARNING: {len(dups)} (user, channel) keys have more "
+                     f"than one claim. Archiving all but the newest per key into the "
+                     f"history collection (claim records are never deleted).")
             for k, claims in dups.items():
                 claims.sort(key=lambda c: c.get('claimed_at') or datetime.min)
                 for c in claims[:-1]:
@@ -4200,10 +4663,10 @@ def _migrate_trial_claim_unique_index():
                         # Archive FAILED -> never delete the live claim. Abort the
                         # migration: the legacy unique index stays in place, so
                         # protection is never lost and no claim is ever lost.
-                        print(f"[free-trial] ERROR: could not archive claim {c['_id']} "
-                              f"(user {c.get('user_id')}, channel {c.get('channel_id')}) "
-                              f"into history: {e}. Aborting migration; legacy unique "
-                              f"index left in place. The live claim was NOT deleted.")
+                        _safe_log("free-trial", f"ERROR: could not archive claim {c['_id']} "
+                                 f"(user {c.get('user_id')}, channel {c.get('channel_id')}) "
+                                 f"into history: {e}. Aborting migration; legacy unique "
+                                 f"index left in place. The live claim was NOT deleted.")
                         return
                     if not archived:
                         continue
@@ -4214,17 +4677,17 @@ def _migrate_trial_claim_unique_index():
                         # The record is safely archived (no data loss); stop here so
                         # the migration can be re-run cleanly instead of leaving the
                         # live collection inconsistent.
-                        print(f"[free-trial] ERROR: could not remove archived duplicate "
-                              f"claim {c['_id']} from live collection: {e}. Aborting "
-                              f"migration safely; legacy unique index left in place.")
+                        _safe_log("free-trial", f"ERROR: could not remove archived duplicate "
+                                 f"claim {c['_id']} from live collection: {e}. Aborting "
+                                 f"migration safely; legacy unique index left in place.")
                         return
 
     # Create the new unique index (the real one-trial-ever guarantee).
     try:
         free_trial_claims_col.create_index([("user_id", 1), ("channel_id", 1)], unique=True)
     except Exception as e:
-        print(f"[free-trial] ERROR: could not create unique (user_id, channel_id) index: {e}. "
-              f"Keeping the legacy unique index; migration aborted safely.")
+        _safe_log("free-trial", f"ERROR: could not create unique (user_id, channel_id) index: {e}. "
+                 f"Keeping the legacy unique index; migration aborted safely.")
         return
 
     # Verify the new unique index actually exists BEFORE touching the legacy one.
@@ -4233,8 +4696,8 @@ def _migrate_trial_claim_unique_index():
     except Exception:
         names = set()
     if new_key not in names:
-        print(f"[free-trial] ERROR: new unique (user_id, channel_id) index is missing "
-              f"after creation. Keeping the legacy unique index; migration aborted safely.")
+        _safe_log("free-trial", f"ERROR: new unique (user_id, channel_id) index is missing "
+                 f"after creation. Keeping the legacy unique index; migration aborted safely.")
         return
 
     # Only after verified success, retire the legacy 3-field unique index.
@@ -4244,71 +4707,95 @@ def _migrate_trial_claim_unique_index():
         except Exception:
             pass
 
-def setup_indexes():
-    """Create/ensure free-trial indexes safely at startup. Idempotent: it does not
-    crash if an index already exists (MongoDB create_index is a no-op then)."""
+def _create_index_checked(col, keys, unique=False, sparse=False, name=None):
+    """Create an index on `col` and VERIFY it exists afterwards with the expected
+    key pattern and options. Returns True if verified; False if creation failed,
+    verification failed, or an existing index with the same keys is NOT unique
+    when `unique=True` (so protection is never silently missing). Failures are
+    logged safely — the bot never claims the database is protected when it is not."""
+    target = list(keys)
     try:
-        free_trials_col.create_index([("trial_id", 1)], unique=True)
-        free_trials_col.create_index([("channel_id", 1)])
-    except Exception:
-        pass
+        existing = col.index_information()
+    except Exception as e:
+        _safe_log("index", f"ERROR: could not read index info for {col.name}: {e}")
+        return False
+    for info in existing.values():
+        if list(info.get('key', [])) == target:
+            if unique and not bool(info.get('unique')):
+                _safe_log("index", f"ERROR: index {target} on {col.name} exists but is NOT unique — protection missing.")
+                return False
+            return True  # already present with expected shape
     try:
-        # One-trial-ever unique index + safe migration of the legacy 3-field index.
-        _migrate_trial_claim_unique_index()
-    except Exception:
-        pass
+        col.create_index(target, unique=unique, sparse=sparse, name=name)
+    except Exception as e:
+        _safe_log("index", f"ERROR: could not create index {target} on {col.name}: {e}")
+        return False
+    # Verify it actually exists after creation.
     try:
-        free_trial_claims_col.create_index([("user_id", 1)])
-        free_trial_claims_col.create_index([("channel_id", 1)])
-        free_trial_claims_col.create_index([("status", 1)])
-        free_trial_claims_col.create_index([("trial_plan_id", 1)])
-    except Exception:
-        pass
+        existing = col.index_information()
+    except Exception as e:
+        _safe_log("index", f"ERROR: could not re-read index info for {col.name}: {e}")
+        return False
+    for info in existing.values():
+        if list(info.get('key', [])) == target:
+            if unique and not bool(info.get('unique')):
+                _safe_log("index", f"ERROR: index {target} on {col.name} exists but is NOT unique — protection missing.")
+                return False
+            return True
+    _safe_log("index", f"ERROR: index {target} on {col.name} not found after creation.")
+    return False
 
-    # Performance indexes for the frequently-queried collections. Each group is
-    # independent so one failing create_index never skips the rest. A unique index
-    # build on legacy duplicate data raises E11000 and is caught here — the bot
-    # keeps running and the index is simply not installed (no data is touched).
+def setup_indexes():
+    """Create/ensure indexes safely at startup, VERIFYING every security/uniqueness
+    critical index. Idempotent: create_index is a no-op when the index exists.
+    A failed or unverifiable unique index is logged and never treated as protected;
+    no data is ever touched on failure."""
+    # --- Free trial definition indexes ---
+    _create_index_checked(free_trials_col, [("trial_id", 1)], unique=True)
+    _create_index_checked(free_trials_col, [("channel_id", 1)])
+
+    # --- One-trial-ever unique index + safe migration of the legacy 3-field index.
+    # The migration itself creates AND verifies the new unique (user_id, channel_id)
+    # index before it drops the legacy one; any failure keeps the legacy protection. ---
     try:
-        users_col.create_index([("user_id", 1), ("channel_id", 1)], unique=True)
-    except Exception:
-        pass
-    try:
-        users_col.create_index([("channel_id", 1)])
-    except Exception:
-        pass
-    try:
-        users_col.create_index([("expiry", 1)])
-    except Exception:
-        pass
-    try:
-        payments_col.create_index([("timestamp", 1)])
-    except Exception:
-        pass
-    try:
-        payments_col.create_index([("user_id", 1)])
-    except Exception:
-        pass
-    try:
-        seen_users_col.create_index([("user_id", 1)], unique=True)
-    except Exception:
-        pass
-    try:
-        seen_users_col.create_index([("last_seen", 1)])
-    except Exception:
-        pass
-    try:
-        pending_checkouts_col.create_index([("user_id", 1)])
-    except Exception:
-        pass
-    try:
-        # chat_members: NOT unique on (chat_id, user_id) — username-only import
-        # records intentionally store user_id=None for multiple usernames in the
-        # same chat, and a unique index would silently drop those.
-        chat_members_col.create_index([("chat_id", 1), ("user_id", 1)])
-        chat_members_col.create_index([("chat_id", 1)])
-    except Exception:
-        pass
+        _migrate_trial_claim_unique_index()
+    except Exception as e:
+        _safe_log("free-trial", f"ERROR: trial-claim index migration failed: {e}")
+    # If the migration finished (or had nothing to do), re-verify the unique index
+    # explicitly so a missing/downgraded unique index is never silently accepted.
+    _create_index_checked(free_trial_claims_col, [("user_id", 1), ("channel_id", 1)], unique=True)
+    _create_index_checked(free_trial_claims_col, [("user_id", 1)])
+    _create_index_checked(free_trial_claims_col, [("channel_id", 1)])
+    _create_index_checked(free_trial_claims_col, [("status", 1)])
+    _create_index_checked(free_trial_claims_col, [("trial_plan_id", 1)])
+
+    # --- users_col: (user_id, channel_id) is the subscription identity key. ---
+    _create_index_checked(users_col, [("user_id", 1), ("channel_id", 1)], unique=True)
+    _create_index_checked(users_col, [("channel_id", 1)])
+    _create_index_checked(users_col, [("expiry", 1)])
+
+    # --- payments_col: checkout_item_id is the exactly-once payment key (sparse so
+    # legacy documents without the field are unaffected). ---
+    _create_index_checked(payments_col, [("checkout_item_id", 1)], unique=True, sparse=True)
+    _create_index_checked(payments_col, [("timestamp", 1)])
+    _create_index_checked(payments_col, [("user_id", 1)])
+
+    # --- revenue_ledger_col: _id == checkout_item_id is inherently unique (the
+    # dedup/audit source). No extra index needed; 'status' (pending/counted) is
+    # audit-only — the exactly-once guarantee lives on the counters claim map. ---
+
+    # --- seen_users_col: (user_id) unique prevents duplicate user tracking. ---
+    _create_index_checked(seen_users_col, [("user_id", 1)], unique=True)
+    _create_index_checked(seen_users_col, [("last_seen", 1)])
+
+    # --- pending_checkouts_col ---
+    _create_index_checked(pending_checkouts_col, [("user_id", 1)])
+
+    # --- chat_members: NOT unique on (chat_id, user_id) — username-only import
+    # records intentionally store user_id=None for multiple usernames in the
+    # same chat, and a unique index would silently drop those. ---
+    _create_index_checked(chat_members_col, [("chat_id", 1), ("user_id", 1)])
+    _create_index_checked(chat_members_col, [("chat_id", 1)])
 
 def bootstrap_counters():
     """One-time migration: if counters_col doesn't exist yet, seed it from whatever
@@ -4317,12 +4804,44 @@ def bootstrap_counters():
         existing_sales = payments_col.count_documents({})
         existing_revenue = sum(p.get('amount', 0) for p in payments_col.find({}))
         counters_col.insert_one({"_id": "stats", "total_sales": existing_sales, "total_revenue": existing_revenue})
-        print(f"Bootstrapped counters from existing history: {existing_sales} sales, ₹{existing_revenue} revenue.")
+        _safe_log("stats", f"Bootstrapped counters from existing history: {existing_sales} sales, ₹{existing_revenue} revenue.")
+
+def migrate_revenue_ledger():
+    """Idempotent migration for revenue counters created by the previous 'bumped'
+    flag design. Safe to run on every startup; it only acts on legacy entries.
+
+    The new exactly-once design stores a per-item claim on the stats document
+    (counted_items.<checkout_item_id>). Legacy ledger entries carry only the old
+    'bumped' flag — the old code incremented the counters when it flipped it, so a
+    checkout approved before this deploy must be seeded into the claim map. Without
+    this, retrying such a checkout after the deploy would count its revenue a
+    second time. The guarded per-item update makes the migration idempotent, and
+    entries that were never bumped (created but never counted) are left unseeded so
+    a retry can still count them exactly once."""
+    if not _ensure_stats_doc():
+        return
+    seeded = 0
+    try:
+        for doc in revenue_ledger_col.find({"bumped": True}):
+            item_id = doc.get("_id")
+            if item_id is None:
+                continue
+            res = counters_col.update_one(
+                {"_id": "stats", "counted_items." + str(item_id): {"$exists": False}},
+                {"$set": {"counted_items." + str(item_id): True}},
+            )
+            if res.matched_count:
+                seeded += 1
+    except Exception as e:
+        _safe_log("stats", f"revenue migration failed partway: {e}")
+    if seeded:
+        _safe_log("stats", f"Revenue migration: marked {seeded} legacy ledger entries as counted.")
 
 if __name__ == '__main__':
     keep_alive()
     setup_indexes()
     bootstrap_counters()
+    migrate_revenue_ledger()
     scheduler = BackgroundScheduler()
     scheduler.add_job(kick_expired_users, 'interval', minutes=1)
     scheduler.add_job(send_expiry_reminders, 'interval', minutes=5)
@@ -4335,7 +4854,7 @@ if __name__ == '__main__':
     import time
     time.sleep(2)
     setup_commands()
-    print("Bot is running...")
+    _safe_log("startup", "Bot is running...")
     # skip_pending=True: ignore any updates that piled up while no instance was polling
     # (e.g. during a redeploy), so old messages aren't reprocessed on restart.
     #
@@ -4361,12 +4880,12 @@ if __name__ == '__main__':
             break  # infinity_polling only returns on a clean stop
         except telebot.apihelper.ApiTelegramException as e:
             if e.error_code == 409:
-                print(f"⚠️ 409 Conflict (another poller still active) — retrying in {backoff}s...")
+                _safe_log("polling", f"409 Conflict (another poller still active) — retrying in {backoff}s...")
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 60)
                 continue
             raise
         except Exception as e:
-            print(f"⚠️ Polling crashed unexpectedly: {e} — retrying in {backoff}s...")
+            _safe_log("polling", f"polling crashed unexpectedly: {e} — retrying in {backoff}s...")
             time.sleep(backoff)
             backoff = min(backoff * 2, 60)
