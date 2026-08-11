@@ -611,6 +611,7 @@ def record_seen_user(user):
                 "user_id": user.id,
                 "first_name": user.first_name,
                 "username": user.username,
+                "last_name": getattr(user, 'last_name', None) or None,
                 "last_seen": datetime.now(),
             }},
             upsert=True
@@ -4056,6 +4057,593 @@ def cb_rmuser_do(call):
     edit_menu(call.message.chat.id, call.message.message_id, msg, reply_markup=None, parse_mode="Markdown")
 
 
+# ---- Admin: /users (READ-ONLY active subscription list) ----
+# Lists every active paid/free-trial subscription across the admin's channels
+# with a paginated, inline-button view. This feature NEVER mutates data: no
+# subscription is created, extended, downgraded or deleted here, and the
+# free-trial claim history is only read.
+
+USERS_PAGE_SIZE = 10
+
+
+def _clean_name_part(value):
+    """Normalize a name/username field: empty / 'Not set' / 'None' are treated
+    as missing so they can never become the main display name."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    if value.lower() in ("not set", "none", "unknown", "null"):
+        return None
+    return value
+
+
+def _sub_type_label(sub):
+    """Type badge for a subscription record. Paid records written by the legacy
+    flow may have no 'subscription_type' field at all — default to PAID."""
+    if sub.get('subscription_type') == 'free_trial':
+        return "FREE TRIAL"
+    return "PAID"
+
+
+def _format_dt(value):
+    """Format a unix timestamp (or datetime) as '10 Aug 2026'. Never raises."""
+    try:
+        if hasattr(value, 'strftime'):
+            return value.strftime("%d %b %Y")
+        return datetime.fromtimestamp(float(value)).strftime("%d %b %Y")
+    except Exception:
+        return "Unknown"
+
+
+def _format_remaining(seconds):
+    """Human remaining-time text like '14 days' / '3 days 4 hours' / '45 minutes'.
+    Returns 'Expired' when nothing is left."""
+    if seconds is None:
+        return "Expired"
+    try:
+        seconds = max(0, int(seconds))
+    except (TypeError, ValueError):
+        return "Expired"
+    if seconds <= 0:
+        return "Expired"
+    mins = max(1, seconds // 60)
+    if mins < 60:
+        return f"{mins} minute{'s' if mins != 1 else ''}"
+    hours, rem_min = divmod(mins, 60)
+    if hours < 24:
+        if rem_min:
+            return f"{hours} hour{'s' if hours != 1 else ''} {rem_min} min"
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    days, rem_hour = divmod(hours, 24)
+    if rem_hour:
+        return f"{days} day{'s' if days != 1 else ''} {rem_hour} hour{'s' if rem_hour != 1 else ''}"
+    return f"{days} day{'s' if days != 1 else ''}"
+
+
+def _sub_status_info(sub, now):
+    """Compute (status, remaining_text, expires_display) for one subscription
+    record. ACTIVE/EXPIRED is always derived from the stored absolute expiry
+    timestamp — never from plan duration. Lifetime never expires."""
+    if sub.get('lifetime'):
+        return "ACTIVE", "Lifetime", "Never"
+    expiry = sub.get('expiry')
+    if expiry is None:
+        return "EXPIRED", "Expired", "Unknown"
+    try:
+        remaining = float(expiry) - now
+    except (TypeError, ValueError):
+        return "EXPIRED", "Expired", "Unknown"
+    if remaining <= 0:
+        return "EXPIRED", "Expired", _format_dt(expiry)
+    return "ACTIVE", _format_remaining(remaining), _format_dt(expiry)
+
+
+def _users_search_resolve(arg):
+    """Resolve a /users search argument (numeric user_id or @username) to a
+    numeric user_id, or None when unresolvable. user_id is the authoritative
+    identity; username is only an optional convenience lookup."""
+    arg = (arg or '').strip()
+    if not arg:
+        return None
+    if arg.isdigit():
+        try:
+            return int(arg)
+        except (TypeError, ValueError):
+            return None
+    if arg.startswith('@'):
+        arg = arg[1:]
+    if not arg:
+        return None
+    try:
+        hit = seen_users_col.find_one({"username": arg})
+    except Exception:
+        return None
+    if not hit:
+        return None
+    try:
+        return int(hit['user_id'])
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _norm_pair(k1, k2):
+    """Normalize a (user_id, channel_id) pair to ints for dict keys."""
+    try:
+        return int(k1), int(k2)
+    except (TypeError, ValueError):
+        return k1, k2
+
+
+def _channel_names(channel_ids):
+    """Map int channel_id -> channel name for a set of channel ids. Best-effort."""
+    out = {}
+    ids = list(channel_ids or [])
+    if not ids:
+        return out
+    forms = ids + [str(x) for x in ids]
+    try:
+        for c in channels_col.find({"channel_id": {"$in": forms}}):
+            ch_id = c.get('channel_id')
+            try:
+                ch_id = int(ch_id)
+            except (TypeError, ValueError):
+                pass
+            out[ch_id] = _clean_name_part(c.get('name')) or f"Channel {ch_id}"
+    except Exception as e:
+        _safe_log("users", f"channel name lookup failed: {e}")
+    return out
+
+
+def _build_name_map(subs):
+    """Display-name info per user_id for a batch of subscription records.
+    seen_users_col holds the MOST RECENT Telegram profile snapshot (refreshed
+    every time the user is seen), so it is the PREFERRED source for username /
+    first_name / last_name. The subscription record may carry stale profile
+    fields and is only used as a fallback when seen_users has no newer value
+    for that field. One bulk query — never one query per user."""
+    info = {}
+    uids = set()
+    for s in subs or []:
+        uid = s.get('user_id')
+        if uid is None:
+            continue
+        try:
+            uid = int(uid)
+        except (TypeError, ValueError):
+            continue
+        uids.add(uid)
+        info.setdefault(uid, {})
+    if uids:
+        try:
+            for doc in seen_users_col.find({"user_id": {"$in": list(uids)}}):
+                duid = doc.get('user_id')
+                try:
+                    duid = int(duid)
+                except (TypeError, ValueError):
+                    continue
+                entry = info.setdefault(duid, {})
+                for k in ('username', 'first_name', 'last_name'):
+                    v = doc.get(k)
+                    if _clean_name_part(v) and k not in entry:
+                        entry[k] = v
+        except Exception as e:
+            _safe_log("users", f"seen_users lookup failed: {e}")
+    # Subscription-record fields never override the fresher seen_users profile;
+    # they only fill in fields seen_users has not recorded for that user.
+    for s in subs or []:
+        uid = s.get('user_id')
+        if uid is None:
+            continue
+        try:
+            uid = int(uid)
+        except (TypeError, ValueError):
+            continue
+        entry = info.get(uid)
+        if entry is None:
+            continue
+        for k in ('username', 'first_name', 'last_name'):
+            v = s.get(k)
+            if _clean_name_part(v) and k not in entry:
+                entry[k] = v
+    return info
+
+
+def _user_display_name(name_info):
+    """Display-name priority: @username > first_name + last_name > first_name >
+    last_name > Unknown. A stored 'Not set' can never become the main name."""
+    info = name_info or {}
+    uname = _clean_name_part(info.get('username'))
+    if uname:
+        return f"@{uname}"
+    first = _clean_name_part(info.get('first_name'))
+    last = _clean_name_part(info.get('last_name'))
+    if first and last:
+        return f"{first} {last}"
+    if first:
+        return first
+    if last:
+        return last
+    return "Unknown"
+
+
+def _build_start_dates(subs):
+    """Best-effort start-date resolution per (user_id, channel_id):
+    - free trials: claim's activated_at (falling back to claimed_at) via the
+      stored trial_claim_id;
+    - paid: the most recent payment record for that user+channel.
+    Never raises; unresolved entries simply report 'Unknown'."""
+    starts = {}
+    trial_ids = []
+    pair_lookup = {}
+    pair_uids = set()
+    for s in subs or []:
+        key = _norm_pair(s.get('user_id'), s.get('channel_id'))
+        if s.get('subscription_type') == 'free_trial' and s.get('trial_claim_id'):
+            trial_ids.append(s.get('trial_claim_id'))
+            starts[key] = None
+        else:
+            pair_lookup[key] = None
+            try:
+                pair_uids.add(int(s.get('user_id')))
+            except (TypeError, ValueError, AttributeError):
+                pass
+    if trial_ids:
+        oids = []
+        for cid in trial_ids:
+            try:
+                oids.append(ObjectId(str(cid)))
+            except Exception:
+                pass
+        if oids:
+            try:
+                for claim in free_trial_claims_col.find({"_id": {"$in": oids}}):
+                    key = _norm_pair(claim.get('user_id'), claim.get('channel_id'))
+                    if key in starts:
+                        val = claim.get('activated_at') or claim.get('claimed_at')
+                        if val is not None:
+                            starts[key] = val
+            except Exception as e:
+                _safe_log("users", f"trial claim lookup failed: {e}")
+    if pair_lookup and pair_uids:
+        try:
+            for pay in payments_col.find({"user_id": {"$in": list(pair_uids)}}):
+                key = _norm_pair(pay.get('user_id'), pay.get('channel_id'))
+                if key in pair_lookup:
+                    ts = pay.get('timestamp')
+                    if ts is not None and (pair_lookup[key] is None or ts > pair_lookup[key]):
+                        pair_lookup[key] = ts
+        except Exception as e:
+            _safe_log("users", f"payment lookup failed: {e}")
+        for key, ts in pair_lookup.items():
+            if ts is not None:
+                starts[key] = ts
+    return starts
+
+
+def _active_subs_stats(now):
+    """Return (total_active_subs, total_distinct_active_users, admin_channel_ids)
+    using efficient count_documents + distinct (never loading full documents).
+    Raises when Mongo is unreachable so the caller never fakes zero users."""
+    admin_channel_ids = _admin_channel_ids()
+    if not admin_channel_ids:
+        # Distinguish 'no channels registered' from 'Mongo down': only report an
+        # empty result when the collection is actually queryable.
+        try:
+            channels_col.find_one({})
+        except Exception:
+            raise RuntimeError("mongo unavailable")
+        return 0, 0, admin_channel_ids
+    forms = list(admin_channel_ids) + [str(x) for x in admin_channel_ids]
+    query = {
+        "channel_id": {"$in": forms},
+        "$or": [
+            {"lifetime": True},
+            {"expiry": {"$gt": now}},
+        ],
+    }
+    total_subs = users_col.count_documents(query)
+    total_users = 0
+    try:
+        seen = set()
+        for uid in users_col.distinct("user_id", query):
+            try:
+                seen.add(int(uid))
+            except (TypeError, ValueError):
+                seen.add(uid)
+        total_users = len(seen)
+    except Exception as e:
+        _safe_log("users", f"distinct failed: {e}")
+        total_users = 0
+    return total_subs, total_users, admin_channel_ids
+
+
+def _fetch_users_page(admin_channel_ids, page, now):
+    """Fetch ONE page of active subscriptions (bounded by skip/limit — never the
+    whole collection) plus the per-user name map and start dates."""
+    per_page = USERS_PAGE_SIZE
+    forms = list(admin_channel_ids) + [str(x) for x in admin_channel_ids]
+    query = {
+        "channel_id": {"$in": forms},
+        "$or": [
+            {"lifetime": True},
+            {"expiry": {"$gt": now}},
+        ],
+    }
+    cursor = users_col.find(query)
+    cursor = cursor.sort([("user_id", 1), ("channel_id", 1)]).skip(page * per_page).limit(per_page)
+    entries = []
+    for s in cursor:
+        try:
+            uid = int(s['user_id'])
+            ch_id = int(s['channel_id'])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if ch_id not in admin_channel_ids:
+            continue
+        if not is_active_subscription(s, now):
+            continue
+        entries.append((uid, ch_id, s))
+    subs = [s for _u, _c, s in entries]
+    name_map = _build_name_map(subs)
+    starts = _build_start_dates(subs)
+    return entries, name_map, starts
+
+
+def _subs_block_lines(entries, name_map, starts, ch_names, now, idx0=0):
+    """Render the per-subscription text block for a list or detail view."""
+    lines = []
+    for i, (uid, ch_id, s) in enumerate(entries, start=1):
+        display = _user_display_name(name_map.get(uid, {}))
+        ch_name = ch_names.get(ch_id) or f"Channel {ch_id}"
+        status, remaining, expires = _sub_status_info(s, now)
+        typ = _sub_type_label(s)
+        start = _format_dt(starts.get(_norm_pair(uid, ch_id)))
+        lines.append(f"{idx0 + i}. {escape_markdown(display)}")
+        lines.append(f"   📺 {escape_markdown(ch_name)} — {typ}")
+        lines.append(f"   📅 Started: {escape_markdown(start)}")
+        lines.append(f"   ⏳ Expires: {escape_markdown(expires)}")
+        lines.append(f"   🕐 Remaining: {escape_markdown(remaining)}")
+        if status != "ACTIVE":
+            lines.append(f"   🚫 Status: {status}")
+    return lines
+
+
+def _build_users_list(now, page):
+    """Build (text, markup) for the paginated active-subscription list."""
+    per_page = USERS_PAGE_SIZE
+    total_subs, total_users, admin_channel_ids = _active_subs_stats(now)
+    total_pages = max(1, (total_subs + per_page - 1) // per_page)
+    page = max(0, min(page, total_pages - 1))
+
+    entries, name_map, starts = _fetch_users_page(admin_channel_ids, page, now)
+    ch_names = _channel_names(admin_channel_ids)
+
+    lines = ["👥 *Active Subscriptions*", ""]
+    if ch_names:
+        lines.append(f"📺 Channels: {escape_markdown(', '.join(sorted(ch_names.values())))}")
+    lines.append(f"👤 Total active users: *{total_users}*")
+    lines.append(f"📦 Total active subscriptions: *{total_subs}*")
+    lines.append("")
+    lines.append(f"Page {page + 1}/{total_pages}")
+    lines.append("")
+    if not entries:
+        lines.append("No active subscriptions found.")
+    else:
+        lines.extend(_subs_block_lines(entries, name_map, starts, ch_names, now, idx0=page * per_page))
+    text = "\n".join(lines)
+
+    markup = InlineKeyboardMarkup()
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"userspage_{page - 1}"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"userspage_{page + 1}"))
+    if nav:
+        markup.add(*nav)
+    markup.add(InlineKeyboardButton("🔄 Refresh", callback_data=f"usersref_{page}"))
+    for uid, ch_id, s in entries:
+        markup.add(InlineKeyboardButton(f"👤 Details {uid}", callback_data=f"usersdetail_{page}_{uid}"))
+    markup.add(InlineKeyboardButton("❌ Close", callback_data="usersclose"))
+    return text, markup
+
+
+def _render_users_list(chat_id, message_id, page=0, message_obj=None, now=None):
+    """Render the /users list (in place when editing an existing menu message).
+    Any Mongo failure shows 'temporarily unavailable' instead of fake zero users."""
+    if now is None:
+        now = datetime.now().timestamp()
+    try:
+        text, markup = _build_users_list(now, page)
+    except Exception as e:
+        _safe_log("users", f"list render failed: {e}")
+        text = "⚠️ The active-user list is temporarily unavailable. Please try again."
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("❌ Close", callback_data="usersclose"))
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown", message_obj=message_obj)
+    else:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
+
+def _render_user_detail(chat_id, message_id, uid, from_page=0, message_obj=None, now=None):
+    """Render the per-user detail view (all ACTIVE subscriptions for one user),
+    read-only. Back navigation returns to the page the admin came from."""
+    if now is None:
+        now = datetime.now().timestamp()
+    admin_channel_ids = _admin_channel_ids()
+    subs = None
+    if not admin_channel_ids:
+        text = "⚠️ The active-user list is temporarily unavailable. Please try again."
+    else:
+        forms = list(admin_channel_ids) + [str(x) for x in admin_channel_ids]
+        try:
+            found = []
+            for s in users_col.find({"user_id": int(uid), "channel_id": {"$in": forms}}):
+                try:
+                    ch_id = int(s['channel_id'])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if ch_id not in admin_channel_ids:
+                    continue
+                if not is_active_subscription(s, now):
+                    continue
+                found.append(s)
+            subs = found
+        except Exception as e:
+            _safe_log("users", f"detail lookup failed: {e}")
+        if subs is None:
+            text = "⚠️ The active-user list is temporarily unavailable. Please try again."
+        else:
+            name_map = _build_name_map(subs)
+            starts = _build_start_dates(subs)
+            ch_names = _channel_names(admin_channel_ids)
+            display = _user_display_name(name_map.get(int(uid), {}))
+            lines = [f"👤 *{escape_markdown(display)}* (ID: `{uid}`)", ""]
+            if not subs:
+                lines.append("No active subscriptions for this user.")
+            else:
+                lines.append(f"Active subscriptions: *{len(subs)}*")
+                lines.append("")
+                lines.extend(_subs_block_lines(
+                    [(int(s['user_id']), int(s['channel_id']), s) for s in subs],
+                    name_map, starts, ch_names, now))
+            text = "\n".join(lines).rstrip()
+
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("⬅️ Back to list", callback_data=f"usersback_{from_page}"),
+               InlineKeyboardButton("🔄 Refresh", callback_data=f"usersrefd_{uid}"))
+    markup.add(InlineKeyboardButton("❌ Close", callback_data="usersclose"))
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown", message_obj=message_obj)
+    else:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
+
+@bot.message_handler(commands=['users'])
+def users_command_handler(message):
+    """ADMIN-ONLY, read-only active-subscription viewer."""
+    if not getattr(message, 'from_user', None):
+        return
+    if not ADMIN_ID or message.from_user.id != ADMIN_ID:
+        send_command_reply(message, f"❌ Access denied. Your User ID (`{message.from_user.id}`) is not configured as ADMIN_ID.", parse_mode="Markdown")
+        return
+    if message.chat.type != 'private':
+        _safe_reply(message, "⚠️ /users only works in a private chat with the bot.", parse_mode="Markdown")
+        return
+
+    dismiss_previous(message.chat.id, message.from_user.id)
+
+    args = message.text.split()[1:]
+    if args:
+        uid = _users_search_resolve(args[0])
+        if uid is None:
+            send_command_reply(message, "❌ No user found for that search. Use a numeric User ID or @username.", parse_mode="Markdown")
+            return
+        _render_user_detail(message.chat.id, None, uid, from_page=0)
+        return
+    _render_users_list(message.chat.id, None, page=0)
+
+
+def _users_cb_ints(data):
+    """Strictly parse the numeric payload of a users*_ callback. callback_data is
+    always attacker-controlled, so every part must be all-digits; returns the
+    int list or None when anything is malformed."""
+    if not data or not data.startswith('users'):
+        return None
+    head, _, rest = data.partition('_')
+    if head not in ('userspage', 'usersref', 'usersdetail', 'usersback', 'usersrefd'):
+        return None
+    if not rest:
+        return None
+    nums = []
+    for part in rest.split('_'):
+        if not part.isdigit():
+            return None
+        nums.append(int(part))
+    return nums
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('userspage_'))
+def cb_users_page(call):
+    if not _require_admin(call):
+        return
+    if not call.data.startswith('userspage_'):
+        return
+    nums = _users_cb_ints(call.data)
+    if not nums or len(nums) != 1:
+        return
+    page = nums[0]
+    bot.answer_callback_query(call.id)
+    _render_users_list(call.message.chat.id, call.message.message_id, page=page, message_obj=call.message)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('usersref_'))
+def cb_users_refresh(call):
+    if not _require_admin(call):
+        return
+    if not call.data.startswith('usersref_'):
+        return
+    nums = _users_cb_ints(call.data)
+    if not nums or len(nums) != 1:
+        return
+    page = nums[0]
+    bot.answer_callback_query(call.id)
+    _render_users_list(call.message.chat.id, call.message.message_id, page=page, message_obj=call.message)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('usersdetail_'))
+def cb_users_detail(call):
+    if not _require_admin(call):
+        return
+    if not call.data.startswith('usersdetail_'):
+        return
+    nums = _users_cb_ints(call.data)
+    if not nums or len(nums) != 2:
+        return
+    page, uid = nums
+    bot.answer_callback_query(call.id)
+    _render_user_detail(call.message.chat.id, call.message.message_id, uid, from_page=page, message_obj=call.message)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('usersback_'))
+def cb_users_back(call):
+    if not _require_admin(call):
+        return
+    if not call.data.startswith('usersback_'):
+        return
+    nums = _users_cb_ints(call.data)
+    if not nums or len(nums) != 1:
+        return
+    page = nums[0]
+    bot.answer_callback_query(call.id)
+    _render_users_list(call.message.chat.id, call.message.message_id, page=page, message_obj=call.message)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('usersrefd_'))
+def cb_users_refresh_detail(call):
+    if not _require_admin(call):
+        return
+    if not call.data.startswith('usersrefd_'):
+        return
+    nums = _users_cb_ints(call.data)
+    if not nums or len(nums) != 1:
+        return
+    uid = nums[0]
+    bot.answer_callback_query(call.id)
+    _render_user_detail(call.message.chat.id, call.message.message_id, uid, from_page=0, message_obj=call.message)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "usersclose")
+def cb_users_close(call):
+    if not _require_admin(call):
+        return
+    bot.answer_callback_query(call.id)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
+
 @bot.message_handler(commands=['remove'])
 @bot.channel_post_handler(commands=['remove'])
 def group_remove_handler(message):
@@ -4787,6 +5375,10 @@ def setup_indexes():
     # --- seen_users_col: (user_id) unique prevents duplicate user tracking. ---
     _create_index_checked(seen_users_col, [("user_id", 1)], unique=True)
     _create_index_checked(seen_users_col, [("last_seen", 1)])
+    # --- seen_users_col: username lookup for /users @username search. Non-unique
+    # (usernames may repeat across unrelated accounts); idempotent no-op if the
+    # index already exists. ---
+    _create_index_checked(seen_users_col, [("username", 1)])
 
     # --- pending_checkouts_col ---
     _create_index_checked(pending_checkouts_col, [("user_id", 1)])
