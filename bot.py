@@ -1270,6 +1270,7 @@ def setup_commands():
         BotCommand("import", "Import member list for a group/channel"),
         BotCommand("sync", "Tracked chats & re-sync members"),
         BotCommand("pending", "Review pending payment checkouts"),
+        BotCommand("users", "Users Information"),
     ]
     group_admin_commands = [
         BotCommand("remove", "Remove user(s) from this group/channel"),
