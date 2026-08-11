@@ -133,88 +133,11 @@ REACT_EMOJIS = [
 bot = telebot.TeleBot(BOT_TOKEN, use_class_middlewares=True)
 
 # --- AUTO-REACT QUEUE SYSTEM ---
-# Uses a single persistent background thread to send message reactions sequentially.
-# This prevents spawning separate threads for every message, avoids connection pool exhaustion,
-# and handles Telegram rate limits (429) gracefully by sleeping and retrying.
-#
-# Protection (bounded memory / bounded retries):
-#   - The queue is size-bounded (REACTION_QUEUE_MAX). When it is full under high
-#     traffic, new reactions are dropped and a warning is logged — the message
-#     handler itself is never blocked.
-#   - Identical pending tasks (same chat+message) are de-duplicated so the same
-#     message is never queued twice.
-#   - A single task is retried at most REACTION_MAX_RETRIES times on Telegram 429
-#     (with retry_after backoff) and then dropped — no infinite requeue loops.
-#   - All failures are handled inside the worker; a bad task can never crash the bot.
-
-REACTION_QUEUE_MAX = 4000
-REACTION_MAX_RETRIES = 3
-
-reaction_queue = Queue(maxsize=REACTION_QUEUE_MAX)
-_reaction_queued_keys = set()
-_reaction_keys_lock = Lock()
-
-def _enqueue_reaction(chat_id, message_id):
-    """Queue a reaction task with dedup + a bounded queue. Never blocks the caller."""
-    key = (chat_id, message_id)
-    with _reaction_keys_lock:
-        if key in _reaction_queued_keys:
-            return
-        if reaction_queue.full():
-            _safe_log("reaction", f"queue full — dropping reaction for message {message_id} in chat {chat_id}")
-            return
-        _reaction_queued_keys.add(key)
-    try:
-        reaction_queue.put_nowait(key)
-    except QueueFull:
-        with _reaction_keys_lock:
-            _reaction_queued_keys.discard(key)
-        _safe_log("reaction", f"queue full — dropping reaction for message {message_id} in chat {chat_id}")
-
-def reaction_worker():
-    import time
-    while True:
-        try:
-            chat_id, message_id = reaction_queue.get()
-        except Exception:
-            continue
-        try:
-            for attempt in range(REACTION_MAX_RETRIES):
-                try:
-                    emoji = random.choice(REACT_EMOJIS)
-                    bot.set_message_reaction(
-                        chat_id,
-                        message_id,
-                        reaction=[telebot.types.ReactionTypeEmoji(emoji)],
-                        is_big=False
-                    )
-                    break
-                except telebot.apihelper.ApiTelegramException as e:
-                    # If we get rate limited (429), wait and retry (bounded).
-                    if e.error_code == 429:
-                        retry_after = 2
-                        try:
-                            if hasattr(e, 'result_json') and e.result_json and 'parameters' in e.result_json:
-                                retry_after = e.result_json['parameters'].get('retry_after', 2)
-                        except Exception:
-                            pass
-                        time.sleep(max(0.5, float(retry_after or 2)))
-                        continue
-                    break  # permanent error — drop the task
-                except Exception:
-                    break
-        except Exception:
-            pass
-        finally:
-            with _reaction_keys_lock:
-                _reaction_queued_keys.discard((chat_id, message_id))
-            try:
-                reaction_queue.task_done()
-            except Exception:
-                pass
-
-# Start the auto-react worker thread
-Thread(target=reaction_worker, daemon=True).start()
+# Durable, MongoDB-backed auto-react backlog (full implementation lives with the
+# collection definitions below). Every eligible message is persisted as a reaction
+# job in MongoDB; a small controlled worker pool (NOT one thread per message)
+# claims jobs atomically. Jobs survive restarts and are NEVER dropped for queue
+# capacity — MongoDB is the durable backlog.
 
 class AutoReactMiddleware(BaseMiddleware):
     def __init__(self):
@@ -274,6 +197,252 @@ free_trials_col = db['free_trials']          # admin-configured free trial plans
 free_trial_claims_col = db['free_trial_claims']  # PERMANENT "one trial ever" claim records (never deleted)
 free_trial_claims_history_col = db['free_trial_claims_history']  # archive of legacy duplicate claims moved during index migration
 revenue_ledger_col = db['revenue_ledger']    # exactly-once revenue/sale ledger (one doc per approved checkout item)
+reaction_jobs_col = db['reaction_jobs']      # durable auto-react backlog (never dropped for queue capacity)
+
+# --- AUTO-REACT QUEUE SYSTEM (durable, MongoDB-backed) ---
+# Every eligible message is persisted as a reaction_jobs document, so the backlog
+# survives restarts and is never bounded by an in-memory queue. A SMALL controlled
+# worker pool (REACTION_WORKERS threads, NOT one thread per message) atomically
+# claims jobs, so two workers can never process the same job simultaneously.
+#
+# Job lifecycle:
+#   pending  -> claimed (processing) -> completed  (Telegram accepted the reaction)
+#   pending/retry -> processing -> retry          (429 / transient / network error;
+#                                                  next_attempt_at scheduled with safe
+#                                                  exponential backoff — a job is NEVER
+#                                                  discarded just for exceeding retries)
+#   ... -> failed                                 (permanent error, e.g. the message was
+#                                                  deleted / unavailable; audited via last_error)
+#
+# Lease-based recovery: a 'processing' job whose processing_until has passed can be
+# reclaimed by any worker (covers worker crash / Render restart). An active lease is
+# never stolen.
+#
+# The in-memory wake queue holds ONLY wake-up tokens (never jobs) — a pure
+# optimization so idle workers wake instantly when a job is enqueued. MongoDB is
+# the durable backlog; the wake queue is not a replacement for it.
+
+REACTION_WORKERS = 3
+REACTION_LEASE_TIMEOUT = 120            # seconds a claimed job may take before it may be reclaimed
+REACTION_POLL_SECONDS = 1.0             # max sleep of an idle worker (wake queue wakes it earlier)
+REACTION_RETRY_BASE_SECONDS = 2.0       # first backoff delay for recoverable failures
+REACTION_RETRY_MAX_SECONDS = 300.0      # backoff never exceeds 5 minutes
+REACTION_RETENTION_SECONDS = 24 * 3600  # completed/failed jobs pruned after 24h (bounded memory)
+
+reaction_wake_queue = Queue(maxsize=REACTION_WORKERS)
+
+
+def _reaction_backoff(attempts):
+    """Safe exponential backoff for recoverable failures (never grows unbounded)."""
+    try:
+        attempts = max(0, int(attempts))
+    except (TypeError, ValueError):
+        attempts = 0
+    return min(REACTION_RETRY_BASE_SECONDS * (2 ** min(attempts, 8)), REACTION_RETRY_MAX_SECONDS)
+
+
+def _reaction_retry_after(e):
+    """Extract Telegram's retry_after from a 429 (seconds) when available, else the
+    base backoff delay."""
+    try:
+        if hasattr(e, 'result_json') and e.result_json and 'parameters' in e.result_json:
+            v = float(e.result_json['parameters'].get('retry_after', 0))
+            if v > 0:
+                return min(v, REACTION_RETRY_MAX_SECONDS)
+    except Exception:
+        pass
+    return REACTION_RETRY_BASE_SECONDS
+
+
+def _wake_workers():
+    """Wake idle workers. The wake queue holds only wake tokens (never jobs), so a
+    full queue simply means the workers are already awake — tokens may be dropped."""
+    for _ in range(REACTION_WORKERS):
+        try:
+            reaction_wake_queue.put_nowait(1)
+        except QueueFull:
+            return
+
+
+def _enqueue_reaction(chat_id, message_id):
+    """Persist a reaction job for one message. Never blocks the handler and never
+    drops a job because of queue capacity — MongoDB is the durable backlog.
+    The unique (chat_id, message_id) index guarantees a duplicate delivery of the
+    exact same message creates only one job; different messages always differ."""
+    try:
+        chat_id = int(chat_id)
+        message_id = int(message_id)
+    except (TypeError, ValueError):
+        return
+    try:
+        reaction_jobs_col.update_one(
+            {"chat_id": chat_id, "message_id": message_id},
+            {"$setOnInsert": {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "status": "pending",
+                "attempts": 0,
+                "created_at": datetime.now(),
+                "next_attempt_at": time.time(),
+                "processing_until": None,
+                "last_error": None,
+            }},
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        pass  # an identical job already exists — never a second job
+    except Exception as e:
+        _safe_log("reaction", f"could not persist reaction job for message {message_id} in chat {chat_id}: {e}")
+    _wake_workers()
+
+
+def _claim_reaction_job(worker_index, now):
+    """Atomically claim ONE eligible job: status pending/retry with a due
+    next_attempt_at, OR a 'processing' job whose lease has expired. The atomic
+    find_one_and_update is the ONLY way a job leaves the eligible pool, so two
+    workers can never claim the same job simultaneously. An active lease is never
+    reclaimed."""
+    filter_ = {
+        "$and": [
+            {"$or": [
+                {"status": "pending"},
+                {"status": "retry"},
+                {"status": {"$exists": False}},                     # legacy docs default to pending
+                {"status": "processing", "processing_until": {"$lte": now}},  # expired lease
+            ]},
+            {"$or": [
+                {"next_attempt_at": {"$lte": now}},
+                {"next_attempt_at": None},                          # also matches missing
+            ]},
+        ]
+    }
+    try:
+        return reaction_jobs_col.find_one_and_update(
+            filter_,
+            {"$set": {
+                "status": "processing",
+                "processing_until": now + REACTION_LEASE_TIMEOUT,
+                "processing_started_at": datetime.now(),
+                "worker_id": worker_index,
+            }},
+            return_document=ReturnDocument.AFTER,
+        )
+    except Exception as e:
+        _safe_log("reaction", f"claim failed for worker {worker_index}: {e}")
+        return None
+
+
+def _reaction_finish(job, status, attempts_inc=False, delay=0.0, err=None, now=None):
+    """Persist the outcome of a claimed job. The update is guarded by the job's own
+    lease (status='processing' + its processing_until), so a stale worker whose
+    lease was reclaimed can never overwrite the new owner's work."""
+    if now is None:
+        now = time.time()
+    job_id = job['_id']
+    updates = {
+        "status": status,
+        "processing_until": None,
+        "last_error": _redact(err) if err else None,
+    }
+    if status == "completed":
+        updates["completed_at"] = datetime.now()
+        updates["next_attempt_at"] = None
+    elif status == "failed":
+        updates["completed_at"] = datetime.now()
+        updates["next_attempt_at"] = None
+    elif status == "retry":
+        updates["next_attempt_at"] = now + max(0.0, float(delay))
+    if attempts_inc:
+        updates["attempts"] = int(job.get('attempts') or 0) + 1
+    try:
+        reaction_jobs_col.update_one(
+            {"_id": job_id, "status": "processing", "processing_until": job.get('processing_until')},
+            {"$set": updates},
+        )
+    except Exception as e:
+        _safe_log("reaction", f"could not persist state '{status}' for job {job_id}: {e}")
+
+
+def _process_reaction_job(job):
+    """Send ONE reaction for a claimed job, then persist the outcome. The emoji is
+    selected with the existing random picker — eligibility rules are unchanged."""
+    chat_id = job.get('chat_id')
+    message_id = job.get('message_id')
+    if chat_id is None or message_id is None:
+        _reaction_finish(job, "failed", err="job missing chat_id/message_id")
+        return
+    try:
+        emoji = random.choice(REACT_EMOJIS)
+        bot.set_message_reaction(
+            chat_id,
+            message_id,
+            reaction=[telebot.types.ReactionTypeEmoji(emoji)],
+            is_big=False
+        )
+    except telebot.apihelper.ApiTelegramException as e:
+        code = getattr(e, 'error_code', None)
+        if code == 429:
+            # Rate limited: use Telegram's retry_after so the job waits the correct
+            # time. The worker is NOT blocked meanwhile — it moves to the next job.
+            _reaction_finish(job, "retry", attempts_inc=True,
+                             delay=_reaction_retry_after(e), err="rate limited")
+            return
+        if code in (500, 502, 503, 504, 420):
+            # Transient server / flood errors — recoverable, retry with backoff.
+            _reaction_finish(job, "retry", attempts_inc=True,
+                             delay=_reaction_backoff(job.get('attempts') or 0), err=str(e))
+            return
+        # Permanent Telegram error (e.g. message deleted / unavailable, bot lacks
+        # rights) — auditable dead-letter, never retried forever.
+        _reaction_finish(job, "failed", attempts_inc=True, err=str(e))
+        return
+    except Exception as e:
+        # Network / other transient failures — recoverable with backoff.
+        _reaction_finish(job, "retry", attempts_inc=True,
+                         delay=_reaction_backoff(job.get('attempts') or 0), err=str(e))
+        return
+    _reaction_finish(job, "completed", attempts_inc=True)
+
+
+def _reaction_worker(worker_index):
+    from queue import Empty
+    while True:
+        now = time.time()
+        job = _claim_reaction_job(worker_index, now)
+        if job is None:
+            try:
+                reaction_wake_queue.get(timeout=REACTION_POLL_SECONDS)
+            except Empty:
+                pass
+            continue
+        try:
+            _process_reaction_job(job)
+        except Exception as e:
+            # Safety net: a crash must never leave a job under a live lease forever.
+            _safe_log("reaction", f"worker {worker_index} crashed while processing job {job.get('_id')}: {e}")
+            _reaction_finish(job, "retry", attempts_inc=True,
+                             delay=_reaction_backoff(job.get('attempts') or 0), err=str(e))
+
+
+def cleanup_reaction_jobs():
+    """Prune completed/failed reaction jobs after the retention window so the
+    durable backlog (which replaced the bounded in-memory queue) stays bounded.
+    Never touches pending/retry/processing jobs."""
+    try:
+        cutoff = datetime.now() - timedelta(seconds=REACTION_RETENTION_SECONDS)
+        res = reaction_jobs_col.delete_many({
+            "status": {"$in": ["completed", "failed"]},
+            "completed_at": {"$lte": cutoff},
+        })
+        if res.deleted_count:
+            _safe_log("reaction", f"pruned {res.deleted_count} old completed/failed reaction jobs")
+    except Exception as e:
+        _safe_log("reaction", f"cleanup failed: {e}")
+
+
+# Start the small controlled worker pool (not one thread per message).
+for _wi in range(REACTION_WORKERS):
+    Thread(target=_reaction_worker, args=(_wi,), daemon=True).start()
 
 def track_chat_member(chat_id, user_id, username=None, first_name=None):
     if not chat_id or not user_id:
@@ -1270,7 +1439,6 @@ def setup_commands():
         BotCommand("import", "Import member list for a group/channel"),
         BotCommand("sync", "Tracked chats & re-sync members"),
         BotCommand("pending", "Review pending payment checkouts"),
-        BotCommand("users", "Users Information"),
     ]
     group_admin_commands = [
         BotCommand("remove", "Remove user(s) from this group/channel"),
@@ -5390,6 +5558,13 @@ def setup_indexes():
     _create_index_checked(chat_members_col, [("chat_id", 1), ("user_id", 1)])
     _create_index_checked(chat_members_col, [("chat_id", 1)])
 
+    # --- reaction_jobs_col: durable auto-react backlog. (chat_id, message_id) is
+    # the unique job identity (dedup — one job per message); (status,
+    # next_attempt_at) drives the worker claim query. Idempotent: create_index is
+    # a no-op when an index already exists and existing indexes are never removed. ---
+    _create_index_checked(reaction_jobs_col, [("chat_id", 1), ("message_id", 1)], unique=True)
+    _create_index_checked(reaction_jobs_col, [("status", 1), ("next_attempt_at", 1)])
+
 def bootstrap_counters():
     """One-time migration: if counters_col doesn't exist yet, seed it from whatever
     payment history already exists, so /stats totals don't reset to zero after this update."""
@@ -5439,6 +5614,7 @@ if __name__ == '__main__':
     scheduler.add_job(kick_expired_users, 'interval', minutes=1)
     scheduler.add_job(send_expiry_reminders, 'interval', minutes=5)
     scheduler.add_job(sync_all_tracked_chats, 'interval', minutes=30)
+    scheduler.add_job(cleanup_reaction_jobs, 'interval', minutes=60)
     scheduler.start()
     bot.remove_webhook()
     # Small pause so that if a previous deploy's instance is still shutting down
