@@ -123,18 +123,60 @@ bot = telebot.TeleBot(BOT_TOKEN, use_class_middlewares=True)
 # if the process restarts mid-burst, whatever's still queued at that moment is lost.
 REACTION_BACKLOG_CAP = None
 
+# --- AUTO-REACT QUEUE SYSTEM ---
+# One queue + one worker thread PER CHAT (spawned lazily, exits when idle) instead of a
+# single bot-wide queue/worker. Telegram enforces its own reaction rate limit of roughly
+# 1 reaction/sec PER CHAT — nothing in this code can send faster than that for a single
+# chat. What a single global worker DID get wrong: a burst in one chat (e.g. 100 messages
+# sent/forwarded back-to-back) would occupy the one worker thread and delay/starve
+# reactions for every OTHER chat talking to the bot at the same time. Per-chat queues fix
+# that part.
+#
+# REACTION_BACKLOG_CAP: if set to an int, once a chat's backlog passes that size the
+# worker skips the oldest queued reactions and jumps to the most recent ones (useful if
+# you'd rather the bot stay "caught up" than slowly react to a burst from minutes ago).
+# Set to None (default) to react to EVERY queued message, no skipping — a 100-message
+# burst will all get reacted to, just paced out at ~1/sec by Telegram's own limit, so the
+# last ones will land roughly 1.5-2 minutes after the first. Note the queue is in-memory
+# (backed by MongoDB, see below) so a mid-burst restart is recovered on startup.
+REACTION_BACKLOG_CAP = None
+
+# Every failure is retried, not just 429s — a bare network hiccup, or Telegram briefly
+# not being ready to accept a reaction on a message that was JUST sent a moment ago
+# (a real, observed transient condition), used to be treated as a permanent failure and
+# silently dropped on the very first try. Now anything gets up to this many attempts
+# before the bot actually gives up and logs it.
+REACTION_MAX_ATTEMPTS = 6
+REACTION_RETRY_DELAY = 1.5  # base delay (seconds) between retries for non-429 errors
+
 reaction_queues = {}       # chat_id -> Queue
 import threading as _threading
 _reaction_queues_lock = _threading.Lock()
+
+def _requeue_or_giveup(q, chat_id, message_id, attempt, delay, error=None):
+    """Shared retry logic for both 429s and any other error. Keeps retrying (paced by
+    `delay`) up to REACTION_MAX_ATTEMPTS before finally giving up and logging it clearly,
+    so a real permanent failure is at least visible instead of just looking like a miss."""
+    if attempt < REACTION_MAX_ATTEMPTS:
+        time.sleep(delay)
+        q.put((message_id, attempt + 1))
+    else:
+        print(f"[auto-react] giving up on chat {chat_id} message {message_id} "
+              f"after {attempt} attempts" + (f": {error}" if error else ""))
+        _clear_pending_reaction(chat_id, message_id)
 
 def _reaction_worker_for_chat(chat_id):
     q = reaction_queues[chat_id]
     while True:
         try:
-            message_id = q.get(timeout=5)
+            message_id, attempt = q.get(timeout=5)
         except Exception:
             # Queue empty for 5s straight -> retire this chat's worker thread instead of
-            # leaving idle threads around forever. Re-created on demand by queue_reaction().
+            # leaving idle threads around forever. The empty-check-and-remove happens
+            # under the SAME lock that queue_reaction() uses for its put(), so a message
+            # arriving at this exact instant can never be silently orphaned: either this
+            # thread sees it and stays alive, or queue_reaction() finds the entry already
+            # gone and spins up a fresh worker for it.
             with _reaction_queues_lock:
                 if q.empty():
                     reaction_queues.pop(chat_id, None)
@@ -171,19 +213,18 @@ def _reaction_worker_for_chat(chat_id):
                         retry_after = e.result_json['parameters'].get('retry_after', 2)
                 except Exception:
                     pass
-                time.sleep(retry_after)
-                q.put(message_id)  # retry the SAME message, don't just drop it
-                continue  # still pending — leave the persisted record in place, don't clear it
+                _requeue_or_giveup(q, chat_id, message_id, attempt, delay=max(0.5, retry_after), error=e)
             else:
-                # Previously swallowed silently — now logged so real failures (as opposed
-                # to normal rate-limit delay) are actually visible instead of looking like
-                # "the bot just didn't react to that one".
-                print(f"[auto-react] failed to react in chat {chat_id} to message {message_id}: {e}")
+                # Previously dropped after a single try — now retried like everything
+                # else, since plenty of these (e.g. a message not yet reactable a split
+                # second after being sent) are transient, not permanent.
+                _requeue_or_giveup(q, chat_id, message_id, attempt, delay=REACTION_RETRY_DELAY, error=e)
         except Exception as e:
-            print(f"[auto-react] unexpected error reacting in chat {chat_id} to message {message_id}: {e}")
+            _requeue_or_giveup(q, chat_id, message_id, attempt, delay=REACTION_RETRY_DELAY, error=e)
+        else:
+            _clear_pending_reaction(chat_id, message_id)
         finally:
             q.task_done()
-        _clear_pending_reaction(chat_id, message_id)
 
 def _persist_pending_reaction(chat_id, message_id):
     """Durably record a queued-but-not-yet-sent reaction so it survives a process
@@ -225,7 +266,9 @@ def resume_pending_reactions():
 
 def queue_reaction(chat_id, message_id):
     """Queue a message for an auto-reaction, starting a worker thread for this chat
-    if one isn't already running. Also persisted to MongoDB so it survives a restart."""
+    if one isn't already running. Also persisted to MongoDB so it survives a restart.
+    The put() happens under the same lock used to decide whether a worker retires, so
+    a message can never land in an orphaned queue with nobody left to process it."""
     _persist_pending_reaction(chat_id, message_id)
     with _reaction_queues_lock:
         q = reaction_queues.get(chat_id)
@@ -233,7 +276,7 @@ def queue_reaction(chat_id, message_id):
             q = Queue()
             reaction_queues[chat_id] = q
             Thread(target=_reaction_worker_for_chat, args=(chat_id,), daemon=True).start()
-    q.put(message_id)
+        q.put((message_id, 0))
 
 def reaction_backlog_size(chat_id=None):
     """Total number of reactions still waiting (in-memory queues, which is what
@@ -1337,14 +1380,11 @@ def setup_commands():
         BotCommand("pending", "Review pending payment checkouts"),
         BotCommand("reactcachestatus", "Check auto-react backlog size"),
         BotCommand("clearreactcache", "Clear the auto-react backlog"),
-        BotCommand("users", "User Info"),
     ]
     group_admin_commands = [
         BotCommand("remove", "Remove user(s) from this group/channel"),
         BotCommand("sync", "Sync member data of this group/channel"),
         BotCommand("import", "Import member list for this group/channel"),
-        BotCommand("reactcachestatus", "Check auto-react backlog size"),
-        BotCommand("clearreactcache", "Clear the auto-react backlog"),
     ]
     bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
     if ADMIN_ID:
