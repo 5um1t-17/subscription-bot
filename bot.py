@@ -235,6 +235,58 @@ def queue_reaction(chat_id, message_id):
             Thread(target=_reaction_worker_for_chat, args=(chat_id,), daemon=True).start()
     q.put(message_id)
 
+def reaction_backlog_size(chat_id=None):
+    """Total number of reactions still waiting (in-memory queues, which is what
+    actually drives the delay the admin experiences). Pass a chat_id to check just
+    one chat, or omit for the total across every chat."""
+    with _reaction_queues_lock:
+        if chat_id is not None:
+            q = reaction_queues.get(chat_id)
+            return q.qsize() if q else 0
+        return sum(q.qsize() for q in reaction_queues.values())
+
+def _drain_queue(q):
+    """Empty a Queue object in place, returning how many items were removed.
+    Note: if a worker thread has already pulled an item off and is mid-send, that
+    one message will still get its reaction — this only clears what's still waiting."""
+    removed = 0
+    while True:
+        try:
+            q.get_nowait()
+            q.task_done()
+            removed += 1
+        except Exception:
+            break
+    return removed
+
+def clear_reaction_cache(chat_id=None):
+    """Wipe the reaction backlog — both the in-memory queue(s) and the persisted
+    MongoDB records — so the bot stops working through a large/stale backlog and
+    reacts promptly to new messages again. Returns (in_memory_cleared, persisted_cleared).
+
+    Pass a chat_id to clear just that chat's backlog, or omit to clear everything.
+    Whatever is cleared here will simply never get a reaction — this trades
+    completeness for the bot staying responsive/current, so use it when a backlog
+    has grown large enough that reacting to it is no longer useful (e.g. after a
+    100+ message forward you don't actually care about reacting to anymore)."""
+    in_memory_cleared = 0
+    with _reaction_queues_lock:
+        if chat_id is not None:
+            q = reaction_queues.get(chat_id)
+            if q:
+                in_memory_cleared = _drain_queue(q)
+        else:
+            for q in reaction_queues.values():
+                in_memory_cleared += _drain_queue(q)
+    try:
+        if chat_id is not None:
+            persisted_cleared = pending_reactions_col.delete_many({"chat_id": chat_id}).deleted_count
+        else:
+            persisted_cleared = pending_reactions_col.delete_many({}).deleted_count
+    except Exception:
+        persisted_cleared = 0
+    return in_memory_cleared, persisted_cleared
+
 class AutoReactMiddleware(BaseMiddleware):
     def __init__(self):
         self.update_types = ['message', 'channel_post']
@@ -1283,11 +1335,16 @@ def setup_commands():
         BotCommand("import", "Import member list for a group/channel"),
         BotCommand("sync", "Tracked chats & re-sync members"),
         BotCommand("pending", "Review pending payment checkouts"),
+        BotCommand("reactcachestatus", "Check auto-react backlog size"),
+        BotCommand("clearreactcache", "Clear the auto-react backlog"),
+        BotCommand("users", "User Info"),
     ]
     group_admin_commands = [
         BotCommand("remove", "Remove user(s) from this group/channel"),
         BotCommand("sync", "Sync member data of this group/channel"),
         BotCommand("import", "Import member list for this group/channel"),
+        BotCommand("reactcachestatus", "Check auto-react backlog size"),
+        BotCommand("clearreactcache", "Clear the auto-react backlog"),
     ]
     bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
     if ADMIN_ID:
@@ -3065,6 +3122,66 @@ def cleanup_handler(message):
     # Animate out previous bot reply, then show cleanup menu
     dismiss_previous(message.chat.id, message.from_user.id)
     show_cleanup_menu(message.chat.id, user_id=message.from_user.id)
+
+@bot.message_handler(commands=['clearreactcache'], func=lambda m: m.from_user.id == ADMIN_ID)
+def clear_react_cache_handler(message):
+    """Admin escape hatch: wipe the auto-react backlog (in-memory + persisted) so the
+    bot stops slowly working through a large/stale queue and reacts promptly to new
+    messages again. Anything cleared here simply never gets a reaction — it trades
+    completeness for staying current, which is the right trade once a backlog has
+    grown large enough that reacting to it late isn't useful anymore.
+
+    Usage:
+      /clearreactcache            -> clear the backlog for every chat
+      /clearreactcache <chat_id>  -> clear the backlog for just one chat
+      /reactcachestatus           -> check the current backlog size first (see below)"""
+    dismiss_previous(message.chat.id, message.from_user.id)
+    args = message.text.split()[1:]
+    if args:
+        try:
+            chat_id = int(args[0].strip())
+        except ValueError:
+            send_command_reply(message,
+                "❌ Invalid chat id. Usage: `/clearreactcache` (clears every chat) or "
+                "`/clearreactcache <chat_id>` (clears just one chat).", parse_mode="Markdown")
+            return
+        mem, persisted = clear_reaction_cache(chat_id)
+        send_command_reply(message,
+            f"✅ Cleared reaction backlog for chat `{chat_id}`.\n"
+            f"In-memory: {mem} | Persisted: {persisted}", parse_mode="Markdown")
+    else:
+        mem, persisted = clear_reaction_cache()
+        send_command_reply(message,
+            f"✅ Cleared the entire reaction backlog across all chats.\n"
+            f"In-memory: {mem} | Persisted: {persisted}\n\n"
+            f"New messages will start getting reactions promptly again.")
+
+@bot.message_handler(commands=['reactcachestatus'], func=lambda m: m.from_user.id == ADMIN_ID)
+def react_cache_status_handler(message):
+    """Quick check of how backed-up the auto-react queue is before deciding whether
+    to /clearreactcache."""
+    dismiss_previous(message.chat.id, message.from_user.id)
+    args = message.text.split()[1:]
+    if args:
+        try:
+            chat_id = int(args[0].strip())
+        except ValueError:
+            send_command_reply(message, "❌ Invalid chat id. Usage: `/reactcachestatus <chat_id>`.", parse_mode="Markdown")
+            return
+        size = reaction_backlog_size(chat_id)
+        send_command_reply(message, f"📊 Reaction backlog for chat `{chat_id}`: {size} message(s) waiting.", parse_mode="Markdown")
+    else:
+        with _reaction_queues_lock:
+            per_chat = {cid: q.qsize() for cid, q in reaction_queues.items() if q.qsize() > 0}
+        total = sum(per_chat.values())
+        if not per_chat:
+            send_command_reply(message, "📊 Reaction backlog: empty across all chats.")
+            return
+        lines = [f"📊 Reaction backlog: {total} message(s) waiting across {len(per_chat)} chat(s):"]
+        for cid, size in sorted(per_chat.items(), key=lambda x: -x[1])[:10]:
+            lines.append(f"• `{cid}`: {size}")
+        lines.append("\nUse `/clearreactcache <chat_id>` to clear one, or `/clearreactcache` to clear all.")
+        send_command_reply(message, "\n".join(lines), parse_mode="Markdown")
 
 def show_cleanup_menu(chat_id, message_id=None, user_id=None):
     now = datetime.now()
