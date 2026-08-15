@@ -5,6 +5,7 @@ import re
 import time
 import io
 import secrets
+import traceback
 from html import escape
 import telebot
 import segno
@@ -103,7 +104,24 @@ REACT_EMOJIS = [
     "🔥", "🌚", "💋", "🍌", "🌭"
 ]
 
-bot = telebot.TeleBot(BOT_TOKEN, use_class_middlewares=True)
+class _BotExceptionLogger(telebot.ExceptionHandler):
+    """telebot's default behavior for an exception raised inside a middleware or
+    handler is to log it via logger.debug(), which is invisible in production unless
+    debug-level logging is explicitly enabled — the update is then silently abandoned.
+    This makes those failures actually show up in the console/Render logs instead of
+    disappearing with zero trace (which is exactly how a message could fail to get an
+    auto-reaction with nothing showing up in the logs)."""
+    def handle(self, exception):
+        print(f"[bot] unhandled exception in a handler/middleware: {exception}")
+        traceback.print_exc()
+        return True  # mark as handled so telebot doesn't also raise it elsewhere
+
+# num_threads defaults to 2 — that's ONE shared pool of 2 threads processing every
+# incoming update (messages, callbacks, everything) for the whole bot. A burst like
+# forwarding 20 messages at once bottlenecks through just those 2 threads alongside
+# whatever else the bot is doing at that moment. Raised to give bursts real headroom.
+bot = telebot.TeleBot(BOT_TOKEN, use_class_middlewares=True, num_threads=16,
+                      exception_handler=_BotExceptionLogger())
 
 # --- AUTO-REACT QUEUE SYSTEM ---
 # One queue + one worker thread PER CHAT (spawned lazily, exits when idle) instead of a
@@ -146,7 +164,14 @@ REACTION_BACKLOG_CAP = None
 # (a real, observed transient condition), used to be treated as a permanent failure and
 # silently dropped on the very first try. Now anything gets up to this many attempts
 # before the bot actually gives up and logs it.
-REACTION_MAX_ATTEMPTS = 6
+#
+# Telegram doesn't just throttle reactions at a flat rate — during a burst it escalates
+# the retry_after it hands back the more you exceed the limit (e.g. 2s, then 4s, then
+# 8s...). A low attempt cap can get exhausted by that escalation alone during a big
+# forward, even though every individual wait was honored correctly. Since each chat has
+# its own isolated queue/worker, a high cap here costs nothing but patience for that one
+# chat — it doesn't block or slow down anything else.
+REACTION_MAX_ATTEMPTS = 25
 REACTION_RETRY_DELAY = 1.5  # base delay (seconds) between retries for non-429 errors
 
 reaction_queues = {}       # chat_id -> Queue
@@ -335,6 +360,23 @@ class AutoReactMiddleware(BaseMiddleware):
         self.update_types = ['message', 'channel_post']
 
     def pre_process(self, message, data):
+        # telebot itself calls middleware.pre_process() with NO surrounding try/except —
+        # if anything below raises, telebot's worker pool catches it internally, logs it
+        # at DEBUG level only (invisible in normal logs), and just abandons this one
+        # update. That's exactly how a message could miss its reaction with nothing
+        # showing up anywhere. This top-level try/except guarantees visibility, and
+        # still attempts the reaction as a fallback even if something else here fails.
+        try:
+            self._pre_process(message, data)
+        except Exception as e:
+            print(f"[auto-react] pre_process error for chat {getattr(getattr(message, 'chat', None), 'id', '?')} "
+                  f"message {getattr(message, 'message_id', '?')}: {e}")
+            try:
+                queue_reaction(message.chat.id, message.message_id)
+            except Exception:
+                pass
+
+    def _pre_process(self, message, data):
         if message.from_user:
             try:
                 if bot.user and message.from_user.id == bot.user.id:
