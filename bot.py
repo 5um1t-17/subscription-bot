@@ -53,18 +53,14 @@ def contact_admin_url():
 # Emoji pool used to give each channel button a random face — picked fresh every time
 # the channel list is rendered so the list feels lively and each entry looks distinct.
 FACE_EMOJIS = [
-    "😀", "😂", "🤣", "😎", "🤩", "😘", "🥳", "😜", "🤪", "😈",
+    "😀", "😂", "🤣", "😎", "🤩", "😘", "🥳", "😜", "🤪",
     "👻", "💀", "👽", "🐱",
-    "🦊", "🐷", "⚡",
-    "🍌", "🍓", "🍾", "💋", "😈", "😇", "😨", "❤", "🔥", "🥰"
+    "🦊", "🐷", "⚡", 
+    "🍌", "🍓", "🍾", "💋", "😈", "😇", "❤", "🔥", "🥰"
 ]
 
 # All Telegram-supported reaction emojis (Bot API 7.x) — used to auto-react to every incoming message.
 # Telegram only accepts reactions from this specific set; arbitrary Unicode will be rejected.
-# NOTE: the previous version of this list mixed in ~100 emoji that are NOT on Telegram's allowed
-# reaction set (hearts, weather, food, animal emoji that look similar but aren't accepted). Every
-# time one of those got randomly picked, set_message_reaction failed with REACTION_INVALID — a real,
-# silent cause of missed reactions this whole time. This list is Telegram's actual valid set only.
 REACT_EMOJIS = [
     "👍", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
     "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊",
@@ -928,45 +924,18 @@ def build_cart_summary(user_id):
         markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
     return text, markup
 
-RANK_BADGES = {1: "🥇", 2: "🥈", 3: "🥉"}  # only the top 3 ranked channels get a medal
-
-def get_sorted_channels(admin_id):
-    """Returns all of this admin's channels with ranked ones (1/2/3, admin-assigned via
-    the Rank Channels menu) first in rank order, followed by unranked channels in their
-    normal (insertion) order."""
-    docs = list(channels_col.find({"admin_id": admin_id}))
-    ranked = sorted((d for d in docs if d.get('rank') in (1, 2, 3)), key=lambda d: d['rank'])
-    unranked = [d for d in docs if d.get('rank') not in (1, 2, 3)]
-    return ranked + unranked
-
-def channel_button_label(ch):
-    """Two-line button label: a rank medal (top 3 only) or nothing on line 1 with the
-    channel name, and a 'from ₹X · N plans' subtext on line 2 so users get useful info
-    at a glance instead of a random decorative emoji."""
-    rank = ch.get('rank')
-    badge = RANK_BADGES.get(rank)
-    name_line = f"{badge} {ch['name']}" if badge else ch['name']
-
-    plans = ch.get('plans') or {}
-    if plans:
-        min_price = min(int(p) for p in plans.values())
-        plan_count = len(plans)
-        plan_word = "plan" if plan_count == 1 else "plans"
-        sub_line = f"from ₹{min_price} · {plan_count} {plan_word}"
-    else:
-        sub_line = "no plans set"
-
-    return f"{name_line}\n{sub_line}"
-
 def build_channel_list(user_id):
     """Builds the (text, markup) for browsing all channels, with a cart button if the
     user already has items waiting. Returns (None, None) if no channels exist."""
-    channels = get_sorted_channels(ADMIN_ID)
+    cursor = channels_col.find({"admin_id": ADMIN_ID})
     markup = InlineKeyboardMarkup()
-    for ch in channels:
-        markup.add(InlineKeyboardButton(channel_button_label(ch), callback_data=f"browse_{ch['channel_id']}"))
+    count = 0
+    for idx, ch in enumerate(cursor, start=1):
+        emoji = random.choice(FACE_EMOJIS)
+        markup.add(InlineKeyboardButton(f"{emoji} {idx}. {ch['name']}", callback_data=f"browse_{ch['channel_id']}"))
+        count += 1
 
-    if not channels:
+    if count == 0:
         return None, None
 
     items = get_cart(user_id)
@@ -2456,80 +2425,18 @@ def manage_ch(call):
     markup.add(InlineKeyboardButton("🎁 Free Trials", callback_data=f"trials_{ch_id}"))
     markup.add(InlineKeyboardButton("📝 Edit About/Description", callback_data=f"editdesc_{ch_id}"))
     markup.add(InlineKeyboardButton("📸 Update Screenshot", callback_data=f"editss_{ch_id}"))
-    markup.add(InlineKeyboardButton("🏆 Ranking", callback_data=f"rankset_{ch_id}"))
     markup.add(InlineKeyboardButton("🗑 Delete Channel", callback_data=f"delch_{ch_id}"))
     markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="back_channels"))
 
     ss_status = "✅ Screenshot set" if ch_data.get('screenshot_file_id') else "❌ No screenshot yet"
     desc_status = ch_data.get('description', 'None set')
-    rank_status = RANK_BADGES.get(ch_data.get('rank'), "Unranked")
     edit_menu(call.message.chat.id, call.message.message_id,
         f"⚙️ Settings for: *{ch_data['name']}*\n\n"
         f"🔗 Invite Link:\n`{link}`\n\n"
         f"📝 Description:\n_{desc_status}_\n\n"
         f"💰 Current Plans:\n{format_plans_text(ch_data['plans'])}\n\n"
-        f"🏆 Rank: {rank_status}\n\n"
         f"🖼 {ss_status}",
         reply_markup=markup, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('rankset_'))
-def cb_rank_set_menu(call):
-    """Shows the medal-picker for one channel: tap a medal to assign that rank, or
-    Clear to unrank it. Assigning a medal already held by another channel takes it
-    from that channel automatically (only one channel per medal)."""
-    if not _require_admin(call):
-        return
-    ch_id = int(call.data.split('_', 1)[1])
-    bot.answer_callback_query(call.id)
-    _render_rank_menu(call, ch_id)
-
-def _render_rank_menu(call, ch_id):
-    """Renders the rank picker for one channel. Does NOT answer the callback query —
-    callers are responsible for that, since a callback_query can only be answered once."""
-    ch_data = channels_col.find_one({"channel_id": ch_id})
-    if not ch_data:
-        send_admin_reply("❌ Channel not found (it may have been deleted.)")
-        return
-
-    current_rank = ch_data.get('rank')
-    markup = InlineKeyboardMarkup()
-    for r, badge in RANK_BADGES.items():
-        holder = channels_col.find_one({"admin_id": ADMIN_ID, "rank": r})
-        taken_note = f" (currently {holder['name']})" if holder and holder['channel_id'] != ch_id else ""
-        mark = " ✅" if current_rank == r else ""
-        markup.add(InlineKeyboardButton(f"{badge} Set as #{r}{taken_note}{mark}", callback_data=f"rankapply_{ch_id}_{r}"))
-    if current_rank in RANK_BADGES:
-        markup.add(InlineKeyboardButton("❌ Clear Ranking", callback_data=f"rankapply_{ch_id}_0"))
-    markup.add(InlineKeyboardButton("⬅️ Back", callback_data=f"manage_{ch_id}"))
-
-    edit_menu(call.message.chat.id, call.message.message_id,
-        f"🏆 *Ranking for: {ch_data['name']}*\n\n"
-        f"Ranked channels (top 3) show a medal and appear first in the channel list users see.\n\n"
-        f"Current rank: {RANK_BADGES.get(current_rank, 'Unranked')}",
-        reply_markup=markup, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('rankapply_'))
-def cb_rank_apply(call):
-    if not _require_admin(call):
-        return
-    _, ch_id_s, rank_s = call.data.split('_')
-    ch_id = int(ch_id_s)
-    rank = int(rank_s)
-
-    if rank == 0:
-        channels_col.update_one({"channel_id": ch_id}, {"$unset": {"rank": ""}})
-        bot.answer_callback_query(call.id, "Ranking cleared.")
-    else:
-        # Only one channel can hold a given medal — bump whoever currently has it.
-        channels_col.update_one(
-            {"admin_id": ADMIN_ID, "rank": rank, "channel_id": {"$ne": ch_id}},
-            {"$unset": {"rank": ""}}
-        )
-        channels_col.update_one({"channel_id": ch_id}, {"$set": {"rank": rank}})
-        bot.answer_callback_query(call.id, f"Set as {RANK_BADGES[rank]} #{rank}.")
-
-    # Re-render the picker with the updated state (already answered above, don't answer again)
-    _render_rank_menu(call, ch_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('editss_'))
 def edit_screenshot_prompt(call):
