@@ -53,14 +53,18 @@ def contact_admin_url():
 # Emoji pool used to give each channel button a random face — picked fresh every time
 # the channel list is rendered so the list feels lively and each entry looks distinct.
 FACE_EMOJIS = [
-    "😀", "😂", "🤣", "😎", "🤩", "😘", "🥳", "😜", "🤪",
+    "😀", "😂", "🤣", "😎", "🤩", "😘", "🥳", "😜", "🤪", "😈",
     "👻", "💀", "👽", "🐱",
-    "🦊", "🐷", "⚡", 
-    "🍌", "🍓", "🍾", "💋", "😈", "😇", "❤", "🔥", "🥰"
+    "🦊", "🐷", "⚡",
+    "🍌", "🍓", "🍾", "💋", "😈", "😇", "😨", "❤", "🔥", "🥰"
 ]
 
 # All Telegram-supported reaction emojis (Bot API 7.x) — used to auto-react to every incoming message.
 # Telegram only accepts reactions from this specific set; arbitrary Unicode will be rejected.
+# NOTE: the previous version of this list mixed in ~100 emoji that are NOT on Telegram's allowed
+# reaction set (hearts, weather, food, animal emoji that look similar but aren't accepted). Every
+# time one of those got randomly picked, set_message_reaction failed with REACTION_INVALID — a real,
+# silent cause of missed reactions this whole time. This list is Telegram's actual valid set only.
 REACT_EMOJIS = [
     "👍", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
     "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊",
@@ -805,29 +809,41 @@ def parse_duration_only(token):
         raise ValueError("Duration must be greater than 0")
     return str(total_minutes)
 
-def format_plans_text(plans):
+def get_ordered_plan_items(ch_data):
+    """Returns (plan_key, price) pairs in the admin's chosen display order (plan_order
+    field). Any plan not yet in plan_order (e.g. just added) is appended at the end in
+    its natural order, and stale plan_order entries for deleted plans are ignored."""
+    plans = ch_data.get('plans') or {}
+    order = ch_data.get('plan_order') or []
+    ordered_keys = [k for k in order if k in plans]
+    remaining_keys = [k for k in plans if k not in ordered_keys]
+    return [(k, plans[k]) for k in ordered_keys + remaining_keys]
+
+def format_plans_text(ch_data):
+    plans = ch_data.get('plans') if isinstance(ch_data, dict) and 'plans' in ch_data else ch_data
     if not plans:
         return "No plans set yet."
-    lines = []
-    for t, pr in plans.items():
-        lines.append(f"• {format_label(t)} — ₹{pr}")
+    items = get_ordered_plan_items(ch_data) if isinstance(ch_data, dict) and 'plans' in ch_data else list(plans.items())
+    lines = [f"• {format_label(t)} — ₹{pr}" for t, pr in items]
     return "\n".join(lines)
 
 def _build_plan_selection(ch_data):
     """Builds the (text, markup) for the plan-picker of one channel. Tapping a plan adds
     it to the user's cart rather than paying immediately, so multiple channels can be
     bought together in one checkout. Enabled admin-managed free trials for this channel
-    are shown separately as one-time 'FREE' offers — they never enter the cart/payment."""
+    are shown separately as one-time 'FREE' offers — they never enter the cart/payment.
+    Free trials always render first, above every paid plan, regardless of plan order."""
     markup = InlineKeyboardMarkup()
-    for p_time, p_price in ch_data['plans'].items():
-        label = format_label(p_time)
-        markup.add(InlineKeyboardButton(f"💳 {label} - ₹{p_price}", callback_data=f"cartadd_{ch_data['channel_id']}_{p_time}"))
 
     try:
         for tr in free_trials_col.find({"channel_id": ch_data['channel_id'], "enabled": True}).sort("created_at", 1):
             markup.add(InlineKeyboardButton(f"🎁 {tr['name']} — FREE", callback_data=f"trialclaim_{tr['trial_id']}"))
     except Exception:
         pass
+
+    for p_time, p_price in get_ordered_plan_items(ch_data):
+        label = format_label(p_time)
+        markup.add(InlineKeyboardButton(f"💳 {label} - ₹{p_price}", callback_data=f"cartadd_{ch_data['channel_id']}_{p_time}"))
 
     markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="cart_browse"))
     contact_url = contact_admin_url()
@@ -924,18 +940,46 @@ def build_cart_summary(user_id):
         markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
     return text, markup
 
+RANK_BADGES = {1: "🥇", 2: "🥈", 3: "🥉"}  # top 3 by position always get a medal
+
+def get_sorted_channels(admin_id):
+    """Returns all of this admin's channels sorted by their manually-assigned 'order'
+    field (lower = earlier). Channels without an order yet (e.g. just created) sort
+    after ordered ones, in their natural DB order, until normalized by
+    _ensure_channel_order()."""
+    docs = list(channels_col.find({"admin_id": admin_id}))
+    ordered = sorted((d for d in docs if 'order' in d), key=lambda d: d['order'])
+    unordered = [d for d in docs if 'order' not in d]
+    return ordered + unordered
+
+def _ensure_channel_order(admin_id):
+    """Normalizes every channel's 'order' field to a clean contiguous 1..N sequence
+    matching their current sort position, persisting it. Called before showing/using
+    the reorder menu so swaps always work against clean, gapless values."""
+    channels = get_sorted_channels(admin_id)
+    for i, ch in enumerate(channels, start=1):
+        if ch.get('order') != i:
+            channels_col.update_one({"channel_id": ch['channel_id']}, {"$set": {"order": i}})
+            ch['order'] = i
+    return channels
+
+def channel_button_label(ch, position):
+    """Clean minimal style: top-3 by position get a medal + name, everything else gets
+    a plain running number + name."""
+    badge = RANK_BADGES.get(position)
+    if badge:
+        return f"{badge} {ch['name']}"
+    return f"{position}. {ch['name']}"
+
 def build_channel_list(user_id):
     """Builds the (text, markup) for browsing all channels, with a cart button if the
     user already has items waiting. Returns (None, None) if no channels exist."""
-    cursor = channels_col.find({"admin_id": ADMIN_ID})
+    channels = get_sorted_channels(ADMIN_ID)
     markup = InlineKeyboardMarkup()
-    count = 0
-    for idx, ch in enumerate(cursor, start=1):
-        emoji = random.choice(FACE_EMOJIS)
-        markup.add(InlineKeyboardButton(f"{emoji} {idx}. {ch['name']}", callback_data=f"browse_{ch['channel_id']}"))
-        count += 1
+    for i, ch in enumerate(channels, start=1):
+        markup.add(InlineKeyboardButton(channel_button_label(ch, i), callback_data=f"browse_{ch['channel_id']}"))
 
-    if count == 0:
+    if not channels:
         return None, None
 
     items = get_cart(user_id)
@@ -2293,6 +2337,8 @@ def show_channel_list(chat_id, message_id=None):
         count += 1
 
     markup.add(InlineKeyboardButton("➕ Add New Channel", callback_data="add_new"))
+    if count > 1:
+        markup.add(InlineKeyboardButton("🔀 Reorder Channels", callback_data="chorder_menu"))
 
     text = "No channels found. Click below to add one." if count == 0 else "Your Managed Channels:"
     if message_id:
@@ -2347,7 +2393,10 @@ def finalize_channel(message, ch_id, ch_name):
         if not plans_dict:
             raise ValueError
 
-        channels_col.update_one({"channel_id": ch_id}, {"$set": {"name": ch_name, "plans": plans_dict, "admin_id": ADMIN_ID}}, upsert=True)
+        existing_max = channels_col.find({"admin_id": ADMIN_ID}).sort("order", -1).limit(1)
+        existing_max = list(existing_max)
+        next_order = (existing_max[0].get('order', 0) + 1) if existing_max else 1
+        channels_col.update_one({"channel_id": ch_id}, {"$set": {"name": ch_name, "plans": plans_dict, "admin_id": ADMIN_ID, "order": next_order}}, upsert=True)
         bot_username = bot.get_me().username
         send_admin_reply(f"✅ Plans saved!\n\nInvite Link:\n`https://t.me/{bot_username}?start={ch_id}`", parse_mode="Markdown")
 
@@ -2425,18 +2474,68 @@ def manage_ch(call):
     markup.add(InlineKeyboardButton("🎁 Free Trials", callback_data=f"trials_{ch_id}"))
     markup.add(InlineKeyboardButton("📝 Edit About/Description", callback_data=f"editdesc_{ch_id}"))
     markup.add(InlineKeyboardButton("📸 Update Screenshot", callback_data=f"editss_{ch_id}"))
+    markup.add(InlineKeyboardButton("🔀 Reorder Channels", callback_data="chorder_menu"))
     markup.add(InlineKeyboardButton("🗑 Delete Channel", callback_data=f"delch_{ch_id}"))
     markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="back_channels"))
 
     ss_status = "✅ Screenshot set" if ch_data.get('screenshot_file_id') else "❌ No screenshot yet"
     desc_status = ch_data.get('description', 'None set')
+    position = next((i for i, c in enumerate(get_sorted_channels(ADMIN_ID), start=1) if c['channel_id'] == ch_id), None)
+    position_status = f"{RANK_BADGES.get(position, '')} #{position}".strip() if position else "Unset"
     edit_menu(call.message.chat.id, call.message.message_id,
         f"⚙️ Settings for: *{ch_data['name']}*\n\n"
         f"🔗 Invite Link:\n`{link}`\n\n"
         f"📝 Description:\n_{desc_status}_\n\n"
-        f"💰 Current Plans:\n{format_plans_text(ch_data['plans'])}\n\n"
+        f"💰 Current Plans:\n{format_plans_text(ch_data)}\n\n"
+        f"🔀 Position: {position_status}\n\n"
         f"🖼 {ss_status}",
         reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data == "chorder_menu")
+def cb_channel_order_menu(call):
+    """Entry point for the general channel reorder menu (reached from the main
+    /channels list, since reordering needs the whole list in view)."""
+    if not _require_admin(call):
+        return
+    bot.answer_callback_query(call.id)
+    _render_channel_order_menu(call)
+
+def _render_channel_order_menu(call):
+    """Shows every channel with ⬆️/⬇️ to move it. Top 3 by position always get a medal
+    and appear first in the list users see — no separate ranking step needed."""
+    channels = _ensure_channel_order(ADMIN_ID)
+    n = len(channels)
+    markup = InlineKeyboardMarkup()
+    for i, ch in enumerate(channels, start=1):
+        markup.row(InlineKeyboardButton(channel_button_label(ch, i), callback_data=f"manage_{ch['channel_id']}"))
+        row = []
+        if i > 1:
+            row.append(InlineKeyboardButton("⬆️", callback_data=f"chmove_{ch['channel_id']}_up"))
+        if i < n:
+            row.append(InlineKeyboardButton("⬇️", callback_data=f"chmove_{ch['channel_id']}_down"))
+        if row:
+            markup.row(*row)
+    markup.add(InlineKeyboardButton("⬅️ Back", callback_data="back_channels"))
+
+    text = "🔀 *Reorder Channels*\n\nUse ⬆️/⬇️ to move a channel. Top 3 always get a medal and show first to users." if channels else "No channels found yet."
+    edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('chmove_'))
+def cb_channel_move(call):
+    if not _require_admin(call):
+        return
+    _, ch_id_s, direction = call.data.split('_')
+    ch_id = int(ch_id_s)
+    channels = _ensure_channel_order(ADMIN_ID)
+    idx = next((i for i, c in enumerate(channels) if c['channel_id'] == ch_id), None)
+    if idx is not None:
+        swap_idx = idx - 1 if direction == 'up' else idx + 1
+        if 0 <= swap_idx < len(channels):
+            a, b = channels[idx], channels[swap_idx]
+            channels_col.update_one({"channel_id": a['channel_id']}, {"$set": {"order": b['order']}})
+            channels_col.update_one({"channel_id": b['channel_id']}, {"$set": {"order": a['order']}})
+    bot.answer_callback_query(call.id)
+    _render_channel_order_menu(call)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('editss_'))
 def edit_screenshot_prompt(call):
@@ -2515,14 +2614,70 @@ def edit_plans_menu(call):
         return
 
     markup = InlineKeyboardMarkup()
-    for t, pr in ch_data['plans'].items():
+    for t, pr in get_ordered_plan_items(ch_data):
         markup.add(InlineKeyboardButton(f"{format_label(t)} - ₹{pr}", callback_data=f"editplan_{ch_id}_{t}"))
     markup.add(InlineKeyboardButton("➕ Add New Plan", callback_data=f"addplan_{ch_id}"))
+    if len(ch_data.get('plans') or {}) > 1:
+        markup.add(InlineKeyboardButton("🔀 Reorder Plans", callback_data=f"planorder_{ch_id}"))
     markup.add(InlineKeyboardButton("⬅️ Back", callback_data=f"manage_{ch_id}"))
 
     edit_menu(call.message.chat.id, call.message.message_id,
         f"✏️ Edit Plans for *{ch_data['name']}*\n\nTap a plan below to edit its price/duration, or add a new one:",
         reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('planorder_'))
+def cb_plan_order_menu(call):
+    if not _require_admin(call):
+        return
+    ch_id = int(call.data.split('_', 1)[1])
+    bot.answer_callback_query(call.id)
+    _render_plan_order_menu(call, ch_id)
+
+def _render_plan_order_menu(call, ch_id):
+    """Shows every plan with ⬆️/⬇️ to move it. This order is what buyers see (free
+    trials still always render above all of these, regardless of this order)."""
+    ch_data = channels_col.find_one({"channel_id": ch_id})
+    if not ch_data:
+        send_admin_reply("❌ Channel not found (it may have been deleted.)")
+        return
+    items = get_ordered_plan_items(ch_data)
+    n = len(items)
+    markup = InlineKeyboardMarkup()
+    for i, (t, pr) in enumerate(items):
+        markup.row(InlineKeyboardButton(f"{i+1}. {format_label(t)} - ₹{pr}", callback_data=f"editplan_{ch_id}_{t}"))
+        row = []
+        if i > 0:
+            row.append(InlineKeyboardButton("⬆️", callback_data=f"planmove_{ch_id}_{t}_up"))
+        if i < n - 1:
+            row.append(InlineKeyboardButton("⬇️", callback_data=f"planmove_{ch_id}_{t}_down"))
+        if row:
+            markup.row(*row)
+    markup.add(InlineKeyboardButton("⬅️ Back", callback_data=f"editplans_{ch_id}"))
+    edit_menu(call.message.chat.id, call.message.message_id,
+        f"🔀 *Reorder Plans* — {ch_data['name']}\n\nThis is the order buyers see (free trials always show above all plans, regardless of this order).",
+        reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('planmove_'))
+def cb_plan_move(call):
+    if not _require_admin(call):
+        return
+    _, ch_id_s, t, direction = call.data.split('_')
+    ch_id = int(ch_id_s)
+    ch_data = channels_col.find_one({"channel_id": ch_id})
+    if not ch_data:
+        bot.answer_callback_query(call.id, "Channel not found.")
+        return
+    keys = [k for k, _ in get_ordered_plan_items(ch_data)]
+    if t not in keys:
+        bot.answer_callback_query(call.id, "Plan not found.")
+        return
+    idx = keys.index(t)
+    swap_idx = idx - 1 if direction == 'up' else idx + 1
+    if 0 <= swap_idx < len(keys):
+        keys[idx], keys[swap_idx] = keys[swap_idx], keys[idx]
+        channels_col.update_one({"channel_id": ch_id}, {"$set": {"plan_order": keys}})
+    bot.answer_callback_query(call.id)
+    _render_plan_order_menu(call, ch_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('editplan_'))
 def edit_single_plan(call):
@@ -2582,6 +2737,11 @@ def save_new_duration(message, ch_id, old_t):
     # Remove old key, add new key with the same price
     channels_col.update_one({"channel_id": ch_id}, {"$unset": {f"plans.{old_t}": ""}})
     channels_col.update_one({"channel_id": ch_id}, {"$set": {f"plans.{new_t}": price}})
+    # Keep its position in plan_order (rename shouldn't silently move it to the end)
+    order = ch_data.get('plan_order') or []
+    if old_t in order:
+        order = [new_t if k == old_t else k for k in order]
+        channels_col.update_one({"channel_id": ch_id}, {"$set": {"plan_order": order}})
     send_admin_reply(f"✅ Duration updated to {format_label(new_t)} (price stays ₹{price}).")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('delplan_'))
@@ -2589,6 +2749,7 @@ def delete_plan(call):
     _, ch_id, t = call.data.split('_')
     ch_id = int(ch_id)
     channels_col.update_one({"channel_id": ch_id}, {"$unset": {f"plans.{t}": ""}})
+    channels_col.update_one({"channel_id": ch_id}, {"$pull": {"plan_order": t}})
     bot.answer_callback_query(call.id, "Plan deleted.")
     # Refresh the edit-plans menu
     fake_call = call
@@ -2607,6 +2768,9 @@ def save_new_plan(message, ch_id):
     try:
         total_minutes, price = parse_duration_and_price(message.text)
         channels_col.update_one({"channel_id": ch_id}, {"$set": {f"plans.{total_minutes}": price}})
+        # New plans are appended at the end of the display order automatically since
+        # get_ordered_plan_items() appends anything not yet in plan_order — no explicit
+        # push needed here, this just keeps plan_order from drifting if it already exists.
         send_admin_reply(f"✅ New plan added: {format_label(total_minutes)} — ₹{price}")
     except Exception:
         send_admin_reply("❌ Invalid format. Please use `Days:Hours:Mins:Price` or `lifetime:Price`. Use /channels to try again.")
@@ -3402,10 +3566,9 @@ def do_broadcast(message):
     if errors:
         # Show up to 5 concrete error reasons so you can see WHY sends failed (e.g. blocked bot)
         result += "\n\nFailure details (first 5):\n" + "\n".join(errors[:5])
-    # Broadcast result is important info — keep slightly longer than regular messages
+    # Broadcast result is a permanent record — never auto-vanishes.
     try:
-        res_msg = bot.send_message(ADMIN_ID, result)
-        schedule_delete(ADMIN_ID, res_msg.message_id, 30)
+        bot.send_message(ADMIN_ID, result)
     except Exception:
         pass
 
