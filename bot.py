@@ -67,7 +67,7 @@ FACE_EMOJIS = [
 # silent cause of missed reactions this whole time. This list is Telegram's actual valid set only.
 REACT_EMOJIS = [
     "👍", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
-    "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊",
+    "🤬", "😢", "🎉", "🤩", "🙏", "👌", "🕊",
     "🥱", "🥴", "😍", "🐳", "❤‍🔥", "🌚", "🌭", "💯", "🤣", "⚡",
     "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈",
     "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨",
@@ -507,15 +507,19 @@ CLEANUP_SEENUSERS_DAYS = 90   # drop "seen user" tracking for people inactive 90
 # Prompts that are waiting on a text/photo reply (register_next_step_handler) are ALSO never
 # auto-deleted, even if they were reached via a button tap, since deleting them mid-flow would
 # make the admin/user lose the instructions they still need to complete the action.
-MENU_VANISH_SECONDS = 30        # 30 seconds of inactivity on a button-driven menu
-COMMAND_VANISH_SECONDS = 20     # how long a /command reply or any regular bot message stays visible
-PAYMENT_VANISH_SECONDS = 30     # 30 seconds for QR code AFTER 'I Have Paid' is clicked (so user can come back)
-DECISION_VANISH_SECONDS = 15    # how long the approval/rejection receipt stays after admin acts
-ADMIN_REPLY_VANISH_SECONDS = 10 # how long admin confirmation/error replies stay before auto-deleting
-SYNC_VANISH_SECONDS = 60        # how long /sync's long member-list replies stay before auto-deleting
-QR_SHOW_SECONDS = 90            # how long the initial QR is shown before 'I Have Paid' is clicked
+MENU_VANISH_SECONDS = 90        # 90 seconds of inactivity on a button-driven menu
+COMMAND_VANISH_SECONDS = 90     # how long a /command reply or any regular bot message stays visible
+PAYMENT_VANISH_SECONDS = 120    # 2 minutes for the QR code AFTER 'I Have Paid' is clicked (so user can come back)
+ADMIN_REPLY_VANISH_SECONDS = 90 # how long admin confirmation/error replies stay before auto-deleting
+SYNC_VANISH_SECONDS = 90        # how long /sync's long member-list replies stay before auto-deleting
+QR_SHOW_SECONDS = 120           # how long the initial QR is shown before 'I Have Paid' is clicked (2 minutes)
 DEFAULT_VANISH_SECONDS = 90     # fallback for bot messages/replies that don't have a custom vanish rule
-APPROVAL_LINK_VANISH_SECONDS = 5 * 60 * 60  # 5 hours for a payment-approved join-link message
+# Permanent messages (never auto-vanish, delay=None passed explicitly at their call sites):
+#   - the "please wait for admin approval" message shown after a payment screenshot is sent
+#     (deleted explicitly the moment admin approves/rejects, not on a timer — see
+#     _clear_pending_review_messages)
+#   - the join-link message sent to the user once admin approves their payment
+#   - the approve/reject confirmation shown to the admin
 
 pending_deletes = {}  # (chat_id, message_id) -> Timer
 pending_review_messages = {}  # token -> {'user_chat_id':..., 'user_msg_id':..., 'admin_chat_id':..., 'admin_msg_id':...}
@@ -529,8 +533,12 @@ def cancel_delete(chat_id, message_id):
 
 def schedule_delete(chat_id, message_id, delay=MENU_VANISH_SECONDS):
     """(Re)schedules a message for deletion after `delay` seconds. Calling this again on the
-    same message (e.g. after editing it) simply resets the countdown."""
+    same message (e.g. after editing it) simply resets the countdown. Pass delay=None for a
+    message that should never auto-vanish — cancels any previously scheduled deletion for it
+    and schedules nothing new."""
     cancel_delete(chat_id, message_id)
+    if delay is None:
+        return
     key = (chat_id, message_id)
     def _delete():
         try:
@@ -2168,11 +2176,9 @@ def _process_trial_claim(call, raw_trial_id):
     )
     try:
         inv_msg = bot.send_message(call.message.chat.id, text, parse_mode="Markdown", vanish_delay=None)
-        schedule_delete(call.message.chat.id, inv_msg.message_id, APPROVAL_LINK_VANISH_SECONDS)
     except Exception:
         try:
             inv_msg = bot.send_message(call.message.chat.id, text, vanish_delay=None)
-            schedule_delete(call.message.chat.id, inv_msg.message_id, APPROVAL_LINK_VANISH_SECONDS)
         except Exception:
             pass
 
@@ -2470,6 +2476,7 @@ def manage_ch(call):
     link = f"https://t.me/{bot_username}?start={ch_id}"
 
     markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("✏️ Rename Channel", callback_data=f"renamech_{ch_id}"))
     markup.add(InlineKeyboardButton("✏️ Edit Plans", callback_data=f"editplans_{ch_id}"))
     markup.add(InlineKeyboardButton("🎁 Free Trials", callback_data=f"trials_{ch_id}"))
     markup.add(InlineKeyboardButton("📝 Edit About/Description", callback_data=f"editdesc_{ch_id}"))
@@ -2550,6 +2557,41 @@ def edit_screenshot_prompt(call):
         f"📸 Send a new screenshot / banner image for *{ch_name}*{hint}.",
         parse_mode="Markdown")
     bot.register_next_step_handler(msg, save_channel_screenshot, ch_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('renamech_'))
+def rename_channel_prompt(call):
+    """Admin tapped 'Rename Channel' from the manage menu. This only changes the display
+    name shown inside the bot (buttons, menus, messages) — it does NOT rename the actual
+    Telegram channel/group itself."""
+    ch_id = int(call.data.split('_', 1)[1])
+    bot.answer_callback_query(call.id)
+    ch_data = channels_col.find_one({"channel_id": ch_id})
+    if not ch_data:
+        send_admin_reply("❌ Channel not found (it may have been deleted.)")
+        return
+    msg = send_prompt(ADMIN_ID,
+        f"✏️ Send the new display name for *{escape_markdown(ch_data['name'])}*.\n\n"
+        f"_(This only changes the name shown inside the bot — not the actual Telegram channel name.)_",
+        parse_mode="Markdown")
+    bot.register_next_step_handler(msg, save_channel_rename, ch_id)
+
+def save_channel_rename(message, ch_id):
+    new_name = (message.text or "").strip()
+    if not new_name:
+        msg = send_prompt(ADMIN_ID, "❌ Please send a valid name (text only). Use /channels to try again.")
+        bot.register_next_step_handler(msg, save_channel_rename, ch_id)
+        return
+    if len(new_name) > 128:
+        msg = send_prompt(ADMIN_ID, "❌ That name is too long (max 128 characters). Please send a shorter one:")
+        bot.register_next_step_handler(msg, save_channel_rename, ch_id)
+        return
+    ch_data = channels_col.find_one({"channel_id": ch_id})
+    if not ch_data:
+        send_admin_reply("❌ That channel no longer exists.")
+        return
+    old_name = ch_data['name']
+    channels_col.update_one({"channel_id": ch_id}, {"$set": {"name": new_name}})
+    send_admin_reply(f"✅ Renamed \"{old_name}\" to \"{new_name}\".")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('editdesc_'))
 def edit_description_prompt(call):
@@ -2973,7 +3015,7 @@ def cout_paid_handler(call):
     record_seen_user(call.from_user)
     bot.answer_callback_query(call.id, "✅ Got it! Please send your payment screenshot now.")
 
-    # Keep QR alive for PAYMENT_VANISH_SECONDS (30s) after 'I Have Paid' is tapped so the user
+    # Keep QR alive for PAYMENT_VANISH_SECONDS (2 min) after 'I Have Paid' is tapped so the user
     # can still scan it if they need to go back and complete the payment.
     schedule_delete(call.message.chat.id, call.message.message_id, PAYMENT_VANISH_SECONDS)
 
@@ -2981,7 +3023,7 @@ def cout_paid_handler(call):
     msg = send_prompt(call.message.chat.id,
         "📸 Please send a screenshot of your payment receipt now.\n\n"
         "If you tapped 'I Have Paid' by mistake, type /cancel to cancel the payment.")
-    schedule_delete(call.message.chat.id, msg.message_id, 60)
+    schedule_delete(call.message.chat.id, msg.message_id, DEFAULT_VANISH_SECONDS)
     bot.register_next_step_handler(msg, receive_cart_screenshot, token)
 
 def receive_cart_screenshot(message, token):
@@ -2998,7 +3040,7 @@ def receive_cart_screenshot(message, token):
         msg = send_prompt(message.chat.id,
             "❌ That doesn't look like a photo. Please send a screenshot image of your payment receipt.\n\n"
             "If you tapped 'I Have Paid' by mistake, type /cancel to cancel the payment.")
-        schedule_delete(message.chat.id, msg.message_id, 60)
+        schedule_delete(message.chat.id, msg.message_id, DEFAULT_VANISH_SECONDS)
         bot.register_next_step_handler(msg, receive_cart_screenshot, token)
         return
 
@@ -3139,16 +3181,15 @@ def cout_reject_handler(call):
         doc = None
     if doc:
         try:
-            rej_msg = bot.send_message(doc['user_id'], "❌ Your payment could not be verified. Please contact the admin for help.", vanish_delay=None)
-            schedule_delete(doc['user_id'], rej_msg.message_id, APPROVAL_LINK_VANISH_SECONDS)
+            bot.send_message(doc['user_id'], "❌ Your payment could not be verified. Please contact the admin for help.")
         except Exception:
             pass
         pending_checkouts_col.delete_one({"_id": ObjectId(token)})
     _clear_pending_review_messages(token)
-    # Vanishes shortly after the decision is made (not before)
+    # Admin's decision confirmation is permanent — a record of what was rejected.
     edit_caption_menu(call.message.chat.id, call.message.message_id,
-        "❌ Rejected this checkout.\n(this message will vanish shortly)",
-        delay=DECISION_VANISH_SECONDS)
+        "❌ Rejected this checkout.",
+        delay=None)
 
 # --- APPROVAL & EXPIRY ---
 
@@ -3223,17 +3264,15 @@ def cout_approve_handler(call):
 
     if result_lines:
         try:
-            appr_msg = bot.send_message(u_id,
+            bot.send_message(u_id,
                 "🥳 *Payment Approved!*\n\n" + "\n\n".join(result_lines) +
                 "\n\n⚠️ Note: Each link/access expires per its own plan (unless marked Lifetime).\n\nEnjoyyy!!!",
                 parse_mode="Markdown", vanish_delay=None)
-            schedule_delete(u_id, appr_msg.message_id, APPROVAL_LINK_VANISH_SECONDS)
         except Exception:
             try:
-                appr_msg = bot.send_message(u_id,
+                bot.send_message(u_id,
                     "🥳 Payment Approved!\n\n" + "\n\n".join(result_lines) +
                     "\n\nNote: Each link/access expires per its own plan (unless marked Lifetime).", vanish_delay=None)
-                schedule_delete(u_id, appr_msg.message_id, APPROVAL_LINK_VANISH_SECONDS)
             except Exception:
                 pass
 
@@ -3245,18 +3284,17 @@ def cout_approve_handler(call):
         except Exception:
             pass
         try:
-            err_msg = bot.send_message(ADMIN_ID, "⚠️ Partial approval errors:\n" + "\n".join(error_lines))
-            schedule_delete(ADMIN_ID, err_msg.message_id, ADMIN_REPLY_VANISH_SECONDS)
+            bot.send_message(ADMIN_ID, "⚠️ Partial approval errors:\n" + "\n".join(error_lines))
         except Exception:
             pass
 
     _clear_pending_review_messages(token)
 
-    # Vanishes shortly after the decision is made (not before)
+    # Admin's decision confirmation is permanent — a record of who/what was approved.
     try:
         edit_caption_menu(call.message.chat.id, call.message.message_id,
-            f"✅ Approved checkout for user {u_id} ({len(doc['items'])} channel(s)).\n(this message will vanish shortly)",
-            delay=DECISION_VANISH_SECONDS)
+            f"✅ Approved checkout for user {u_id} ({len(doc['items'])} channel(s)).",
+            delay=None)
     except Exception:
         pass
 
@@ -3556,7 +3594,10 @@ def do_broadcast(message):
     errors = []
     for uid in user_ids:
         try:
-            bot.send_message(uid, message.text)
+            # vanish_delay=None: a broadcast is content the recipient should keep, not a
+            # transient bot menu/prompt — without this it silently inherits the global
+            # 90s auto-delete default from the send_message wrapper.
+            bot.send_message(uid, message.text, vanish_delay=None)
             sent += 1
         except Exception as e:
             failed += 1
@@ -3566,9 +3607,12 @@ def do_broadcast(message):
     if errors:
         # Show up to 5 concrete error reasons so you can see WHY sends failed (e.g. blocked bot)
         result += "\n\nFailure details (first 5):\n" + "\n".join(errors[:5])
-    # Broadcast result is a permanent record — never auto-vanishes.
+    # Broadcast result is a permanent record — never auto-vanishes. bot.send_message is
+    # globally wrapped (see _vanishing_send_message) to auto-schedule deletion after
+    # DEFAULT_VANISH_SECONDS unless vanish_delay=None is passed explicitly — a plain call
+    # here still gets swept up by that default, so this MUST be passed every time.
     try:
-        bot.send_message(ADMIN_ID, result)
+        bot.send_message(ADMIN_ID, result, vanish_delay=None)
     except Exception:
         pass
 
