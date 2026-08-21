@@ -8,7 +8,14 @@ import secrets
 import traceback
 from html import escape
 import telebot
-import segno
+try:
+    import segno
+except ImportError:
+    segno = None
+try:
+    import qrcode
+except ImportError:
+    qrcode = None
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputFile
 from telebot.handler_backends import BaseMiddleware, CancelUpdate
@@ -407,6 +414,8 @@ scheduled_broadcasts_col = db['scheduled_broadcasts']  # timed /broadcast messag
 waitlist_col = db['waitlist']                  # users who asked to be notified when a paused channel returns
 expired_subs_col = db['expired_subs']          # lapsed subscriptions, for the 3-day win-back DM
 settings_col = db['settings']                  # small key/value bot settings (e.g. main menu image)
+offer_bundles_col = db['offer_bundles']        # admin-created custom bundles (fixed manual price, any set of channels)
+pending_offer_bundle_checkouts_col = db['pending_offer_bundle_checkouts']  # bundle purchases awaiting admin approval
 
 def get_menu_image_file_id():
     """Returns the Telegram file_id of the admin-set main menu image, or None if not set."""
@@ -787,9 +796,9 @@ def cb_fj_retry(call):
     else:
         bot.answer_callback_query(call.id, "🔒 You haven't joined yet. Please join the channel first.", show_alert=True)
 
-# --- BUNDLE DEALS ---
-BUNDLE_MIN_CHANNELS = 3        # buy 3+ distinct channels together...
-BUNDLE_DISCOUNT_PERCENT = 10   # ...and get 10% off the whole cart
+# --- CUSTOM OFFER BUNDLES ---
+# Bundles are admin-created products with a manually entered fixed price. The
+# normal multi-channel cart remains available, but it never applies a discount.
 
 # --- ABANDONED CART NUDGE ---
 CART_NUDGE_MINUTES = 30        # one gentle reminder 30 min after the last cart update
@@ -1128,7 +1137,7 @@ def send_command_reply(message, text, reply_markup=None, parse_mode=None):
     return reply
 
 def record_seen_user(user):
-    """Upserts this user into seen_users_col so /broadcast can reach them later,
+    """Upserts this user into seen_users_col so /broadcast and admin commands can reach them later,
     regardless of whether they ever subscribe to anything. Called explicitly at the
     top of every user-facing entry point (rather than via a catch-all handler) so it
     can never intercept or interfere with /commands, next-step prompts, or callbacks."""
@@ -1139,8 +1148,9 @@ def record_seen_user(user):
             {"user_id": user.id},
             {"$set": {
                 "user_id": user.id,
-                "first_name": user.first_name,
-                "username": user.username,
+                "first_name": getattr(user, 'first_name', None),
+                "last_name": getattr(user, 'last_name', None),
+                "username": getattr(user, 'username', None),
                 "last_seen": datetime.now(),
             }},
             upsert=True
@@ -1367,14 +1377,9 @@ def cart_total(items):
     return sum(int(i['price']) for i in items)
 
 def bundle_discount(items):
-    """Bundle deal: 3+ distinct channels in one cart => 10% off the whole order.
-    Returns (discount, grand_total). Prices are whole rupees, discount rounds down."""
-    total = cart_total(items)
-    distinct_channels = len({i['channel_id'] for i in items})
-    if distinct_channels >= BUNDLE_MIN_CHANNELS:
-        discount = (total * BUNDLE_DISCOUNT_PERCENT) // 100
-        return discount, total - discount
-    return 0, total
+    """Compatibility helper for the existing cart: custom bundles are separate
+    products, so a normal cart is always charged at its itemized total."""
+    return 0, cart_total(items)
 
 def add_to_cart(user_id, ch_id, t):
     """Adds a channel+plan to the user's cart. Returns the channel doc, or None if the
@@ -1410,11 +1415,7 @@ def build_cart_summary(user_id):
     total = cart_total(items)
     discount, grand_total = bundle_discount(items)
     lines.append(f"\n💰 *Subtotal: ₹{total}*")
-    if discount:
-        lines.append(f"🎁 *Bundle Deal:* {len({i['channel_id'] for i in items})} channels → {BUNDLE_DISCOUNT_PERCENT}% off (−₹{discount})")
-        lines.append(f"✅ *Total: ₹{grand_total}*")
-    else:
-        lines.append(f"💡 *Total: ₹{total}*")
+    lines.append(f"💡 *Total: ₹{grand_total}*")
     text = "\n".join(lines)
 
     markup = InlineKeyboardMarkup()
@@ -1489,9 +1490,8 @@ def build_channel_list(user_id, back_to_menu=False):
         markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
     if back_to_menu:
         markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
-    text = (f"👋 <b>Welcome Dallo !</b> \n\nShaana banne ki Koshish mat karna  😂😂\n\nPlease select a channel/group you'd like to join.\n\n"
-            f"💡 <b><i>You can add multiple channels to your cart and pay for all of them at once!</i></b>\n"
-            f"🎁 <b><i>Bundle deal: buy {BUNDLE_MIN_CHANNELS}+ channels together and get {BUNDLE_DISCOUNT_PERCENT}% off!</i></b>")
+        text = (f"👋 <b>Welcome Dallo !</b> \n\nShaana banne ki Koshish mat karna  😂😂\n\nPlease select a channel/group you'd like to join.\n\n"
+            f"💡 <b><i>You can add multiple channels to your cart and pay for all of them at once!</i></b>")
     return text, markup
 
 def show_all_channels(chat_id, user_id, back_to_menu=False):
@@ -1541,13 +1541,16 @@ def build_main_menu():
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("📺 Groups / Channels", callback_data="main_channels"))
     markup.add(InlineKeyboardButton("🎁 Offers", callback_data="main_offers"))
+    if offer_bundles_col.count_documents({"enabled": True}) > 0:
+        markup.add(InlineKeyboardButton("📦 Bundles", callback_data="main_obundles"))
     contact_url = contact_admin_url()
     if contact_url:
         markup.add(InlineKeyboardButton("📞 Contact", url=contact_url))
     text = ("👋 <b>Welcome!</b>\n\n"
             "What would you like to do?\n\n"
             "📺 <b>Groups / Channels</b> — browse and join available channels\n"
-            "🎁 <b>Offers</b> — check out current deals")
+            "🎁 <b>Offers</b> — check out current deals\n"
+            "📦 <b>Bundles</b> — get multiple channels together at one fixed price")
     return text, markup
 
 def _render_main_menu(chat_id, user_id=None, message_id=None):
@@ -1637,14 +1640,285 @@ def cb_main_channels(call):
 @bot.callback_query_handler(func=lambda call: call.data == "main_offers")
 def cb_main_offers(call):
     bot.answer_callback_query(call.id)
-    text = (f"🎁 <b>Current Offer</b>\n\n"
-            f"Buy {BUNDLE_MIN_CHANNELS}+ channels together in one order and get "
-            f"<b>{BUNDLE_DISCOUNT_PERCENT}% off</b> the whole cart!\n\n"
-            f"Add channels to your cart from the Groups/Channels menu to unlock it.")
+    text = ("🎁 <b>Current Offers</b>\n\n"
+            "Choose a custom bundle to get several channels at the exact fixed price "
+            "set by the admin, or browse individual channels.")
     markup = InlineKeyboardMarkup()
+    if offer_bundles_col.count_documents({"enabled": True}) > 0:
+        markup.add(InlineKeyboardButton("📦 View Bundles", callback_data="main_obundles"))
     markup.add(InlineKeyboardButton("📺 Groups / Channels", callback_data="main_channels"))
     markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
     edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=call.message)
+
+# --- CUSTOM OFFER BUNDLES ---
+# A bundle stores a snapshot of its selected channel ids, but channel names are
+# resolved again when rendered and approved. This keeps renamed channels readable
+# and prevents deleted/unmanaged channels from being granted accidentally.
+bundle_selection_state = {}
+
+def _safe_bundle_id(raw):
+    raw = (raw or '').strip()
+    return raw if re.match(r'^[A-Za-z0-9]+$', raw) else None
+
+def _bundle_doc(raw):
+    bundle_id = _safe_bundle_id(raw)
+    return offer_bundles_col.find_one({"bundle_id": bundle_id, "admin_id": ADMIN_ID}) if bundle_id else None
+
+def _bundle_channels(bundle):
+    result = []
+    for raw_id in bundle.get('channel_ids', []):
+        try:
+            ch = channels_col.find_one({"channel_id": int(raw_id), "admin_id": ADMIN_ID})
+        except (TypeError, ValueError):
+            ch = None
+        if ch:
+            result.append(ch)
+    return result
+
+def _bundle_duration_label(bundle):
+    return "Lifetime ♾️" if bundle.get('duration_minutes') == 'lifetime' else format_label(bundle.get('duration_minutes'))
+
+def _render_bundle_list(chat_id, message_id=None):
+    bundles = list(offer_bundles_col.find({"admin_id": ADMIN_ID}).sort("created_at", 1))
+    markup = InlineKeyboardMarkup()
+    for bundle in bundles:
+        status = "🟢" if bundle.get('enabled') else "🔴"
+        toggle_label = "🔒 Disable" if bundle.get('enabled') else "🟢 Enable"
+        markup.row(
+            InlineKeyboardButton(
+                f"{status} {bundle.get('title', 'Unnamed')} — ₹{bundle.get('price', 0)}",
+                callback_data=f"obdetail_{bundle['bundle_id']}"),
+            InlineKeyboardButton(toggle_label, callback_data=f"obtogglelist_{bundle['bundle_id']}"))
+    markup.add(InlineKeyboardButton("➕ Create Bundle", callback_data="obadd"))
+    text = "📦 *Offer Bundles*\n\nCreate fixed-price bundles containing any managed channels."
+    if not bundles:
+        text += "\n\nNo bundles created yet."
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        send_admin_reply(text, parse_mode="Markdown", reply_markup=markup, delay=COMMAND_VANISH_SECONDS)
+
+@bot.message_handler(commands=['bundles'], func=lambda m: m.from_user.id == ADMIN_ID)
+def bundles_command(message):
+    _render_bundle_list(message.chat.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "main_obundles")
+def cb_main_bundles(call):
+    record_seen_user(call.from_user)
+    bot.answer_callback_query(call.id)
+    _render_user_bundles(call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "oblist")
+def cb_bundle_admin_list(call):
+    if _require_admin(call):
+        bot.answer_callback_query(call.id)
+        _render_bundle_list(call.message.chat.id, call.message.message_id)
+
+def _render_user_bundles(chat_id, message_id=None):
+    bundles = list(offer_bundles_col.find({"admin_id": ADMIN_ID, "enabled": True}).sort("created_at", 1))
+    markup = InlineKeyboardMarkup()
+    for bundle in bundles:
+        markup.add(InlineKeyboardButton(f"📦 {bundle.get('title')} — ₹{bundle.get('price')}",
+                                        callback_data=f"obuy_{bundle['bundle_id']}"))
+    markup.add(InlineKeyboardButton("📺 Groups / Channels", callback_data="main_channels"))
+    markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
+    text = "📦 <b>Custom Bundles</b>\n\nEach bundle has a fixed price and includes the channels shown in its details."
+    if not bundles:
+        text = "There are no bundles available right now."
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML")
+    else:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
+
+def _render_bundle_detail(chat_id, message_id, bundle_id, user_view=False):
+    bundle = _bundle_doc(bundle_id)
+    if not bundle or (user_view and not bundle.get('enabled')):
+        edit_menu(chat_id, message_id, "❌ This bundle is no longer available.", reply_markup=None)
+        return
+    channels = _bundle_channels(bundle)
+    names = "\n".join(f"• {escape(ch.get('name', 'Channel'))}" for ch in channels) or "• No valid channels"
+    description = escape(bundle.get('description') or 'No description provided.')
+    text = (f"📦 <b>{escape(bundle.get('title', 'Unnamed'))}</b>\n\n{description}\n\n"
+            f"<b>Included channels:</b>\n{names}\n\n"
+            f"⏱ Duration: <b>{escape(_bundle_duration_label(bundle))}</b>\n"
+            f"💰 Fixed bundle price: <b>₹{int(bundle.get('price', 0))}</b>")
+    markup = InlineKeyboardMarkup()
+    if user_view:
+        markup.add(InlineKeyboardButton(f"✅ Purchase for ₹{int(bundle.get('price', 0))}", callback_data=f"obcheckout_{bundle['bundle_id']}"))
+        markup.add(InlineKeyboardButton("⬅️ Back to Bundles", callback_data="main_obundles"))
+    else:
+        markup.add(InlineKeyboardButton("✏️ Edit Title", callback_data=f"obtitle_{bundle['bundle_id']}"))
+        markup.add(InlineKeyboardButton("📝 Edit Description", callback_data=f"obdesc_{bundle['bundle_id']}"))
+        markup.add(InlineKeyboardButton("💰 Edit Price", callback_data=f"obprice_{bundle['bundle_id']}"))
+        markup.add(InlineKeyboardButton("⏱ Edit Duration", callback_data=f"obduration_{bundle['bundle_id']}"))
+        markup.add(InlineKeyboardButton("📺 Select Channels", callback_data=f"obchannels_{bundle['bundle_id']}"))
+        markup.add(InlineKeyboardButton("🔴 Disable" if bundle.get('enabled') else "🟢 Enable", callback_data=f"obtoggle_{bundle['bundle_id']}"))
+        markup.add(InlineKeyboardButton("🗑 Delete", callback_data=f"obdelete_{bundle['bundle_id']}"))
+        markup.add(InlineKeyboardButton("⬅️ Back", callback_data="oblist"))
+    edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obdetail_'))
+def cb_bundle_detail(call):
+    if _require_admin(call):
+        bot.answer_callback_query(call.id)
+        _render_bundle_detail(call.message.chat.id, call.message.message_id, call.data.split('_', 1)[1])
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obuy_'))
+def cb_bundle_buy(call):
+    record_seen_user(call.from_user)
+    bot.answer_callback_query(call.id)
+    _render_bundle_detail(call.message.chat.id, call.message.message_id, call.data.split('_', 1)[1], True)
+
+def _bundle_prompt(message, prompt, handler, *args):
+    msg = send_prompt(ADMIN_ID, prompt)
+    bot.register_next_step_handler(msg, handler, *args)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'obadd')
+def cb_bundle_add(call):
+    if _require_admin(call):
+        bot.answer_callback_query(call.id)
+        _bundle_prompt(call.message, "Send the bundle title, or /cancel.", _bundle_add_title)
+
+def _bundle_add_title(message):
+    title = (message.text or '').strip()
+    if title.lower() in ('/cancel', 'cancel'):
+        send_admin_reply("❌ Bundle creation cancelled."); return
+    if not title:
+        _bundle_prompt(message, "Title cannot be empty. Send the bundle title.", _bundle_add_title); return
+    _bundle_prompt(message, "Send the bundle description, or /skip for none.", _bundle_add_description, title)
+
+def _bundle_add_description(message, title):
+    description = (message.text or '').strip()
+    if description.lower() in ('/cancel', 'cancel'):
+        send_admin_reply("❌ Bundle creation cancelled."); return
+    _bundle_prompt(message, "Send the exact fixed price in rupees (numbers only).", _bundle_add_price, title, '' if description.lower() == '/skip' else description)
+
+def _bundle_add_price(message, title, description):
+    try:
+        price = int((message.text or '').strip())
+        if price <= 0: raise ValueError
+    except ValueError:
+        _bundle_prompt(message, "Invalid price. Send a positive whole number, e.g. 199.", _bundle_add_price, title, description); return
+    _bundle_prompt(message, "Send duration as Days:Hours:Mins, or `lifetime`.", _bundle_add_duration, title, description, price)
+
+def _bundle_add_duration(message, title, description, price):
+    try:
+        duration = parse_duration_only(message.text)
+    except Exception:
+        _bundle_prompt(message, "Invalid duration. Use Days:Hours:Mins or lifetime.", _bundle_add_duration, title, description, price); return
+    bundle_id = secrets.token_hex(4)
+    bundle_selection_state[ADMIN_ID] = {"bundle_id": bundle_id, "title": title, "description": description, "price": price, "duration_minutes": duration, "new": True, "channel_ids": []}
+    _render_bundle_channel_picker(ADMIN_ID, None)
+
+def _render_bundle_channel_picker(chat_id, message_id, bundle_id=None):
+    state = bundle_selection_state.get(ADMIN_ID)
+    if bundle_id:
+        bundle = _bundle_doc(bundle_id)
+        if not bundle: return
+        state = dict(bundle)
+        state['channel_ids'] = [int(x) for x in bundle.get('channel_ids', [])]
+        state['new'] = False
+        bundle_selection_state[ADMIN_ID] = state
+    if not state: return
+    selected = {int(x) for x in state.get('channel_ids', [])}
+    markup = InlineKeyboardMarkup()
+    for ch in get_sorted_channels(ADMIN_ID):
+        mark = '✅' if ch['channel_id'] in selected else '⬜'
+        markup.add(InlineKeyboardButton(f"{mark} {ch['name']}", callback_data=f"obpick_{ch['channel_id']}"))
+    markup.add(InlineKeyboardButton("💾 Save Bundle", callback_data="obsave"))
+    markup.add(InlineKeyboardButton("❌ Cancel", callback_data="oblist"))
+    text = f"📺 Select channels for <b>{escape(state.get('title', 'bundle'))}</b>.\nSelected: {len(selected)}"
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML")
+    else:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obchannels_'))
+def cb_bundle_channels(call):
+    if _require_admin(call):
+        bot.answer_callback_query(call.id)
+        _render_bundle_channel_picker(call.message.chat.id, call.message.message_id, call.data.split('_', 1)[1])
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obpick_'))
+def cb_bundle_pick(call):
+    if not _require_admin(call): return
+    state = bundle_selection_state.get(ADMIN_ID)
+    if not state: return
+    ch_id = int(call.data.split('_', 1)[1])
+    selected = {int(x) for x in state.get('channel_ids', [])}
+    selected.remove(ch_id) if ch_id in selected else selected.add(ch_id)
+    state['channel_ids'] = list(selected)
+    bot.answer_callback_query(call.id)
+    _render_bundle_channel_picker(call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'obsave')
+def cb_bundle_save(call):
+    if not _require_admin(call): return
+    state = bundle_selection_state.pop(ADMIN_ID, None)
+    if not state or not state.get('channel_ids'):
+        bot.answer_callback_query(call.id, "Select at least one channel.", show_alert=True); return
+    now = datetime.now()
+    fields = {k: state[k] for k in ('title', 'description', 'price', 'duration_minutes', 'channel_ids')}
+    if state.get('new'):
+        fields.update({'admin_id': ADMIN_ID, 'enabled': True, 'created_at': now, 'updated_at': now})
+        fields['bundle_id'] = state['bundle_id']
+        offer_bundles_col.insert_one(fields)
+    else:
+        fields.update({'admin_id': ADMIN_ID, 'enabled': state.get('enabled', True), 'updated_at': now})
+        offer_bundles_col.update_one({'bundle_id': state['bundle_id'], 'admin_id': ADMIN_ID}, {'$set': fields})
+    bot.answer_callback_query(call.id, "Bundle saved.")
+    _render_bundle_list(call.message.chat.id, call.message.message_id)
+
+def _bundle_edit_text(call, field, prompt, validator=None):
+    if not _require_admin(call): return
+    bundle_id = call.data.split('_', 1)[1]
+    bundle = _bundle_doc(bundle_id)
+    if not bundle: return
+    bot.answer_callback_query(call.id)
+    msg = send_prompt(ADMIN_ID, prompt)
+    bot.register_next_step_handler(msg, _bundle_save_field, bundle_id, field, validator)
+
+def _bundle_save_field(message, bundle_id, field, validator):
+    value = (message.text or '').strip()
+    if value.lower() in ('/cancel', 'cancel'): return
+    try:
+        value = validator(value) if validator else value
+    except Exception:
+        send_admin_reply("❌ Invalid value. Please try again."); return
+    offer_bundles_col.update_one({'bundle_id': bundle_id, 'admin_id': ADMIN_ID}, {'$set': {field: value, 'updated_at': datetime.now()}})
+    send_admin_reply("✅ Bundle updated.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obtitle_'))
+def cb_bundle_title(call): _bundle_edit_text(call, 'title', 'Send the new bundle title.')
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obdesc_'))
+def cb_bundle_desc(call): _bundle_edit_text(call, 'description', 'Send the new description, or /skip.', lambda x: '' if x.lower() == '/skip' else x)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obprice_'))
+def cb_bundle_price(call): _bundle_edit_text(call, 'price', 'Send the exact fixed price in rupees.', lambda x: int(x) if int(x) > 0 else (_ for _ in ()).throw(ValueError()))
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obduration_'))
+def cb_bundle_duration(call): _bundle_edit_text(call, 'duration_minutes', 'Send duration as Days:Hours:Mins, or lifetime.', parse_duration_only)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obtogglelist_'))
+def cb_bundle_toggle_list(call):
+    if _require_admin(call):
+        bundle_id = call.data.split('_', 1)[1]; bundle = _bundle_doc(bundle_id)
+        if bundle: offer_bundles_col.update_one({'bundle_id': bundle_id}, {'$set': {'enabled': not bundle.get('enabled'), 'updated_at': datetime.now()}})
+        bot.answer_callback_query(call.id); _render_bundle_list(call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obtoggle_'))
+def cb_bundle_toggle(call):
+    if _require_admin(call):
+        bundle_id = call.data.split('_', 1)[1]; bundle = _bundle_doc(bundle_id)
+        if bundle: offer_bundles_col.update_one({'bundle_id': bundle_id}, {'$set': {'enabled': not bundle.get('enabled'), 'updated_at': datetime.now()}})
+        bot.answer_callback_query(call.id); _render_bundle_detail(call.message.chat.id, call.message.message_id, bundle_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obdelete_'))
+def cb_bundle_delete(call):
+    if _require_admin(call):
+        bundle_id = call.data.split('_', 1)[1]; offer_bundles_col.delete_one({'bundle_id': bundle_id, 'admin_id': ADMIN_ID})
+        bot.answer_callback_query(call.id, "Deleted."); _render_bundle_list(call.message.chat.id, call.message.message_id)
 
 # --- USER: SEARCH / FILTER CHANNELS ---
 
@@ -2153,14 +2427,16 @@ def setup_commands():
         BotCommand("start", "Browse channels & get started"),
         BotCommand("buy", "Browse channels to subscribe"),
         BotCommand("search", "Search channels by keyword"),
-        BotCommand("user", "View your profile & stats"),
         BotCommand("myplans", "Check your active subscriptions"),
         BotCommand("cancel", "Cancel a pending payment"),
         BotCommand("help", "Help & contact admin"),
     ]
-    admin_commands = user_commands + [
+    admin_commands = [
+        BotCommand("users", "List all active subscribers & plans"),
+    ] + user_commands + [
         BotCommand("add", "Add a new channel"),
         BotCommand("channels", "Manage channels (edit/delete)"),
+        BotCommand("bundles", "Manage offer bundles (custom fixed-price bundles)"),
         BotCommand("setmenuimage", "Set/remove the main menu image"),
         BotCommand("forcejoin", "Require users to join a channel (Force Join settings)"),
         BotCommand("removeuser", "Remove a subscriber early"),
@@ -2979,6 +3255,7 @@ def start_handler(message):
             "✅ *Admin Panel Active!*\n\n"
             "/add - Add a new channel & prices\n"
             "/channels - Manage existing channels (edit price, duration, delete)\n"
+            "/bundles - Create & manage custom offer bundles (fixed price, any channels)\n"
             "/removeuser - Remove a subscriber before their plan expires\n"
             "/stats - View bot stats & revenue\n"
             "/broadcast - Message everyone who has used the bot\n"
@@ -3055,99 +3332,151 @@ def cb_renew(call):
         return
     edit_plan_selection(call.message.chat.id, call.message.message_id, ch_data, call.from_user.id)
 
-@bot.message_handler(commands=['user'])
-def user_handler(message):
-    """/user: for the admin, shows all active subscribers across their groups/channels
-    (same listing used by /removeuser). For everyone else, shows their own profile & stats:
-    join date, active/expired subscriptions, spending history, etc."""
-    if ADMIN_ID and message.from_user.id == ADMIN_ID:
-        dismiss_previous(message.chat.id, message.from_user.id)
-        show_active_users(message.chat.id, message=message)
+@bot.message_handler(commands=['users'])
+def users_handler(message):
+    """Admin-only /users command: displays a detailed list of all currently active
+    subscribers from the database, including Telegram User ID, @username, first name,
+    last name, subscribed plan/bundle name, subscription start date, and expiry date/time."""
+    if not message.from_user:
+        return
+    if not ADMIN_ID or message.from_user.id != ADMIN_ID:
+        send_command_reply(message, "⛔ *Access Denied.*\n\nThe `/users` command is restricted to configured bot administrators.", parse_mode="Markdown")
         return
 
-    user_id = message.from_user.id
-    user_name = message.from_user.first_name or "User"
-    record_seen_user(message.from_user)
-    
+    dismiss_previous(message.chat.id, message.from_user.id)
+    now_ts = datetime.now().timestamp()
+
     try:
-        # Get user basic info
-        user_doc = users_col.find_one({"user_id": user_id})
-        
-        # Count active subscriptions
-        now = datetime.now().timestamp()
-        active_subs = list(users_col.find({
-            "user_id": user_id,
-            "$or": [
-                {"lifetime": True},
-                {"expiry": {"$gt": now}}
-            ]
-        }))
-        
-        # Count expired subscriptions
-        expired_subs = list(users_col.find({
-            "user_id": user_id,
-            "lifetime": {"$ne": True},
-            "expiry": {"$lte": now}
-        }))
-        
-        # Get total payments
-        payments = list(payments_col.find({"user_id": user_id}))
-        total_spent = sum(p.get('amount', 0) for p in payments)
-        total_transactions = len(payments)
-        
-        # Get first join date
-        first_user = users_col.find_one({"user_id": user_id}, sort=[("_id", 1)])
-        join_date = "Unknown"
-        if first_user and 'created_at' in first_user:
-            join_date = first_user['created_at'].strftime("%d %b %Y") if isinstance(first_user['created_at'], datetime) else str(first_user['created_at'])
-        
-        # Get subscription breakdown
-        subscription_summary = []
-        for sub in active_subs:
-            ch = channels_col.find_one({"channel_id": sub['channel_id']})
-            if not ch:
-                continue
-            ch_name = ch['name']
-            if sub.get('lifetime'):
-                subscription_summary.append(f"  • {ch_name} (Lifetime ♾️)")
+        all_subs = list(users_col.find({}))
+        active_subs = [s for s in all_subs if is_active_subscription(s, now_ts)]
+
+        if not active_subs:
+            send_command_reply(message, "ℹ️ *No active subscribers found.*\n\nThere are currently 0 active subscriptions in the database.", parse_mode="Markdown")
+            return
+
+        # Pre-cache channels and bundles for fast lookup
+        channel_map = {ch['channel_id']: ch for ch in channels_col.find({})}
+        bundle_map = {b['bundle_id']: b for b in offer_bundles_col.find({})}
+
+        unique_user_ids = set()
+        for s in active_subs:
+            if s.get('user_id'):
+                unique_user_ids.add(s['user_id'])
+
+        unique_active_users = len(unique_user_ids)
+        total_active_subs = len(active_subs)
+
+        # Sort subscriptions by user_id
+        active_subs.sort(key=lambda s: (s.get('user_id', 0), str(s.get('channel_id', ''))))
+
+        header = (
+            f"👥 *Active Subscribers Report*\n"
+            f"📊 *Total Active Users:* {unique_active_users}\n"
+            f"📋 *Total Active Subscriptions:* {total_active_subs}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
+
+        entries = []
+        for idx, sub in enumerate(active_subs, 1):
+            uid = sub.get('user_id')
+            seen = seen_users_col.find_one({"user_id": uid}) or {}
+
+            raw_fname = seen.get('first_name') or sub.get('first_name')
+            first_name = escape_markdown(raw_fname) if raw_fname else "N/A"
+
+            raw_lname = seen.get('last_name') or sub.get('last_name')
+            last_name = escape_markdown(raw_lname) if raw_lname else "N/A"
+
+            raw_username = seen.get('username') or sub.get('username')
+            username = f"@{escape_markdown(raw_username)}" if raw_username else "N/A"
+
+            ch_id = sub.get('channel_id')
+            ch_doc = channel_map.get(ch_id)
+            if not ch_doc and ch_id is not None:
+                try:
+                    ch_doc = channels_col.find_one({"channel_id": int(ch_id)})
+                except Exception:
+                    pass
+            ch_name = ch_doc.get('name') if ch_doc else (f"Channel {ch_id}" if ch_id else "General Access")
+
+            sub_type = sub.get('subscription_type')
+            if sub_type == 'bundle' and sub.get('bundle_id'):
+                b_doc = bundle_map.get(sub.get('bundle_id')) or offer_bundles_col.find_one({"bundle_id": sub.get('bundle_id')})
+                b_title = b_doc.get('title') if b_doc else 'Bundle'
+                plan_display = f"{b_title} ({ch_name})"
+            elif sub_type == 'free_trial':
+                plan_display = f"Free Trial ({ch_name})"
             else:
-                remaining = sub['expiry'] - now
-                subscription_summary.append(f"  • {ch_name} ({format_time_left(remaining)} left)")
-        
-        # Build user profile message
-        lines = [
-            f"👤 *User Profile — {user_name}*\n",
-            f"🆔 *User ID:* `{user_id}`",
-            f"📅 *Member Since:* {join_date}",
-            f"\n💳 *Payment History:*",
-            f"  • Total Spent: ₹{total_spent}",
-            f"  • Total Transactions: {total_transactions}",
-        ]
-        
-        if active_subs:
-            lines.append(f"\n🔓 *Active Subscriptions:* {len(active_subs)}")
-            lines.extend(subscription_summary)
-        else:
-            lines.append(f"\n🔓 *Active Subscriptions:* None")
-        
-        if expired_subs:
-            lines.append(f"\n⏰ *Expired Subscriptions:* {len(expired_subs)}")
-            for sub in expired_subs:
-                ch = channels_col.find_one({"channel_id": sub['channel_id']})
-                if ch:
-                    lines.append(f"  • {ch['name']}")
-        
-        # Add action buttons
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse"))
-        markup.add(InlineKeyboardButton("📋 My Subscriptions", callback_data="cb_myplans"))
-        
-        profile_text = "\n".join(lines)
-        send_command_reply(message, profile_text, reply_markup=markup, parse_mode="Markdown")
-        
+                plan_display = ch_name
+
+            plan_display = escape_markdown(plan_display)
+
+            # Subscription start date
+            start_dt = sub.get('start_date') or sub.get('created_at')
+            if not start_dt:
+                pay_doc = payments_col.find_one({"user_id": uid, "channel_id": ch_id}, sort=[("timestamp", -1)])
+                if not pay_doc:
+                    pay_doc = payments_col.find_one({"user_id": uid}, sort=[("timestamp", -1)])
+                if pay_doc and pay_doc.get('timestamp'):
+                    start_dt = pay_doc['timestamp']
+                elif isinstance(sub.get('_id'), ObjectId):
+                    start_dt = sub['_id'].generation_time
+
+            if isinstance(start_dt, datetime):
+                start_str = start_dt.strftime("%d %b %Y, %H:%M")
+            elif isinstance(start_dt, (int, float)):
+                start_str = datetime.fromtimestamp(start_dt).strftime("%d %b %Y, %H:%M")
+            else:
+                start_str = "N/A"
+
+            # Subscription expiry date/time
+            if sub.get('lifetime'):
+                expiry_str = "Lifetime ♾️"
+            elif sub.get('expiry'):
+                exp_dt = datetime.fromtimestamp(sub['expiry'])
+                diff = sub['expiry'] - now_ts
+                if diff > 0:
+                    mins = int(diff // 60)
+                    d, rem = divmod(mins, 1440)
+                    h, m = divmod(rem, 60)
+                    left = f"{d}d {h}h" if d else (f"{h}h {m}m" if h else f"{m}m")
+                    expiry_str = f"{exp_dt.strftime('%d %b %Y, %H:%M')} (in {left})"
+                else:
+                    expiry_str = f"{exp_dt.strftime('%d %b %Y, %H:%M')} (Expired)"
+            else:
+                expiry_str = "N/A"
+
+            name_header = f"{first_name} {last_name}" if last_name != "N/A" else first_name
+            entry = (
+                f"👤 *{idx}. {name_header}* ({username})\n"
+                f"  • 🆔 *User ID:* `{uid}`\n"
+                f"  • 📛 *First Name:* {first_name} | *Last Name:* {last_name}\n"
+                f"  • 🏷 *Username:* {username}\n"
+                f"  • 📺 *Plan/Bundle:* {plan_display}\n"
+                f"  • 📅 *Start Date:* {start_str}\n"
+                f"  • ⏳ *Expiry:* {expiry_str}\n\n"
+            )
+            entries.append(entry)
+
+        # Chunk messages to remain safely within Telegram's 4096 character limit
+        chunks = []
+        current_chunk = header
+        for entry in entries:
+            if len(current_chunk) + len(entry) > 3500:
+                chunks.append(current_chunk)
+                current_chunk = f"👥 *Active Subscribers Report (Cont.)*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n" + entry
+            else:
+                current_chunk += entry
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        for chunk_text in chunks:
+            send_command_reply(message, chunk_text, parse_mode="Markdown")
+
     except Exception as e:
-        print(f"[user] error fetching profile for {user_id}: {e}")
-        send_command_reply(message, "❌ Error loading your profile. Please try again.")
+        print(f"[users] error generating active subscribers report: {e}")
+        traceback.print_exc()
+        send_command_reply(message, f"❌ An error occurred while fetching active subscribers: {e}")
 
 @bot.message_handler(commands=['help'])
 def help_handler(message):
@@ -3816,7 +4145,8 @@ QR_ACCENT_HEX = (5, 51, 102)    # darker navy — the three corner finder patter
 QR_BRAND_CSS = '#0B5394'
 QR_ACCENT_CSS = '#053366'
 QR_LOGO_TEXT = 'AB'
-_BUNDLED_FONT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'fonts', 'Poppins-Bold.ttf')
+_BASE_DIR = os.path.dirname(os.path.abspath(globals()['__file__'])) if '__file__' in globals() else os.getcwd()
+_BUNDLED_FONT = os.path.join(_BASE_DIR, 'assets', 'fonts', 'Poppins-Bold.ttf')
 
 # Curated dark palettes for the payment QR. A different colour is picked at random
 # on every QR generation so each invoice looks distinct while staying scannable.
@@ -3890,12 +4220,20 @@ def _make_payment_qr(upi_id, amount):
     data = f"upi://pay?pa={upi_id}&am={amount}&cu=INR"
     brand_hex, accent_hex, brand_css, accent_css = random.choice(QR_COLOR_PALETTES)
     buf = io.BytesIO()
-    segno.make(data, error='h').save(
-        buf, kind='png', scale=14, border=3,
-        dark=brand_css, light='#FFFFFF',
-        finder_dark=accent_css, finder_light='#FFFFFF')
-    buf.seek(0)
-    img = Image.open(buf).convert('RGB')
+    if segno is not None:
+        segno.make(data, error='h').save(
+            buf, kind='png', scale=14, border=3,
+            dark=brand_css, light='#FFFFFF',
+            finder_dark=accent_css, finder_light='#FFFFFF')
+        buf.seek(0)
+        img = Image.open(buf).convert('RGB')
+    elif qrcode is not None:
+        qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H, box_size=10, border=3)
+        qr.add_data(data)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color=brand_css, back_color="white").convert('RGB')
+    else:
+        raise RuntimeError("No QR code library (segno or qrcode) available.")
     logo = _make_ab_logo(int(img.size[0] * 0.23), brand_hex=brand_hex)
     img.paste(logo, ((img.size[0] - logo.size[0]) // 2, (img.size[1] - logo.size[1]) // 2), logo)
     out = io.BytesIO()
@@ -3911,61 +4249,182 @@ def cart_checkout_handler(call):
     if not items:
         edit_all_channels(call.message.chat.id, call.message.message_id, user_id)
         return
+
     total = cart_total(items)
     discount, grand_total = bundle_discount(items)
-
-    # Option selected -> delete the cart-summary message immediately (don't wait for the timer)
     cancel_delete(call.message.chat.id, call.message.message_id)
     try:
         bot.delete_message(call.message.chat.id, call.message.message_id)
     except Exception:
         pass
-
     result = pending_checkouts_col.insert_one({
         "user_id": user_id, "items": items, "total": total,
         "discount": discount, "grand_total": grand_total,
         "created_at": datetime.now()
     })
     token = str(result.inserted_id)
-    # The cart has moved into the pending checkout — stop tracking it as an abandoned cart
     _clear_persisted_cart(user_id)
-
-    lines = [f"• {escape_markdown(i['name'])} — {format_label(i['t'])} — ₹{i['price']}" for i in items]
-    discount_line = f"\n🎁 <b>Bundle discount: −₹{discount}</b>" if discount else ""
-    caption = (
-        "🧾 <b>Checkout Summary</b>\n" + "\n".join(lines) +
-        f"\n\n💰 <b>Subtotal: ₹{total}</b>{discount_line}" +
-        f"\n<b>Total to pay: ₹{grand_total}</b>\nUPI ID: <code>{UPI_ID}</code>\n\n"
-        "<b><i>Please complete the payment and tap 'I Have Paid', then send a screenshot to the admin.</i></b>"
-    )
+    lines = [f"• {escape(i['name'])} — {escape(format_label(i['t']))} — ₹{i['price']}" for i in items]
+    caption = ("🧾 <b>Checkout Summary</b>\n" + "\n".join(lines) +
+               f"\n\n💰 <b>Total to pay: ₹{grand_total}</b>\nUPI ID: <code>{UPI_ID}</code>\n\n"
+               "<b><i>Please complete the payment and tap 'I Have Paid', then send a screenshot to the admin.</i></b>")
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ I Have Paid", callback_data=f"coutpaid_{token}"))
     markup.add(InlineKeyboardButton("❌ Cancel Payment", callback_data=f"coutcancel_{token}"))
     contact_url = contact_admin_url()
     if contact_url:
         markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
-
-    # Payment QR shown for QR_SHOW_SECONDS initially; once 'I Have Paid' is tapped the timer
-    # is reset to PAYMENT_VANISH_SECONDS so the user can still come back and scan if needed.
     try:
         qr_file = _make_payment_qr(UPI_ID, grand_total)
         msg = bot.send_photo(call.message.chat.id, InputFile(qr_file, 'payment_qr.png'),
                              caption=caption, reply_markup=markup, parse_mode="HTML")
         schedule_delete(call.message.chat.id, msg.message_id, QR_SHOW_SECONDS)
     except Exception:
-        # If the QR can't be shown, clean up the checkout instead of leaving it stuck.
-        try:
-            pending_checkouts_col.delete_one({"_id": ObjectId(token)})
-        except Exception:
-            pass
-        # Put the cart back into the abandoned-cart tracker so it can still be nudged.
+        pending_checkouts_col.delete_one({"_id": ObjectId(token)})
         _persist_cart(user_id)
         edit_menu(call.message.chat.id, call.message.message_id,
-            "❌ Couldn't show the payment QR right now. Please try again.",
-            reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse")),
-            message_obj=call.message)
+                  "❌ Couldn't show the payment QR right now. Please try again.",
+                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse")),
+                  message_obj=call.message)
         return
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obcheckout_'))
+def bundle_checkout_handler(call):
+    bundle_id = _safe_bundle_id(call.data.split('_', 1)[1])
+    bundle = _bundle_doc(bundle_id)
+    channels = _bundle_channels(bundle) if bundle and bundle.get('enabled') else []
+    if not bundle or not channels or int(bundle.get('price', 0)) <= 0:
+        bot.answer_callback_query(call.id, "This bundle is no longer available.", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    snapshot = [{'channel_id': int(ch['channel_id']), 'name': ch['name']} for ch in channels]
+    doc = {
+        'user_id': call.from_user.id, 'bundle_id': bundle_id,
+        'bundle_title': bundle.get('title', 'Bundle'), 'items': snapshot,
+        'duration_minutes': bundle.get('duration_minutes'), 'amount': int(bundle['price']),
+        'created_at': datetime.now()
+    }
+    token = str(pending_offer_bundle_checkouts_col.insert_one(doc).inserted_id)
+    lines = '\n'.join(f"• {escape(i['name'])}" for i in snapshot)
+    caption = (f"🧾 <b>{escape(bundle.get('title', 'Bundle'))}</b>\n\n{escape(bundle.get('description') or '')}\n\n"
+               f"<b>Included channels:</b>\n{lines}\n\n"
+               f"⏱ Duration: <b>{escape(_bundle_duration_label(bundle))}</b>\n"
+               f"💰 <b>Fixed price: ₹{int(bundle['price'])}</b>\nUPI ID: <code>{UPI_ID}</code>\n\n"
+               "Complete the payment, tap 'I Have Paid', then send the receipt screenshot.")
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("✅ I Have Paid", callback_data=f"obpaid_{token}"))
+    markup.add(InlineKeyboardButton("❌ Cancel Payment", callback_data=f"obcancel_{token}"))
+    try:
+        qr_file = _make_payment_qr(UPI_ID, int(bundle['price']))
+        msg = bot.send_photo(call.message.chat.id, InputFile(qr_file, 'bundle_payment_qr.png'),
+                             caption=caption, reply_markup=markup, parse_mode='HTML')
+        schedule_delete(call.message.chat.id, msg.message_id, QR_SHOW_SECONDS)
+    except Exception:
+        pending_offer_bundle_checkouts_col.delete_one({'_id': ObjectId(token)})
+        edit_menu(call.message.chat.id, call.message.message_id, "❌ Couldn't show the payment QR. Please try again.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obcancel_'))
+def bundle_cancel_handler(call):
+    token = call.data.split('_', 1)[1]
+    pending_offer_bundle_checkouts_col.delete_one({'_id': ObjectId(token)})
+    bot.answer_callback_query(call.id, "Payment cancelled.")
+    _render_user_bundles(call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obpaid_'))
+def bundle_paid_handler(call):
+    token = call.data.split('_', 1)[1]
+    bot.answer_callback_query(call.id, "Send your payment screenshot now.")
+    schedule_delete(call.message.chat.id, call.message.message_id, PAYMENT_VANISH_SECONDS)
+    msg = send_prompt(call.message.chat.id, "📸 Send the payment receipt screenshot now, or type /cancel.")
+    bot.register_next_step_handler(msg, receive_bundle_screenshot, token)
+
+def receive_bundle_screenshot(message, token):
+    if message.text and message.text.strip().lower() in ('/cancel', 'cancel', '/stop', 'stop'):
+        pending_offer_bundle_checkouts_col.delete_one({'_id': ObjectId(token), 'user_id': message.from_user.id})
+        send_command_reply(message, "✅ Bundle payment cancelled.")
+        return
+    doc = pending_offer_bundle_checkouts_col.find_one({'_id': ObjectId(token), 'user_id': message.from_user.id})
+    if not doc:
+        bot.send_message(message.chat.id, "❌ This bundle checkout has expired or was already processed.")
+        return
+    if not message.photo:
+        msg = send_prompt(message.chat.id, "❌ Please send a receipt screenshot, or type /cancel.")
+        bot.register_next_step_handler(msg, receive_bundle_screenshot, token)
+        return
+    pending_offer_bundle_checkouts_col.update_one({'_id': ObjectId(token)}, {'$set': {
+        'screenshot_file_id': message.photo[-1].file_id, 'user_chat_id': message.chat.id,
+        'user_name': message.from_user.first_name, 'user_username': message.from_user.username,
+    }})
+    lines = '\n'.join(f"• {escape_markdown(i['name'])}" for i in doc.get('items', []))
+    caption = ("🔔 *Bundle Payment Verification Required!*\n\n"
+               f"User: {escape_markdown(message.from_user.first_name)}\n"
+               f"User ID: `{message.from_user.id}`\n\n{lines}\n\n"
+               f"Bundle: *{escape_markdown(doc.get('bundle_title', 'Bundle'))}*\n"
+               f"Fixed total: *₹{doc.get('amount', 0)}*")
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("✅ Approve Bundle", callback_data=f"obapp_{token}"))
+    markup.add(InlineKeyboardButton("❌ Reject", callback_data=f"obrej_{token}"))
+    try:
+        admin_msg = bot.send_photo(ADMIN_ID, doc['screenshot_file_id'], caption=caption, reply_markup=markup, parse_mode='Markdown', vanish_delay=None)
+    except Exception:
+        admin_msg = bot.send_message(ADMIN_ID, caption, reply_markup=markup, parse_mode='Markdown', vanish_delay=None)
+    conf = bot.send_message(message.chat.id, "✅ Bundle receipt sent for admin approval. Please wait.", vanish_delay=None)
+    pending_review_messages[token] = {'user_chat_id': message.chat.id, 'user_msg_id': conf.message_id,
+                                      'admin_chat_id': ADMIN_ID, 'admin_msg_id': getattr(admin_msg, 'message_id', None)}
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obrej_'))
+def bundle_reject_handler(call):
+    token = call.data.split('_', 1)[1]
+    doc = pending_offer_bundle_checkouts_col.find_one({'_id': ObjectId(token)})
+    if doc:
+        try: bot.send_message(doc['user_id'], "❌ Your bundle payment could not be verified. Please contact the admin.")
+        except Exception: pass
+        pending_offer_bundle_checkouts_col.delete_one({'_id': ObjectId(token)})
+    _clear_pending_review_messages(token)
+    bot.answer_callback_query(call.id, "Rejected.")
+    edit_caption_menu(call.message.chat.id, call.message.message_id, "❌ Rejected this bundle checkout.", delay=None)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obapp_'))
+def bundle_approve_handler(call):
+    token = call.data.split('_', 1)[1]
+    doc = pending_offer_bundle_checkouts_col.find_one({'_id': ObjectId(token)})
+    if not doc:
+        bot.answer_callback_query(call.id, "Already processed or expired."); return
+    bot.answer_callback_query(call.id, "Approving bundle...")
+    user_id = int(doc['user_id']); result_lines = []; errors = []
+    duration = doc.get('duration_minutes')
+    for item in doc.get('items', []):
+        ch_id = int(item['channel_id']); name = item.get('name', str(ch_id))
+        if not channels_col.find_one({'channel_id': ch_id, 'admin_id': ADMIN_ID}):
+            errors.append(f"• {escape_markdown(name)}: channel is no longer managed"); continue
+        try:
+            try: bot.unban_chat_member(ch_id, user_id, only_if_banned=True)
+            except Exception: pass
+            if duration == 'lifetime':
+                link = bot.create_chat_invite_link(ch_id, member_limit=1)
+                users_col.update_one({'user_id': user_id, 'channel_id': ch_id}, {'$set': {
+                    'expiry': None, 'lifetime': True, 'subscription_type': 'bundle',
+                    'bundle_id': doc['bundle_id'], 'reminded_24h': True, 'reminded_1h': True}}, upsert=True)
+                result_lines.append(f"• {escape_markdown(name)} — Lifetime\nJoin Link: {link.invite_link}")
+            else:
+                expiry = datetime.now() + timedelta(minutes=int(duration)); link = bot.create_chat_invite_link(ch_id, member_limit=1, expire_date=int(expiry.timestamp()))
+                users_col.update_one({'user_id': user_id, 'channel_id': ch_id}, {'$set': {
+                    'expiry': expiry.timestamp(), 'lifetime': False, 'subscription_type': 'bundle',
+                    'bundle_id': doc['bundle_id'], 'reminded_24h': False, 'reminded_1h': False}}, upsert=True)
+                result_lines.append(f"• {escape_markdown(name)} — {format_label(duration)}\nJoin Link: {link.invite_link}")
+        except Exception as e:
+            errors.append(f"• {escape_markdown(name)}: {e}")
+    payments_col.insert_one({'user_id': user_id, 'channel_id': None, 'minutes': duration,
+                             'amount': int(doc['amount']), 'bundle_id': doc['bundle_id'],
+                             'purchase_type': 'bundle', 'timestamp': datetime.now()})
+    counters_col.update_one({'_id': 'stats'}, {'$inc': {'total_sales': 1, 'total_revenue': int(doc['amount'])}}, upsert=True)
+    pending_offer_bundle_checkouts_col.delete_one({'_id': ObjectId(token)})
+    _clear_pending_review_messages(token)
+    if result_lines:
+        bot.send_message(user_id, "🥳 *Bundle Payment Approved!*\n\n" + "\n\n".join(result_lines), parse_mode='Markdown', vanish_delay=None)
+    if errors:
+        bot.send_message(user_id, "⚠️ Some bundle channels could not be activated:\n" + '\n'.join(errors))
+    edit_caption_menu(call.message.chat.id, call.message.message_id, f"✅ Approved bundle for user {user_id}.", delay=None)
 @bot.callback_query_handler(func=lambda call: call.data.startswith('coutpaid_'))
 def cout_paid_handler(call):
     token = call.data.split('_', 1)[1]
@@ -4124,6 +4583,10 @@ def cancel_command_handler(message):
         cancelled = pending_checkouts_col.delete_many({"user_id": user_id}).deleted_count
     except Exception:
         cancelled = 0
+    try:
+        cancelled += pending_offer_bundle_checkouts_col.delete_many({"user_id": user_id}).deleted_count
+    except Exception:
+        pass
     user_carts.pop(user_id, None)
     _clear_persisted_cart(user_id)
     if cancelled:
@@ -4332,7 +4795,8 @@ def dbstats_handler(message):
             "",
             "Per-collection:",
         ]
-        for name in ["channels", "users", "payments", "seen_users", "counters", "pending_checkouts"]:
+        for name in ["channels", "users", "payments", "seen_users", "counters", "pending_checkouts",
+                     "offer_bundles", "pending_offer_bundle_checkouts"]:
             try:
                 cstats = db.command("collStats", name)
                 csize = cstats.get('size', 0) / (1024 * 1024)
@@ -5821,6 +6285,15 @@ def setup_indexes():
     try:
         expired_subs_col.create_index([("user_id", 1), ("channel_id", 1)], unique=True)
         expired_subs_col.create_index([("expired_at", 1)])
+    except Exception:
+        pass
+    try:
+        offer_bundles_col.create_index([("bundle_id", 1)], unique=True)
+        offer_bundles_col.create_index([("enabled", 1)])
+    except Exception:
+        pass
+    try:
+        pending_offer_bundle_checkouts_col.create_index([("user_id", 1)])
     except Exception:
         pass
 
