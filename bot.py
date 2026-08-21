@@ -446,7 +446,7 @@ def clear_menu_image():
 # =====================================================================
 
 FJ_SETTINGS_ID = "force_join"
-FJ_MSG_TEXT = "🔒 Please join our channel to use this bot."
+FJ_MSG_TEXT = "🔒 Join our channel to unlock the bot 🔓"
 FJ_BTN_JOIN = "📢 Join Channel"
 FJ_BTN_RETRY = "🔄 Try Again"
 FJ_CB_RETRY = "fj_retry"
@@ -638,12 +638,12 @@ def send_force_join_menu(chat_id, message_id=None):
     channel = s.get('channel')
     title = s.get('channel_title')
     channel_str = escape_markdown(title or channel) if channel else "— not set —"
-    text = ("🔒 *Force Join Settings*\n\n"
+    text = ("╭━━━ 🔒 𝙁𝙊𝙍𝘾𝙀 𝙅𝙊𝙄𝙉 ━━━╮\n\n"
             f"Status: {status}\n"
             f"Channel: {channel_str}\n\n"
-            "While enabled, every user must join this channel before they can "
-            "use the bot. The check covers /start, all commands, menu buttons "
-            "and callbacks.")
+            "When enabled, users must join this channel before they can "
+            "use the bot. Covers /start, all commands, menu buttons & callbacks.\n\n"
+            "╰━━━━━━━━━━━━━━━━━━━━╯")
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton(
         "🔴 Disable" if s.get('enabled') else "🟢 Enable",
@@ -794,7 +794,7 @@ def cb_fj_retry(call):
             pass
         show_main_menu(chat_id, user_id)
     else:
-        bot.answer_callback_query(call.id, "🔒 You haven't joined yet. Please join the channel first.", show_alert=True)
+        bot.answer_callback_query(call.id, "🔒 You haven't joined yet. Join the channel first.", show_alert=True)
 
 # --- CUSTOM OFFER BUNDLES ---
 # Bundles are admin-created products with a manually entered fixed price. The
@@ -1261,7 +1261,7 @@ def _build_paused_plan_selection(ch_data, user_id=None):
     if contact_url:
         markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
     desc_part = f"\n\n📝 <b>About:</b> <b><i>{escape(ch_data['description'])}</i></b>" if ch_data.get('description') else ""
-    text = f"⏸ <b>{escape(ch_data['name'])}</b> is temporarily paused.\n\nNo new subscriptions are being sold right now, but you won't miss out — tap below and we'll ping you the moment it's back!{desc_part}"
+    text = f"⏸ <b>{escape(ch_data['name'])}</b> is locked 🔒\n\nNo new sign-ups right now.\nJoin the waitlist and we'll hit you up the second it's back ⚡"
     return text, markup
 
 def _build_plan_selection(ch_data, user_id=None):
@@ -1291,7 +1291,7 @@ def _build_plan_selection(ch_data, user_id=None):
     if contact_url:
         markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
     desc_part = f"\n\n📝 <b>About:</b> <b><i>{escape(ch_data['description'])}</i></b>" if ch_data.get('description') else ""
-    text = f"Yoo \n\nAb yaha tak agaya hai to plan bhi lele dalle 😁 \n\nYou are joining: <b>{escape(ch_data['name'])}</b>.{desc_part}\n\nPlease select a subscription plan below:"
+    text = f"Yoo 👀\n\nAb yaha tak agaya hai to plan bhi lele dalle 😁\n\nYou're joining: <b>{escape(ch_data['name'])}</b> 👇{desc_part}\n\nPick your vibe below:"
     return text, markup
 
 def send_plan_selection(chat_id, ch_data, user_id=None):
@@ -1401,7 +1401,7 @@ def build_cart_summary(user_id):
     """Builds the (text, markup) for the cart summary / checkout screen."""
     items = get_cart(user_id)
     if not items:
-        text = "🛒 Your cart is empty.\n\nBrowse channels below to add a subscription."
+        text = "🛒 Your cart is empty.\n\nBrowse channels below and add something 🔥"
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse"))
         contact_url = contact_admin_url()
@@ -1409,13 +1409,13 @@ def build_cart_summary(user_id):
             markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
         return text, markup
 
-    lines = ["🛒 *Your Cart*\n"]
+    lines = ["🛒 <b>Your Cart</b> 🛒\n"]
     for i in items:
         lines.append(f"• {i['name']} — {format_label(i['t'])} — ₹{i['price']}")
     total = cart_total(items)
     discount, grand_total = bundle_discount(items)
-    lines.append(f"\n💰 *Subtotal: ₹{total}*")
-    lines.append(f"💡 *Total: ₹{grand_total}*")
+    lines.append(f"\n💰 <b>Subtotal: ₹{total}</b>")
+    lines.append(f"💡 <b>Total: ₹{grand_total}</b>")
     text = "\n".join(lines)
 
     markup = InlineKeyboardMarkup()
@@ -1490,8 +1490,8 @@ def build_channel_list(user_id, back_to_menu=False):
         markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
     if back_to_menu:
         markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
-        text = (f"👋 <b>Welcome Dallo !</b> \n\nShaana banne ki Koshish mat karna  😂😂\n\nPlease select a channel/group you'd like to join.\n\n"
-            f"💡 <b><i>You can add multiple channels to your cart and pay for all of them at once!</i></b>")
+        text = (f"👋 <b>Welcome Dallo !</b> \n\nShaana banne ki Koshish mat karna 😂😂\n\nPick a channel/group you'd like to join below 👇\n\n"
+            f"💡 <b><i>Stack multiple channels in your cart and pay once — easy money 🫶🏻</i></b>")
     return text, markup
 
 def show_all_channels(chat_id, user_id, back_to_menu=False):
@@ -1506,7 +1506,7 @@ def show_all_channels(chat_id, user_id, back_to_menu=False):
             reply_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
         if back_to_menu:
             reply_markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
-        reply = bot.send_message(chat_id, "No channels are available right now. Please check back later, or contact the admin.",
+        reply = bot.send_message(chat_id, "Nothing here right now 😕\nCheck back later or contact the admin.",
                           reply_markup=reply_markup)
         schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
         track_msg(user_id, reply)
@@ -1526,7 +1526,7 @@ def edit_all_channels(chat_id, message_id, user_id, message_obj=None, back_to_me
             reply_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
         if back_to_menu:
             reply_markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
-        edit_menu(chat_id, message_id, "No channels are available right now. Please check back later, or contact the admin.",
+        edit_menu(chat_id, message_id, "Nothing here right now 😕\nCheck back later or contact the admin.",
                   reply_markup=reply_markup,
                   message_obj=message_obj)
         return
@@ -1540,17 +1540,16 @@ def build_main_menu():
     dumping the full channel list on the user immediately."""
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("📺 Groups / Channels", callback_data="main_channels"))
-    markup.add(InlineKeyboardButton("🎁 Offers", callback_data="main_offers"))
     if offer_bundles_col.count_documents({"enabled": True}) > 0:
-        markup.add(InlineKeyboardButton("📦 Bundles", callback_data="main_obundles"))
+        markup.add(InlineKeyboardButton("📦 Offers", callback_data="main_obundles"))
     contact_url = contact_admin_url()
     if contact_url:
         markup.add(InlineKeyboardButton("📞 Contact", url=contact_url))
-    text = ("👋 <b>Welcome!</b>\n\n"
-            "What would you like to do?\n\n"
-            "📺 <b>Groups / Channels</b> — browse and join available channels\n"
-            "🎁 <b>Offers</b> — check out current deals\n"
-            "📦 <b>Bundles</b> — get multiple channels together at one fixed price")
+    text = ("╭━━━ 🪩 𝙒𝙀𝙇𝘾𝙊𝙈𝙀 ━━━╮\n\n"
+            "What's the move? 👇\n\n"
+            "📺 <b>Groups / Channels</b> — browse & join\n"
+            "📦 <b>Offers</b> — stack channels for one price\n\n"
+            "╰━━━━━━━━━━━━━━━━━━━━╯")
     return text, markup
 
 def _render_main_menu(chat_id, user_id=None, message_id=None):
@@ -1641,11 +1640,11 @@ def cb_main_channels(call):
 def cb_main_offers(call):
     bot.answer_callback_query(call.id)
     text = ("🎁 <b>Current Offers</b>\n\n"
-            "Choose a custom bundle to get several channels at the exact fixed price "
+            "Choose a custom offer to get several channels at the exact fixed price "
             "set by the admin, or browse individual channels.")
     markup = InlineKeyboardMarkup()
     if offer_bundles_col.count_documents({"enabled": True}) > 0:
-        markup.add(InlineKeyboardButton("📦 View Bundles", callback_data="main_obundles"))
+        markup.add(InlineKeyboardButton("📦 View Offers", callback_data="main_obundles"))
     markup.add(InlineKeyboardButton("📺 Groups / Channels", callback_data="main_channels"))
     markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
     edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=call.message)
@@ -1689,10 +1688,10 @@ def _render_bundle_list(chat_id, message_id=None):
                 f"{status} {bundle.get('title', 'Unnamed')} — ₹{bundle.get('price', 0)}",
                 callback_data=f"obdetail_{bundle['bundle_id']}"),
             InlineKeyboardButton(toggle_label, callback_data=f"obtogglelist_{bundle['bundle_id']}"))
-    markup.add(InlineKeyboardButton("➕ Create Bundle", callback_data="obadd"))
-    text = "📦 *Offer Bundles*\n\nCreate fixed-price bundles containing any managed channels."
+    markup.add(InlineKeyboardButton("➕ Create Offer", callback_data="obadd"))
+    text = "📦 *Offers*\n\nStack channels at one fixed price — built by the admin."
     if not bundles:
-        text += "\n\nNo bundles created yet."
+        text += "\n\nNo offers yet."
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
     else:
@@ -1722,9 +1721,9 @@ def _render_user_bundles(chat_id, message_id=None):
                                         callback_data=f"obuy_{bundle['bundle_id']}"))
     markup.add(InlineKeyboardButton("📺 Groups / Channels", callback_data="main_channels"))
     markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
-    text = "📦 <b>Custom Bundles</b>\n\nEach bundle has a fixed price and includes the channels shown in its details."
+    text = "📦 <b>Offers</b>\n\nEach offer has a fixed price and includes the channels shown below."
     if not bundles:
-        text = "There are no bundles available right now."
+        text = "No offers available right now."
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML")
     else:
@@ -1733,7 +1732,7 @@ def _render_user_bundles(chat_id, message_id=None):
 def _render_bundle_detail(chat_id, message_id, bundle_id, user_view=False):
     bundle = _bundle_doc(bundle_id)
     if not bundle or (user_view and not bundle.get('enabled')):
-        edit_menu(chat_id, message_id, "❌ This bundle is no longer available.", reply_markup=None)
+        edit_menu(chat_id, message_id, "❌ This offer is no longer available.", reply_markup=None)
         return
     channels = _bundle_channels(bundle)
     names = "\n".join(f"• {escape(ch.get('name', 'Channel'))}" for ch in channels) or "• No valid channels"
@@ -1741,11 +1740,11 @@ def _render_bundle_detail(chat_id, message_id, bundle_id, user_view=False):
     text = (f"📦 <b>{escape(bundle.get('title', 'Unnamed'))}</b>\n\n{description}\n\n"
             f"<b>Included channels:</b>\n{names}\n\n"
             f"⏱ Duration: <b>{escape(_bundle_duration_label(bundle))}</b>\n"
-            f"💰 Fixed bundle price: <b>₹{int(bundle.get('price', 0))}</b>")
+            f"💰 <b>Fixed price: ₹{int(bundle.get('price', 0))}</b>")
     markup = InlineKeyboardMarkup()
     if user_view:
         markup.add(InlineKeyboardButton(f"✅ Purchase for ₹{int(bundle.get('price', 0))}", callback_data=f"obcheckout_{bundle['bundle_id']}"))
-        markup.add(InlineKeyboardButton("⬅️ Back to Bundles", callback_data="main_obundles"))
+        markup.add(InlineKeyboardButton("⬅️ Back to Offers", callback_data="main_obundles"))
     else:
         markup.add(InlineKeyboardButton("✏️ Edit Title", callback_data=f"obtitle_{bundle['bundle_id']}"))
         markup.add(InlineKeyboardButton("📝 Edit Description", callback_data=f"obdesc_{bundle['bundle_id']}"))
@@ -1777,20 +1776,20 @@ def _bundle_prompt(message, prompt, handler, *args):
 def cb_bundle_add(call):
     if _require_admin(call):
         bot.answer_callback_query(call.id)
-        _bundle_prompt(call.message, "Send the bundle title, or /cancel.", _bundle_add_title)
+        _bundle_prompt(call.message, "Send the offer title, or /cancel.", _bundle_add_title)
 
 def _bundle_add_title(message):
     title = (message.text or '').strip()
     if title.lower() in ('/cancel', 'cancel'):
-        send_admin_reply("❌ Bundle creation cancelled."); return
+        send_admin_reply("❌ Offer creation cancelled."); return
     if not title:
-        _bundle_prompt(message, "Title cannot be empty. Send the bundle title.", _bundle_add_title); return
-    _bundle_prompt(message, "Send the bundle description, or /skip for none.", _bundle_add_description, title)
+        _bundle_prompt(message, "Title cannot be empty. Send the offer title.", _bundle_add_title); return
+    _bundle_prompt(message, "Send the offer description, or /skip for none.", _bundle_add_description, title)
 
 def _bundle_add_description(message, title):
     description = (message.text or '').strip()
     if description.lower() in ('/cancel', 'cancel'):
-        send_admin_reply("❌ Bundle creation cancelled."); return
+        send_admin_reply("❌ Offer creation cancelled."); return
     _bundle_prompt(message, "Send the exact fixed price in rupees (numbers only).", _bundle_add_price, title, '' if description.lower() == '/skip' else description)
 
 def _bundle_add_price(message, title, description):
@@ -1825,9 +1824,9 @@ def _render_bundle_channel_picker(chat_id, message_id, bundle_id=None):
     for ch in get_sorted_channels(ADMIN_ID):
         mark = '✅' if ch['channel_id'] in selected else '⬜'
         markup.add(InlineKeyboardButton(f"{mark} {ch['name']}", callback_data=f"obpick_{ch['channel_id']}"))
-    markup.add(InlineKeyboardButton("💾 Save Bundle", callback_data="obsave"))
+    markup.add(InlineKeyboardButton("💾 Save Offer", callback_data="obsave"))
     markup.add(InlineKeyboardButton("❌ Cancel", callback_data="oblist"))
-    text = f"📺 Select channels for <b>{escape(state.get('title', 'bundle'))}</b>.\nSelected: {len(selected)}"
+    text = f"📺 Select channels for <b>{escape(state.get('title', 'offer'))}</b>.\nSelected: {len(selected)}"
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML")
     else:
@@ -1866,7 +1865,7 @@ def cb_bundle_save(call):
     else:
         fields.update({'admin_id': ADMIN_ID, 'enabled': state.get('enabled', True), 'updated_at': now})
         offer_bundles_col.update_one({'bundle_id': state['bundle_id'], 'admin_id': ADMIN_ID}, {'$set': fields})
-    bot.answer_callback_query(call.id, "Bundle saved.")
+    bot.answer_callback_query(call.id, "Offer saved.")
     _render_bundle_list(call.message.chat.id, call.message.message_id)
 
 def _bundle_edit_text(call, field, prompt, validator=None):
@@ -1886,10 +1885,10 @@ def _bundle_save_field(message, bundle_id, field, validator):
     except Exception:
         send_admin_reply("❌ Invalid value. Please try again."); return
     offer_bundles_col.update_one({'bundle_id': bundle_id, 'admin_id': ADMIN_ID}, {'$set': {field: value, 'updated_at': datetime.now()}})
-    send_admin_reply("✅ Bundle updated.")
+    send_admin_reply("✅ Offer updated.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('obtitle_'))
-def cb_bundle_title(call): _bundle_edit_text(call, 'title', 'Send the new bundle title.')
+def cb_bundle_title(call): _bundle_edit_text(call, 'title', 'Send the new offer title.')
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('obdesc_'))
 def cb_bundle_desc(call): _bundle_edit_text(call, 'description', 'Send the new description, or /skip.', lambda x: '' if x.lower() == '/skip' else x)
@@ -1948,7 +1947,7 @@ def render_search_results(chat_id, message_id, user_id, keyword, page=0, message
     results = search_channels_by_keyword(keyword)
 
     if not results:
-        text = f"🔍 No channels found for \"{escape(keyword)}\".\n\nTry a different keyword."
+        text = f"🔍 No channels found for \"{escape(keyword)}\"\n\nTry a different keyword."
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("🔍 New Search", callback_data="search_prompt"))
         markup.add(InlineKeyboardButton("📺 All Channels", callback_data="cart_browse"))
@@ -2436,7 +2435,7 @@ def setup_commands():
     ] + user_commands + [
         BotCommand("add", "Add a new channel"),
         BotCommand("channels", "Manage channels (edit/delete)"),
-        BotCommand("bundles", "Manage offer bundles (custom fixed-price bundles)"),
+        BotCommand("bundles", "Manage offers (custom fixed-price offers)"),
         BotCommand("setmenuimage", "Set/remove the main menu image"),
         BotCommand("forcejoin", "Require users to join a channel (Force Join settings)"),
         BotCommand("removeuser", "Remove a subscriber early"),
@@ -2920,10 +2919,9 @@ def _trial_already_claimed_markup(ch_id):
     return markup
 
 def _show_trial_already_claimed(call, ch_id):
-    text = ("⚠️ Free trial already claimed\n\n"
-            "You have already used your free trial for this channel.\n\n"
-            "The free trial can only be claimed once.\n\n"
-            "Please purchase a paid plan to continue.")
+    text = ("⚠️ <b>Free trial already claimed</b>\n\n"
+            "You've already used your one-time free trial for this channel.\n\n"
+            "Grab a paid plan below to keep going 💳")
     try:
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
                               reply_markup=_trial_already_claimed_markup(ch_id))
@@ -2934,8 +2932,8 @@ def _show_trial_already_claimed(call, ch_id):
                   message_obj=call.message)
 
 def _show_trial_active_paid(call, ch_id):
-    text = ("ℹ️ You already have an active subscription for this channel.\n\n"
-            "Your free trial cannot replace or downgrade an active paid plan.\n\n"
+    text = ("ℹ️ You're already subscribed here.\n\n"
+            "Free trial can't replace or downgrade an active plan.\n\n"
             "Use /myplans to check your subscriptions.")
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("💳 Browse Paid Plans", callback_data=f"buypaid_{ch_id}"))
@@ -2947,8 +2945,7 @@ def _show_trial_retry(call, trial_id, ch_id):
     markup.add(InlineKeyboardButton("🔄 Try Again", callback_data=f"trialretry_{trial_id}"))
     markup.add(InlineKeyboardButton("💳 Buy Paid Plan", callback_data=f"buypaid_{ch_id}"))
     edit_menu(call.message.chat.id, call.message.message_id,
-              "❌ We couldn't activate your free trial right now.\n\n"
-              "Please try again.",
+              "❌ Couldn't activate your free trial right now.\n\nGive it another go 🔄",
               reply_markup=markup, message_obj=call.message)
 
 def _process_trial_claim(call, raw_trial_id):
@@ -3175,7 +3172,7 @@ def _process_trial_claim(call, raw_trial_id):
 
     ch_name = channel.get('name') or f"Channel {ch_id}"
     text = (
-        f"🎁 *Free trial activated!*\n\n"
+        f"🎁 <b>Free trial activated!</b>\n\n"
         f"📺 Channel: {escape_markdown(ch_name)}\n"
         f"⏱ Duration: {format_label(trial['duration_minutes'])}\n"
         f"⌛ Expires: {expiry_dt.strftime('%Y-%m-%d %H:%M')}\n\n"
@@ -3252,20 +3249,22 @@ def start_handler(message):
     if user_id == ADMIN_ID:
         dismiss_previous(message.chat.id, user_id)
         reply = bot.send_message(message.chat.id,
-            "✅ *Admin Panel Active!*\n\n"
-            "/add - Add a new channel & prices\n"
-            "/channels - Manage existing channels (edit price, duration, delete)\n"
-            "/bundles - Create & manage custom offer bundles (fixed price, any channels)\n"
-            "/removeuser - Remove a subscriber before their plan expires\n"
-            "/stats - View bot stats & revenue\n"
-            "/broadcast - Message everyone who has used the bot\n"
-            "/dbstats - Check database storage usage\n"
-            "/cleanup - Free up database space\n"
-            "/import - Bulk-import a group/channel member list\n"
-            "/setmenuimage - Set/replace the image shown on the main menu\n"
-            "/removemenuimage - Remove the main menu image\n"
-            "/forcejoin - Require users to join a channel before using the bot\n"
-            "/buy - Preview the buyer flow yourself", parse_mode="Markdown")
+            "╭━━━ 👑 𝘼𝘿𝙈𝙄𝙉 𝙋𝘼𝙉𝙀𝙇 ━━━╮\n\n"
+            "You're in control here 👇\n\n"
+            "/add — add a new channel & prices\n"
+            "/channels — manage existing channels\n"
+            "/bundles — create & manage offers\n"
+            "/removeuser — remove a subscriber\n"
+            "/stats — view bot stats & revenue\n"
+            "/broadcast — message everyone\n"
+            "/dbstats — check DB storage\n"
+            "/cleanup — free up space\n"
+            "/import — bulk-import members\n"
+            "/setmenuimage — set main menu image\n"
+            "/removemenuimage — remove menu image\n"
+            "/forcejoin — force join settings\n"
+            "/buy — preview buyer flow\n\n"
+            "╰━━━━━━━━━━━━━━━━━━━━╯", parse_mode="Markdown")
         schedule_delete(message.chat.id, reply.message_id, COMMAND_VANISH_SECONDS)
         track_msg(user_id, reply)
     else:
@@ -3309,10 +3308,10 @@ def myplans_handler(message):
         markup.add(InlineKeyboardButton(f"🔄 Renew — {ch_name}", callback_data=f"renew_{s['channel_id']}"))
 
     if not lines:
-        send_command_reply(message, "You don't have any active subscriptions right now.\n\nUse /buy to browse channels.")
+        send_command_reply(message, "🤷‍♂️ No active subscriptions right now.\n\nUse /buy to browse channels and grab one 🔥")
         return
 
-    send_command_reply(message, "📋 *Your Active Subscriptions:*\n\n" + "\n".join(lines), reply_markup=markup, parse_mode="Markdown")
+    send_command_reply(message, "╭━━━ 📋 𝙔𝙊𝙐𝙍 𝙋𝙇𝘼𝙉𝙎 ━━━╮\n\n" + "\n".join(lines) + "\n\n╰━━━━━━━━━━━━━━━━━━━━╯", reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('renew_'))
 def cb_renew(call):
@@ -3336,14 +3335,18 @@ def cb_renew(call):
 def users_handler(message):
     """Admin-only /users command: displays a detailed list of all currently active
     subscribers from the database, including Telegram User ID, @username, first name,
-    last name, subscribed plan/bundle name, subscription start date, and expiry date/time."""
+    last name, subscribed plan/offer name, subscription start date, and expiry date/time."""
     if not message.from_user:
         return
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
         send_command_reply(message, "⛔ *Access Denied.*\n\nThe `/users` command is restricted to configured bot administrators.", parse_mode="Markdown")
         return
 
-    dismiss_previous(message.chat.id, message.from_user.id)
+    show_users_list(message.chat.id, user_id=message.from_user.id, message=message)
+
+
+def show_users_list(chat_id, user_id=None, message=None, message_id=None, page=0, per_page=10):
+    """Show active subscribers as a paginated inline-keyboard list for the /users command."""
     now_ts = datetime.now().timestamp()
 
     try:
@@ -3351,30 +3354,23 @@ def users_handler(message):
         active_subs = [s for s in all_subs if is_active_subscription(s, now_ts)]
 
         if not active_subs:
-            send_command_reply(message, "ℹ️ *No active subscribers found.*\n\nThere are currently 0 active subscriptions in the database.", parse_mode="Markdown")
+            text = "ℹ️ *No active subscribers found.*"
+            if message:
+                send_command_reply(message, text, parse_mode="Markdown")
+            elif message_id:
+                edit_menu(chat_id, message_id, text, parse_mode="Markdown")
+            else:
+                bot.send_message(chat_id, text, parse_mode="Markdown")
             return
 
-        # Pre-cache channels and bundles for fast lookup
         channel_map = {ch['channel_id']: ch for ch in channels_col.find({})}
         bundle_map = {b['bundle_id']: b for b in offer_bundles_col.find({})}
 
-        unique_user_ids = set()
-        for s in active_subs:
-            if s.get('user_id'):
-                unique_user_ids.add(s['user_id'])
-
+        unique_user_ids = {s['user_id'] for s in active_subs if s.get('user_id')}
         unique_active_users = len(unique_user_ids)
         total_active_subs = len(active_subs)
 
-        # Sort subscriptions by user_id
         active_subs.sort(key=lambda s: (s.get('user_id', 0), str(s.get('channel_id', ''))))
-
-        header = (
-            f"👥 *Active Subscribers Report*\n"
-            f"📊 *Total Active Users:* {unique_active_users}\n"
-            f"📋 *Total Active Subscriptions:* {total_active_subs}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        )
 
         entries = []
         for idx, sub in enumerate(active_subs, 1):
@@ -3402,7 +3398,7 @@ def users_handler(message):
             sub_type = sub.get('subscription_type')
             if sub_type == 'bundle' and sub.get('bundle_id'):
                 b_doc = bundle_map.get(sub.get('bundle_id')) or offer_bundles_col.find_one({"bundle_id": sub.get('bundle_id')})
-                b_title = b_doc.get('title') if b_doc else 'Bundle'
+                b_title = b_doc.get('title') if b_doc else 'Offer'
                 plan_display = f"{b_title} ({ch_name})"
             elif sub_type == 'free_trial':
                 plan_display = f"Free Trial ({ch_name})"
@@ -3411,7 +3407,6 @@ def users_handler(message):
 
             plan_display = escape_markdown(plan_display)
 
-            # Subscription start date
             start_dt = sub.get('start_date') or sub.get('created_at')
             if not start_dt:
                 pay_doc = payments_col.find_one({"user_id": uid, "channel_id": ch_id}, sort=[("timestamp", -1)])
@@ -3429,7 +3424,6 @@ def users_handler(message):
             else:
                 start_str = "N/A"
 
-            # Subscription expiry date/time
             if sub.get('lifetime'):
                 expiry_str = "Lifetime ♾️"
             elif sub.get('expiry'):
@@ -3452,31 +3446,63 @@ def users_handler(message):
                 f"  • 🆔 *User ID:* `{uid}`\n"
                 f"  • 📛 *First Name:* {first_name} | *Last Name:* {last_name}\n"
                 f"  • 🏷 *Username:* {username}\n"
-                f"  • 📺 *Plan/Bundle:* {plan_display}\n"
+                f"  • 📺 *Plan/Offer:* {plan_display}\n"
                 f"  • 📅 *Start Date:* {start_str}\n"
                 f"  • ⏳ *Expiry:* {expiry_str}\n\n"
             )
             entries.append(entry)
 
-        # Chunk messages to remain safely within Telegram's 4096 character limit
-        chunks = []
-        current_chunk = header
-        for entry in entries:
-            if len(current_chunk) + len(entry) > 3500:
-                chunks.append(current_chunk)
-                current_chunk = f"👥 *Active Subscribers Report (Cont.)*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n" + entry
-            else:
-                current_chunk += entry
-        if current_chunk:
-            chunks.append(current_chunk)
+        total = len(entries)
+        start = page * per_page
+        end = min(start + per_page, total)
+        page_entries = entries[start:end]
 
-        for chunk_text in chunks:
-            send_command_reply(message, chunk_text, parse_mode="Markdown")
+        header = (
+            f"👥 *Active Subscribers Report*\n"
+            f"📊 *Total Active Users:* {unique_active_users}\n"
+            f"📋 *Total Active Subscriptions:* {total_active_subs}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        ) if page == 0 else (
+            f"👥 *Active Subscribers Report (Page {page + 1})*\n"
+            f"📊 *Total Active Users:* {unique_active_users}\n"
+            f"📋 *Total Active Subscriptions:* {total_active_subs}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
+
+        text = header + "".join(page_entries)
+
+        markup = InlineKeyboardMarkup()
+        if total > per_page:
+            markup.add(
+                InlineKeyboardButton("⬅️ Prev", callback_data=f"userspage_{page-1}" if page > 0 else "noop"),
+                InlineKeyboardButton("➡️ Next", callback_data=f"userspage_{page+1}" if end < total else "noop")
+            )
+
+        if message_id:
+            edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
+        elif message:
+            send_command_reply(message, text, reply_markup=markup, parse_mode="Markdown")
+        else:
+            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
     except Exception as e:
         print(f"[users] error generating active subscribers report: {e}")
         traceback.print_exc()
-        send_command_reply(message, f"❌ An error occurred while fetching active subscribers: {e}")
+        text = f"❌ An error occurred while fetching active subscribers: {e}"
+        if message_id:
+            edit_menu(chat_id, message_id, text, parse_mode=None)
+        elif message:
+            send_command_reply(message, text, parse_mode=None)
+        else:
+            bot.send_message(chat_id, text, parse_mode=None)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('userspage_'))
+def cb_users_page(call):
+    page = int(call.data.split('_')[1])
+    bot.answer_callback_query(call.id)
+    show_users_list(call.message.chat.id, user_id=call.from_user.id, message_id=call.message.message_id, page=page)
+
 
 @bot.message_handler(commands=['help'])
 def help_handler(message):
@@ -3486,13 +3512,14 @@ def help_handler(message):
     if contact_url:
         markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
     send_command_reply(message,
-        "ℹ️ *How this works:*\n\n"
+        "╭━━━ ℹ️ 𝙃𝙊𝙒 𝙄𝙏 𝙒𝙊𝙍𝙆𝙎 ━━━╮\n\n"
         "1. Use /buy to see available channels\n"
         "2. Pick a channel and a plan\n"
         "3. Pay via UPI and tap 'I Have Paid'\n"
         "4. Send a screenshot of your receipt\n"
         "5. Wait for admin approval, then use your join link\n\n"
-        "Use /myplans anytime to check your active subscriptions.",
+        "Use /myplans anytime to check your active subscriptions.\n\n"
+        "╰━━━━━━━━━━━━━━━━━━━━╯",
         reply_markup=markup, parse_mode="Markdown")
 
 # --- USER: BROWSE ALL CHANNELS ---
@@ -3527,7 +3554,7 @@ def show_channel_list(chat_id, message_id=None):
     if count > 1:
         markup.add(InlineKeyboardButton("🔀 Reorder Channels", callback_data="chorder_menu"))
 
-    text = "No channels found. Click below to add one." if count == 0 else "Your Managed Channels:"
+    text = "No channels found. Add one below 👇" if count == 0 else "Your Managed Channels:"
     if message_id:
         # Reached by tapping a button (e.g. Back, or after deleting a channel) -> auto-vanish
         edit_menu(chat_id, message_id, text, reply_markup=markup)
@@ -3548,14 +3575,14 @@ def cb_back_channels(call):
 @bot.message_handler(commands=['add'], func=lambda m: m.from_user.id == ADMIN_ID)
 def add_channel_start(message):
     # Awaiting a forward -> prompt never auto-vanishes
-    msg = send_prompt(ADMIN_ID, "Please ensure the bot is an Admin in your channel, then FORWARD any message from that channel here.")
+    msg = send_prompt(ADMIN_ID, "Make sure the bot is Admin in your channel, then FORWARD any message from that channel here.")
     bot.register_next_step_handler(msg, get_plans)
 
 @bot.callback_query_handler(func=lambda call: call.data == "add_new")
 def cb_add_new(call):
     bot.answer_callback_query(call.id)
     # Reached via button, but this is now a prompt awaiting a forward -> never auto-vanish
-    msg = send_prompt(ADMIN_ID, "Please FORWARD any message from your channel here.")
+    msg = send_prompt(ADMIN_ID, "FORWARD any message from your channel here.")
     bot.register_next_step_handler(msg, get_plans)
 
 def get_plans(message):
@@ -4267,7 +4294,7 @@ def cart_checkout_handler(call):
     lines = [f"• {escape(i['name'])} — {escape(format_label(i['t']))} — ₹{i['price']}" for i in items]
     caption = ("🧾 <b>Checkout Summary</b>\n" + "\n".join(lines) +
                f"\n\n💰 <b>Total to pay: ₹{grand_total}</b>\nUPI ID: <code>{UPI_ID}</code>\n\n"
-               "<b><i>Please complete the payment and tap 'I Have Paid', then send a screenshot to the admin.</i></b>")
+               "<b><i>Complete the payment, then tap 'I Have Paid' and send your receipt screenshot 👇</i></b>")
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ I Have Paid", callback_data=f"coutpaid_{token}"))
     markup.add(InlineKeyboardButton("❌ Cancel Payment", callback_data=f"coutcancel_{token}"))
@@ -4294,19 +4321,19 @@ def bundle_checkout_handler(call):
     bundle = _bundle_doc(bundle_id)
     channels = _bundle_channels(bundle) if bundle and bundle.get('enabled') else []
     if not bundle or not channels or int(bundle.get('price', 0)) <= 0:
-        bot.answer_callback_query(call.id, "This bundle is no longer available.", show_alert=True)
+        bot.answer_callback_query(call.id, "This offer is no longer available.", show_alert=True)
         return
     bot.answer_callback_query(call.id)
     snapshot = [{'channel_id': int(ch['channel_id']), 'name': ch['name']} for ch in channels]
     doc = {
         'user_id': call.from_user.id, 'bundle_id': bundle_id,
-        'bundle_title': bundle.get('title', 'Bundle'), 'items': snapshot,
+        'bundle_title': bundle.get('title', 'Offer'), 'items': snapshot,
         'duration_minutes': bundle.get('duration_minutes'), 'amount': int(bundle['price']),
         'created_at': datetime.now()
     }
     token = str(pending_offer_bundle_checkouts_col.insert_one(doc).inserted_id)
     lines = '\n'.join(f"• {escape(i['name'])}" for i in snapshot)
-    caption = (f"🧾 <b>{escape(bundle.get('title', 'Bundle'))}</b>\n\n{escape(bundle.get('description') or '')}\n\n"
+    caption = (f"🧾 <b>{escape(bundle.get('title', 'Offer'))}</b>\n\n{escape(bundle.get('description') or '')}\n\n"
                f"<b>Included channels:</b>\n{lines}\n\n"
                f"⏱ Duration: <b>{escape(_bundle_duration_label(bundle))}</b>\n"
                f"💰 <b>Fixed price: ₹{int(bundle['price'])}</b>\nUPI ID: <code>{UPI_ID}</code>\n\n"
@@ -4316,7 +4343,7 @@ def bundle_checkout_handler(call):
     markup.add(InlineKeyboardButton("❌ Cancel Payment", callback_data=f"obcancel_{token}"))
     try:
         qr_file = _make_payment_qr(UPI_ID, int(bundle['price']))
-        msg = bot.send_photo(call.message.chat.id, InputFile(qr_file, 'bundle_payment_qr.png'),
+        msg = bot.send_photo(call.message.chat.id, InputFile(qr_file, 'offer_payment_qr.png'),
                              caption=caption, reply_markup=markup, parse_mode='HTML')
         schedule_delete(call.message.chat.id, msg.message_id, QR_SHOW_SECONDS)
     except Exception:
@@ -4335,17 +4362,17 @@ def bundle_paid_handler(call):
     token = call.data.split('_', 1)[1]
     bot.answer_callback_query(call.id, "Send your payment screenshot now.")
     schedule_delete(call.message.chat.id, call.message.message_id, PAYMENT_VANISH_SECONDS)
-    msg = send_prompt(call.message.chat.id, "📸 Send the payment receipt screenshot now, or type /cancel.")
+    msg = send_prompt(call.message.chat.id, "📸 Drop the payment receipt screenshot now, or type /cancel.")
     bot.register_next_step_handler(msg, receive_bundle_screenshot, token)
 
 def receive_bundle_screenshot(message, token):
     if message.text and message.text.strip().lower() in ('/cancel', 'cancel', '/stop', 'stop'):
         pending_offer_bundle_checkouts_col.delete_one({'_id': ObjectId(token), 'user_id': message.from_user.id})
-        send_command_reply(message, "✅ Bundle payment cancelled.")
+        send_command_reply(message, "✅ Offer payment cancelled.")
         return
     doc = pending_offer_bundle_checkouts_col.find_one({'_id': ObjectId(token), 'user_id': message.from_user.id})
     if not doc:
-        bot.send_message(message.chat.id, "❌ This bundle checkout has expired or was already processed.")
+        bot.send_message(message.chat.id, "❌ This offer checkout has expired or was already processed.")
         return
     if not message.photo:
         msg = send_prompt(message.chat.id, "❌ Please send a receipt screenshot, or type /cancel.")
@@ -4356,19 +4383,19 @@ def receive_bundle_screenshot(message, token):
         'user_name': message.from_user.first_name, 'user_username': message.from_user.username,
     }})
     lines = '\n'.join(f"• {escape_markdown(i['name'])}" for i in doc.get('items', []))
-    caption = ("🔔 *Bundle Payment Verification Required!*\n\n"
+    caption = ("🔔 *Offer Payment Verification Required!*\n\n"
                f"User: {escape_markdown(message.from_user.first_name)}\n"
                f"User ID: `{message.from_user.id}`\n\n{lines}\n\n"
-               f"Bundle: *{escape_markdown(doc.get('bundle_title', 'Bundle'))}*\n"
+               f"Offer: *{escape_markdown(doc.get('bundle_title', 'Offer'))}*\n"
                f"Fixed total: *₹{doc.get('amount', 0)}*")
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ Approve Bundle", callback_data=f"obapp_{token}"))
+    markup.add(InlineKeyboardButton("✅ Approve Offer", callback_data=f"obapp_{token}"))
     markup.add(InlineKeyboardButton("❌ Reject", callback_data=f"obrej_{token}"))
     try:
         admin_msg = bot.send_photo(ADMIN_ID, doc['screenshot_file_id'], caption=caption, reply_markup=markup, parse_mode='Markdown', vanish_delay=None)
     except Exception:
         admin_msg = bot.send_message(ADMIN_ID, caption, reply_markup=markup, parse_mode='Markdown', vanish_delay=None)
-    conf = bot.send_message(message.chat.id, "✅ Bundle receipt sent for admin approval. Please wait.", vanish_delay=None)
+    conf = bot.send_message(message.chat.id, "✅ Offer receipt sent for admin approval. Please wait.", vanish_delay=None)
     pending_review_messages[token] = {'user_chat_id': message.chat.id, 'user_msg_id': conf.message_id,
                                       'admin_chat_id': ADMIN_ID, 'admin_msg_id': getattr(admin_msg, 'message_id', None)}
 
@@ -4377,12 +4404,12 @@ def bundle_reject_handler(call):
     token = call.data.split('_', 1)[1]
     doc = pending_offer_bundle_checkouts_col.find_one({'_id': ObjectId(token)})
     if doc:
-        try: bot.send_message(doc['user_id'], "❌ Your bundle payment could not be verified. Please contact the admin.")
+        try: bot.send_message(doc['user_id'], "❌ Your offer payment could not be verified. Please contact the admin.")
         except Exception: pass
         pending_offer_bundle_checkouts_col.delete_one({'_id': ObjectId(token)})
     _clear_pending_review_messages(token)
     bot.answer_callback_query(call.id, "Rejected.")
-    edit_caption_menu(call.message.chat.id, call.message.message_id, "❌ Rejected this bundle checkout.", delay=None)
+    edit_caption_menu(call.message.chat.id, call.message.message_id, "❌ Rejected this offer checkout.", delay=None)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('obapp_'))
 def bundle_approve_handler(call):
@@ -4390,7 +4417,7 @@ def bundle_approve_handler(call):
     doc = pending_offer_bundle_checkouts_col.find_one({'_id': ObjectId(token)})
     if not doc:
         bot.answer_callback_query(call.id, "Already processed or expired."); return
-    bot.answer_callback_query(call.id, "Approving bundle...")
+    bot.answer_callback_query(call.id, "Approving offer...")
     user_id = int(doc['user_id']); result_lines = []; errors = []
     duration = doc.get('duration_minutes')
     for item in doc.get('items', []):
@@ -4421,10 +4448,10 @@ def bundle_approve_handler(call):
     pending_offer_bundle_checkouts_col.delete_one({'_id': ObjectId(token)})
     _clear_pending_review_messages(token)
     if result_lines:
-        bot.send_message(user_id, "🥳 *Bundle Payment Approved!*\n\n" + "\n\n".join(result_lines), parse_mode='Markdown', vanish_delay=None)
+        bot.send_message(user_id, "🥳 *Offer Payment Approved!*\n\n" + "\n\n".join(result_lines), parse_mode='Markdown', vanish_delay=None)
     if errors:
-        bot.send_message(user_id, "⚠️ Some bundle channels could not be activated:\n" + '\n'.join(errors))
-    edit_caption_menu(call.message.chat.id, call.message.message_id, f"✅ Approved bundle for user {user_id}.", delay=None)
+        bot.send_message(user_id, "⚠️ Some offer channels could not be activated:\n" + '\n'.join(errors))
+    edit_caption_menu(call.message.chat.id, call.message.message_id, f"✅ Approved offer for user {user_id}.", delay=None)
 @bot.callback_query_handler(func=lambda call: call.data.startswith('coutpaid_'))
 def cout_paid_handler(call):
     token = call.data.split('_', 1)[1]
@@ -4437,8 +4464,8 @@ def cout_paid_handler(call):
 
     # Awaiting the screenshot -> auto-vanish after 60 seconds
     msg = send_prompt(call.message.chat.id,
-        "📸 Please send a screenshot of your payment receipt now.\n\n"
-        "If you tapped 'I Have Paid' by mistake, type /cancel to cancel the payment.")
+        "📸 Drop your payment receipt screenshot now.\n\n"
+        "If you tapped 'I Have Paid' by mistake, type /cancel.")
     schedule_delete(call.message.chat.id, msg.message_id, DEFAULT_VANISH_SECONDS)
     bot.register_next_step_handler(msg, receive_cart_screenshot, token)
 
@@ -4454,8 +4481,8 @@ def receive_cart_screenshot(message, token):
 
     if not message.photo:
         msg = send_prompt(message.chat.id,
-            "❌ That doesn't look like a photo. Please send a screenshot image of your payment receipt.\n\n"
-            "If you tapped 'I Have Paid' by mistake, type /cancel to cancel the payment.")
+            "❌ That doesn't look like a photo. Send a screenshot image of your payment receipt.\n\n"
+            "If you tapped 'I Have Paid' by mistake, type /cancel.")
         schedule_delete(message.chat.id, msg.message_id, DEFAULT_VANISH_SECONDS)
         bot.register_next_step_handler(msg, receive_cart_screenshot, token)
         return
@@ -4465,7 +4492,7 @@ def receive_cart_screenshot(message, token):
     except Exception:
         doc = None
     if not doc:
-        bot.send_message(message.chat.id, "❌ This checkout has expired or was already processed. Please use /buy to start again.")
+        bot.send_message(message.chat.id, "❌ This checkout has expired or was already processed. Use /buy to start again.")
         return
 
     user = message.from_user
@@ -4518,7 +4545,7 @@ def receive_cart_screenshot(message, token):
     u_markup = InlineKeyboardMarkup()
     if contact_url:
         u_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
-    conf_msg = bot.send_message(message.chat.id, "✅ Your receipt has been sent for verification. Please wait for Admin approval.\nApproval time : 5-10 minutes \nBe Patient", reply_markup=u_markup, vanish_delay=None)
+    conf_msg = bot.send_message(message.chat.id, "✅ Receipt sent for verification!\n\nSit tight — admin will approve it in 5-10 mins ⏳", reply_markup=u_markup, vanish_delay=None)
     pending_review_messages[token] = {
         'user_chat_id': message.chat.id,
         'user_msg_id': conf_msg.message_id,
@@ -4592,7 +4619,7 @@ def cancel_command_handler(message):
     if cancelled:
         send_command_reply(message, "✅ Payment cancelled. Your pending checkout has been removed. Use /buy to start again.")
     else:
-        send_command_reply(message, "You don't have any pending payment right now.")
+        send_command_reply(message, "🤷‍♂️ No pending payment right now.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('coutrej_'))
 def cout_reject_handler(call):
@@ -4889,12 +4916,13 @@ def show_cleanup_menu(chat_id, message_id=None, user_id=None):
     old_seenusers_count = seen_users_col.count_documents({"last_seen": {"$lt": seenusers_cutoff}})
 
     text = (
-        "🧹 *Free Up Database Space*\n\n"
+        "╭━━━ 🧹 𝙁𝙍𝙀𝙀 𝙐𝙋 𝙎𝙋𝘼𝘾𝙀 ━━━╮\n\n"
         f"🧾 Old payment logs (older than {CLEANUP_PAYMENTS_DAYS} days): *{old_payments_count}* records\n"
-        "   _(Your Total Sales/Revenue in /stats are unaffected — those are tracked separately and won't change.)_\n\n"
+        "   _(Total Sales/Revenue in /stats stay intact — tracked separately and won't change.)_\n\n"
         f"👤 Inactive users (not seen in {CLEANUP_SEENUSERS_DAYS}+ days): *{old_seenusers_count}* records\n"
-        "   _(Only affects who /broadcast can reach — active subscribers are never touched.)_\n\n"
-        "Tap below to delete a category. This cannot be undone."
+        "   _(Only affects /broadcast reach — active subscribers are never touched.)_\n\n"
+        "Tap below to delete a category. Can't be undone.\n\n"
+        "╰━━━━━━━━━━━━━━━━━━━━╯"
     )
     markup = InlineKeyboardMarkup()
     if old_payments_count > 0:
@@ -5025,8 +5053,10 @@ def _show_broadcast_menu(chat_id, message_id=None):
     markup.add(InlineKeyboardButton("📨 Broadcast Now", callback_data="bcnow"))
     markup.add(InlineKeyboardButton("⏰ Schedule for Later", callback_data="bcsched"))
     markup.add(InlineKeyboardButton("📋 Scheduled Broadcasts", callback_data="bclist"))
-    text = ("📣 *Broadcast* — send a message to everyone who has ever started/used this bot.\n\n"
-            "Send it right away, or schedule it for a specific time (handy for planned promotions).")
+    text = ("╭━━━ 📣 𝘽𝙍𝙊𝘼𝘿𝘾𝘼𝙎𝙏 ━━━╮\n\n"
+            "Shoot a message to everyone who's ever used this bot 👇\n\n"
+            "Send it now, or schedule it for later ⏰\n\n"
+            "╰━━━━━━━━━━━━━━━━━━━━╯")
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
     else:
@@ -5045,7 +5075,7 @@ def cb_bc_now(call):
         return
     bot.answer_callback_query(call.id)
     # Awaiting the broadcast text -> prompt never auto-vanishes
-    msg = send_prompt(ADMIN_ID, "Send the message you want to broadcast to everyone who has ever started/used this bot:")
+    msg = send_prompt(ADMIN_ID, "Drop the broadcast message you want to send to everyone:")
     bot.register_next_step_handler(msg, do_broadcast)
 
 @bot.callback_query_handler(func=lambda call: call.data == "bcsched")
@@ -5053,7 +5083,7 @@ def cb_bc_sched(call):
     if not _require_admin(call):
         return
     bot.answer_callback_query(call.id)
-    msg = send_prompt(ADMIN_ID, "Send the broadcast message text first (plain text only):")
+    msg = send_prompt(ADMIN_ID, "Send the broadcast text first (plain text only):")
     bot.register_next_step_handler(msg, _bc_sched_time)
 
 def _bc_sched_time(message):
@@ -5062,7 +5092,7 @@ def _bc_sched_time(message):
         return
     _bc_pending_text[ADMIN_ID] = message.text
     msg = send_prompt(ADMIN_ID,
-        "⏰ *When should this be sent?*\n\n"
+        "⏰ <b>When should this drop?</b>\n\n"
         "Accepted formats:\n"
         "• `18:00` — today at that time (or tomorrow if already past)\n"
         "• `2026-08-20 18:00` — exact date & time\n"
@@ -5110,7 +5140,7 @@ def _bc_parse_time(raw):
 def _bc_sched_save(message):
     text = _bc_pending_text.pop(ADMIN_ID, None)
     if text is None:
-        send_admin_reply("❌ Broadcast flow expired — please start again with /broadcast.")
+        send_admin_reply("❌ Broadcast flow expired — start again with /broadcast.")
         return
     if not message.text:
         send_admin_reply("❌ Please send a time. Use /broadcast to try again.")
