@@ -11,7 +11,7 @@ import telebot
 import segno
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputFile
-from telebot.handler_backends import BaseMiddleware
+from telebot.handler_backends import BaseMiddleware, CancelUpdate
 from pymongo import MongoClient
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -402,6 +402,402 @@ free_trials_col = db['free_trials']          # admin-configured free trial plans
 free_trial_claims_col = db['free_trial_claims']  # PERMANENT "one trial ever" claim records (never deleted)
 free_trial_claims_history_col = db['free_trial_claims_history']  # archive of legacy duplicate claims moved during index migration
 pending_reactions_col = db['pending_reactions']  # durable auto-react queue backing (survives process restarts)
+carts_col = db['carts']                        # mirror of in-memory carts, for abandoned-cart nudges
+scheduled_broadcasts_col = db['scheduled_broadcasts']  # timed /broadcast messages awaiting their slot
+waitlist_col = db['waitlist']                  # users who asked to be notified when a paused channel returns
+expired_subs_col = db['expired_subs']          # lapsed subscriptions, for the 3-day win-back DM
+settings_col = db['settings']                  # small key/value bot settings (e.g. main menu image)
+
+def get_menu_image_file_id():
+    """Returns the Telegram file_id of the admin-set main menu image, or None if not set."""
+    doc = settings_col.find_one({"_id": "menu_image"})
+    return doc.get("file_id") if doc else None
+
+def set_menu_image_file_id(file_id):
+    settings_col.update_one({"_id": "menu_image"}, {"$set": {"file_id": file_id}}, upsert=True)
+
+def clear_menu_image():
+    settings_col.delete_one({"_id": "menu_image"})
+
+# =====================================================================
+# FORCE JOIN — mandatory channel membership gate
+# ---------------------------------------------------------------------
+# Admin-configurable (no code changes or restarts needed): the admin can
+# enable/disable the gate and point it at any Telegram channel. When enabled,
+# every user is checked BEFORE any handler runs (see ForceJoinMiddleware
+# below), so a user who hasn't joined the configured channel cannot reach the
+# bot via /start, any other command, a menu button, or a callback.
+#
+# The check is FAIL-OPEN on API/config errors: an invalid channel, the bot not
+# being in the channel, or a transient Telegram hiccup never locks every user
+# out permanently. The admin panel surfaces such problems via the Verify button.
+#
+# Settings are stored in settings_col under _id "force_join" so changes made
+# by the admin take effect immediately — no restart required.
+# =====================================================================
+
+FJ_SETTINGS_ID = "force_join"
+FJ_MSG_TEXT = "🔒 Please join our channel to use this bot."
+FJ_BTN_JOIN = "📢 Join Channel"
+FJ_BTN_RETRY = "🔄 Try Again"
+FJ_CB_RETRY = "fj_retry"
+FJ_CB_JOIN = "fj_join"
+FJ_BLOCK_COOLDOWN_SECONDS = 4   # don't re-send the block screen on every keystroke
+_fj_last_block = {}             # user_id -> time.monotonic() of the last block screen
+
+def get_force_join_settings():
+    """Read the current Force Join config from settings_col (fail-safe defaults)."""
+    doc = settings_col.find_one({"_id": FJ_SETTINGS_ID})
+    if not doc:
+        return {"enabled": False, "channel": None, "channel_title": None, "image_file_id": None}
+    return {
+        "enabled": bool(doc.get("enabled", False)),
+        "channel": doc.get("channel"),
+        "channel_title": doc.get("channel_title"),
+        "image_file_id": doc.get("image_file_id"),
+    }
+
+def save_force_join_settings(**fields):
+    settings_col.update_one({"_id": FJ_SETTINGS_ID}, {"$set": dict(fields)}, upsert=True)
+
+def _fj_resolve_chat_id(channel):
+    """Accept '@username', bare 'username' or a numeric chat id string and return a
+    value accepted by getChat/getChatMember (int for numeric ids). None if empty."""
+    if not channel:
+        return None
+    raw = str(channel).strip()
+    if not raw:
+        return None
+    if raw.lstrip('-').isdigit():
+        return int(raw)
+    return raw.lstrip('@')
+
+def _fj_channel_url(settings):
+    """Best-effort https://t.me/... link for the configured channel, or None if it
+    cannot be built (numeric id with no resolvable public username)."""
+    channel = settings.get('channel')
+    raw = str(channel).strip() if channel else ''
+    if not raw:
+        return None
+    if raw.lstrip('-').isdigit():
+        try:
+            uname = getattr(bot.get_chat(int(raw)), 'username', None)
+            return f"https://t.me/{uname}" if uname else None
+        except Exception:
+            return None
+    return f"https://t.me/{raw.lstrip('@')}"
+
+def _fj_membership_status(user_id, settings):
+    """Returns ('joined', None), ('not_joined', None) or ('error', reason).
+    reason is 'config' (channel gone / bot not in it / no rights) or 'transient'
+    (network, rate-limit, other API failure). Never raises — the middleware and
+    the Try-Again button both rely on this to keep the bot running no matter what."""
+    chat_id = _fj_resolve_chat_id(settings.get('channel'))
+    if chat_id is None:
+        return 'error', 'config'
+    try:
+        member = bot.get_chat_member(chat_id, user_id)
+        status = getattr(member, 'status', None)
+        if status in ('creator', 'administrator', 'member'):
+            return 'joined', None
+        if status == 'restricted':
+            # Restricted users are still members unless explicitly removed.
+            is_member = getattr(member, 'is_member', None)
+            return ('joined', None) if is_member in (None, True) else ('not_joined', None)
+        return 'not_joined', None
+    except telebot.apihelper.ApiTelegramException as e:
+        code = getattr(e, 'error_code', None)
+        desc = (getattr(e, 'description', '') or '').lower()
+        if code == 400 and ('user not found' in desc or 'user_not_participant' in desc or 'participant' in desc):
+            # Telegram reports users who were never / are no longer in the chat this way.
+            return 'not_joined', None
+        return 'error', 'config'
+    except Exception:
+        return 'error', 'transient'
+
+def user_has_force_join_pass(user_id):
+    """REUSABLE membership gate. True = the user may proceed, False = they must be
+    shown the Force Join screen. This is the single place the check lives: the
+    middleware calls it for every update, and the Try-Again button calls it too.
+    Fail-open on config/API problems so a misconfigured channel or a Telegram
+    outage can never lock everyone out."""
+    try:
+        settings = get_force_join_settings()
+    except Exception:
+        return True
+    if not settings.get('enabled'):
+        return True
+    if not settings.get('channel'):
+        return True  # enabled but no channel configured yet -> fail open
+    try:
+        verdict, _reason = _fj_membership_status(user_id, settings)
+    except Exception:
+        return True
+    if verdict == 'error':
+        return True  # invalid channel / missing permissions / API hiccup -> fail open
+    return verdict == 'joined'
+
+def send_force_join_block(chat_id, user_id):
+    """Send (or refresh, throttled by cooldown) the 'join our channel' gate screen:
+    optional banner image, the lock message, and the Join / Try Again buttons.
+    The message persists (vanish_delay=None) so the user can tap Try Again."""
+    now = time.monotonic()
+    if now - _fj_last_block.get(user_id, 0) < FJ_BLOCK_COOLDOWN_SECONDS:
+        return None
+    _fj_last_block[user_id] = now
+    settings = get_force_join_settings()
+    markup = InlineKeyboardMarkup(row_width=1)
+    url = _fj_channel_url(settings)
+    if url:
+        markup.add(InlineKeyboardButton(FJ_BTN_JOIN, url=url))
+    else:
+        # No public link available (e.g. invite-only numeric id) -> instruct via alert.
+        markup.add(InlineKeyboardButton(FJ_BTN_JOIN, callback_data=FJ_CB_JOIN))
+    markup.add(InlineKeyboardButton(FJ_BTN_RETRY, callback_data=FJ_CB_RETRY))
+    text = FJ_MSG_TEXT
+    title = settings.get('channel_title')
+    if title:
+        text += f"\n\n📢 {title}"
+    try:
+        img = settings.get('image_file_id')
+        if img:
+            return bot.send_photo(chat_id, img, caption=text, reply_markup=markup, vanish_delay=None)
+        return bot.send_message(chat_id, text, reply_markup=markup, vanish_delay=None)
+    except Exception as e:
+        print(f"[force-join] could not send block screen to {user_id}: {e}")
+        return None
+
+class ForceJoinMiddleware(BaseMiddleware):
+    """Runs before every handler and cancels any update coming from a user who
+    hasn't joined the configured channel. Because it sits at the update level,
+    the gate covers /start, every other command, menu buttons and callbacks —
+    there is no way for an unjoined user to bypass the /start check by using
+    something else. Admins, the bot itself, non-private chats and the Force Join
+    buttons themselves are always allowed through."""
+    def __init__(self):
+        self.update_types = ['message', 'callback_query', 'edited_message']
+
+    def pre_process(self, update, data):
+        try:
+            # --- callback query ---
+            if hasattr(update, 'data') and getattr(update, 'message', None) is not None:
+                chat = getattr(update.message, 'chat', None)
+                user = getattr(update, 'from_user', None)
+                if chat is None or user is None or getattr(chat, 'type', None) != 'private':
+                    return None
+                user_id = user.id
+                if user_id == ADMIN_ID:
+                    return None
+                if (update.data or '').startswith('fj_'):
+                    return None  # Force Join's own buttons must always be reachable
+                if not user_has_force_join_pass(user_id):
+                    try:
+                        bot.answer_callback_query(update.id, "🔒 Please join our channel first.")
+                    except Exception:
+                        pass
+                    send_force_join_block(chat.id, user_id)
+                    return CancelUpdate()
+                return None
+            # --- plain message / edited message ---
+            chat = getattr(update, 'chat', None)
+            user = getattr(update, 'from_user', None)
+            if chat is None or user is None or getattr(chat, 'type', None) != 'private':
+                return None
+            if user.id == ADMIN_ID:
+                return None
+            if getattr(bot, 'user', None) and user.id == bot.user.id:
+                return None
+            if not user_has_force_join_pass(user.id):
+                send_force_join_block(chat.id, user.id)
+                return CancelUpdate()
+            return None
+        except Exception as e:
+            print(f"[force-join] middleware error: {e}")
+            return None
+
+bot.setup_middleware(ForceJoinMiddleware())
+
+# ---- Admin: /forcejoin settings panel ----
+
+@bot.message_handler(commands=['forcejoin'], func=lambda m: m.from_user.id == ADMIN_ID)
+def forcejoin_command(message):
+    send_force_join_menu(message.chat.id)
+
+def send_force_join_menu(chat_id, message_id=None):
+    s = get_force_join_settings()
+    status = "🟢 Enabled" if s.get('enabled') else "🔴 Disabled"
+    channel = s.get('channel')
+    title = s.get('channel_title')
+    channel_str = escape_markdown(title or channel) if channel else "— not set —"
+    text = ("🔒 *Force Join Settings*\n\n"
+            f"Status: {status}\n"
+            f"Channel: {channel_str}\n\n"
+            "While enabled, every user must join this channel before they can "
+            "use the bot. The check covers /start, all commands, menu buttons "
+            "and callbacks.")
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton(
+        "🔴 Disable" if s.get('enabled') else "🟢 Enable",
+        callback_data="fj_disable" if s.get('enabled') else "fj_enable"))
+    markup.add(InlineKeyboardButton("📢 Set Channel", callback_data="fj_setchannel"))
+    markup.add(InlineKeyboardButton("🖼 Set Banner Image", callback_data="fj_setbanner"))
+    if s.get('image_file_id'):
+        markup.add(InlineKeyboardButton("🗑 Remove Banner", callback_data="fj_rmbanner"))
+    markup.add(InlineKeyboardButton("🔎 Verify Channel", callback_data="fj_verify"))
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        send_admin_reply(text, parse_mode="Markdown", reply_markup=markup)
+
+def _fj_admin(call):
+    """Gate every admin Force Join callback through the existing admin check."""
+    if not _require_admin(call):
+        return False
+    bot.answer_callback_query(call.id)
+    return True
+
+@bot.callback_query_handler(func=lambda call: call.data == "fj_enable")
+def cb_fj_enable(call):
+    if not _fj_admin(call):
+        return
+    save_force_join_settings(enabled=True)
+    send_force_join_menu(call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "fj_disable")
+def cb_fj_disable(call):
+    if not _fj_admin(call):
+        return
+    save_force_join_settings(enabled=False)
+    send_force_join_menu(call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "fj_setchannel")
+def cb_fj_setchannel(call):
+    if not _fj_admin(call):
+        return
+    msg = send_prompt(call.message.chat.id,
+        "📢 Send the channel username or numeric chat ID, e.g. `@my_updates` or `-1001234567890`.\n\n"
+        "Make sure the bot is a member (admin) of that channel so membership checks can run.\n\n"
+        "Type /skip to cancel.",
+        parse_mode="Markdown")
+    bot.register_next_step_handler(msg, _fj_save_channel)
+
+def _fj_save_channel(message):
+    raw = (getattr(message, 'text', '') or '').strip()
+    if raw.lower() in ('/skip', 'skip'):
+        send_admin_reply("❌ Cancelled — channel unchanged.")
+        return
+    chat_id = _fj_resolve_chat_id(raw)
+    if chat_id is None:
+        send_admin_reply("❌ That doesn't look like a channel. Send a username (e.g. @my_updates) or a numeric ID.")
+        return
+    try:
+        chat_obj = bot.get_chat(chat_id)
+    except Exception:
+        send_admin_reply("❌ Could not find that channel. Double-check the username/ID and that the bot can access it.")
+        return
+    title = getattr(chat_obj, 'title', None) or raw
+    save_force_join_settings(channel=raw, channel_title=title)
+    send_admin_reply(f"✅ Force Join channel set to *{escape_markdown(title)}* ({raw}).\n\nOpen /forcejoin to see the updated settings.", parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data == "fj_setbanner")
+def cb_fj_setbanner(call):
+    if not _fj_admin(call):
+        return
+    msg = send_prompt(call.message.chat.id,
+        "🖼 Send the image/banner to show on the Force Join screen. The message above "
+        "the buttons will still read \"🔒 Please join our channel to use this bot.\"\n\n"
+        "Type /skip to cancel.")
+    bot.register_next_step_handler(msg, _fj_save_banner)
+
+def _fj_save_banner(message):
+    if (getattr(message, 'text', '') or '').strip().lower() in ('/skip', 'skip'):
+        send_admin_reply("❌ Cancelled — banner unchanged.")
+        return
+    if not getattr(message, 'photo', None):
+        msg = send_prompt(ADMIN_ID,
+            "❌ That doesn't look like an image. Please send a PNG/JPG photo, or type /skip to cancel.")
+        bot.register_next_step_handler(msg, _fj_save_banner)
+        return
+    save_force_join_settings(image_file_id=message.photo[-1].file_id)
+    send_admin_reply("✅ Force Join banner saved! It will appear above the block screen.")
+
+@bot.callback_query_handler(func=lambda call: call.data == "fj_rmbanner")
+def cb_fj_rmbanner(call):
+    if not _fj_admin(call):
+        return
+    save_force_join_settings(image_file_id=None)
+    send_force_join_menu(call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "fj_verify")
+def cb_fj_verify(call):
+    if not _fj_admin(call):
+        return
+    s = get_force_join_settings()
+    channel = s.get('channel')
+    if not channel:
+        send_admin_reply("❌ No channel configured yet — set one first.")
+        return
+    chat_id = _fj_resolve_chat_id(channel)
+    lines = []
+    try:
+        chat_obj = bot.get_chat(chat_id)
+        title = getattr(chat_obj, 'title', None) or channel
+        uname = getattr(chat_obj, 'username', None)
+        lines.append(f"✅ Channel resolves: {title}")
+        lines.append(f"🔗 https://t.me/{uname}" if uname else "🔗 No public username (invite-only).")
+    except Exception:
+        lines.append("❌ Channel could not be resolved. Check the username/ID and that the bot can access it.")
+    if getattr(bot, 'user', None):
+        try:
+            bot_member = bot.get_chat_member(chat_id, bot.user.id)
+            bstatus = getattr(bot_member, 'status', None)
+            if bstatus in ('creator', 'administrator', 'member'):
+                lines.append(f"🤖 Bot is in the channel ({bstatus}) — checks will work.")
+            else:
+                lines.append(f"⚠️ Bot status: {bstatus}. Add the bot to the channel so checks work.")
+        except Exception:
+            lines.append("⚠️ Bot is not in the channel. Add the bot so membership checks work.")
+    send_admin_reply("\n".join(lines))
+
+# ---- User-facing Force Join buttons ----
+
+@bot.callback_query_handler(func=lambda call: call.data == FJ_CB_JOIN)
+def cb_fj_join(call):
+    """Fallback when the configured channel has no public t.me link."""
+    s = get_force_join_settings()
+    channel = s.get('channel') or ''
+    bot.answer_callback_query(call.id, f"Open Telegram and search for: {channel}", show_alert=True)
+
+@bot.callback_query_handler(func=lambda call: call.data == FJ_CB_RETRY)
+def cb_fj_retry(call):
+    """'🔄 Try Again' — re-checks membership. Joined -> grant access and show the
+    normal interface; not joined -> stay blocked with a clear alert."""
+    user_id = call.from_user.id
+    record_seen_user(call.from_user)
+    if user_has_force_join_pass(user_id):
+        bot.answer_callback_query(call.id, "✅ Welcome! You're all set.")
+        chat_id = call.message.chat.id
+        msg_id = call.message.message_id
+        cancel_delete(chat_id, msg_id)
+        try:
+            bot.delete_message(chat_id, msg_id)
+        except Exception:
+            pass
+        show_main_menu(chat_id, user_id)
+    else:
+        bot.answer_callback_query(call.id, "🔒 You haven't joined yet. Please join the channel first.", show_alert=True)
+
+# --- BUNDLE DEALS ---
+BUNDLE_MIN_CHANNELS = 3        # buy 3+ distinct channels together...
+BUNDLE_DISCOUNT_PERCENT = 10   # ...and get 10% off the whole cart
+
+# --- ABANDONED CART NUDGE ---
+CART_NUDGE_MINUTES = 30        # one gentle reminder 30 min after the last cart update
+CART_MAX_AGE_DAYS = 7          # drop stale persisted carts after a week
+
+# --- WIN-BACK ---
+WINBACK_AFTER_DAYS = 3         # DM a "come back" offer once a sub has been lapsed 3+ days
+WINBACK_LOOKBACK_DAYS = 60     # backfill only subs that lapsed within the last 60 days
 
 def track_chat_member(chat_id, user_id, username=None, first_name=None):
     if not chat_id or not user_id:
@@ -835,12 +1231,39 @@ def format_plans_text(ch_data):
     lines = [f"• {format_label(t)} — ₹{pr}" for t, pr in items]
     return "\n".join(lines)
 
-def _build_plan_selection(ch_data):
+def _build_paused_plan_selection(ch_data, user_id=None):
+    """Plan-picker UI for a paused channel: no pricing is sold, users can instead
+    join a waitlist so they're notified the moment the channel is back."""
+    markup = InlineKeyboardMarkup()
+    on_waitlist = False
+    if user_id:
+        try:
+            on_waitlist = waitlist_col.count_documents({"channel_id": ch_data['channel_id'], "user_id": int(user_id)}) > 0
+        except Exception:
+            pass
+    if on_waitlist:
+        markup.add(InlineKeyboardButton("✅ You're on the waitlist", callback_data=f"waitlist_{ch_data['channel_id']}"))
+    else:
+        markup.add(InlineKeyboardButton("🔔 Notify me when it's back", callback_data=f"waitlist_{ch_data['channel_id']}"))
+
+    markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="cart_browse"))
+    contact_url = contact_admin_url()
+    if contact_url:
+        markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+    desc_part = f"\n\n📝 <b>About:</b> <b><i>{escape(ch_data['description'])}</i></b>" if ch_data.get('description') else ""
+    text = f"⏸ <b>{escape(ch_data['name'])}</b> is temporarily paused.\n\nNo new subscriptions are being sold right now, but you won't miss out — tap below and we'll ping you the moment it's back!{desc_part}"
+    return text, markup
+
+def _build_plan_selection(ch_data, user_id=None):
     """Builds the (text, markup) for the plan-picker of one channel. Tapping a plan adds
     it to the user's cart rather than paying immediately, so multiple channels can be
     bought together in one checkout. Enabled admin-managed free trials for this channel
     are shown separately as one-time 'FREE' offers — they never enter the cart/payment.
-    Free trials always render first, above every paid plan, regardless of plan order."""
+    Free trials always render first, above every paid plan, regardless of plan order.
+    A paused channel shows the waitlist UI instead of any plans."""
+    if ch_data.get('paused'):
+        return _build_paused_plan_selection(ch_data, user_id)
+
     markup = InlineKeyboardMarkup()
 
     try:
@@ -861,10 +1284,10 @@ def _build_plan_selection(ch_data):
     text = f"Yoo \n\nAb yaha tak agaya hai to plan bhi lele dalle 😁 \n\nYou are joining: <b>{escape(ch_data['name'])}</b>.{desc_part}\n\nPlease select a subscription plan below:"
     return text, markup
 
-def send_plan_selection(chat_id, ch_data):
+def send_plan_selection(chat_id, ch_data, user_id=None):
     """Used for a /start deep-link entry: sends a brand new message.
     If the channel has a screenshot, it is shown as a photo with the plans as caption."""
-    text, markup = _build_plan_selection(ch_data)
+    text, markup = _build_plan_selection(ch_data, user_id)
     screenshot = ch_data.get('screenshot_file_id')
     if screenshot:
         try:
@@ -874,12 +1297,12 @@ def send_plan_selection(chat_id, ch_data):
             pass  # fallback to text if photo fails
     bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
 
-def edit_plan_selection(chat_id, message_id, ch_data):
+def edit_plan_selection(chat_id, message_id, ch_data, user_id=None):
     """Used when a user taps a channel button.
     If the channel has a screenshot, the current text message is replaced by a photo message
     (delete + send new photo) so the user sees the channel banner above the pricing.
     Without a screenshot the message is edited in-place as before."""
-    text, markup = _build_plan_selection(ch_data)
+    text, markup = _build_plan_selection(ch_data, user_id)
     screenshot = ch_data.get('screenshot_file_id')
     if screenshot:
         # Delete the existing text message and send a fresh photo message
@@ -901,16 +1324,64 @@ def edit_plan_selection(chat_id, message_id, ch_data):
 # --- SHOPPING CART (multi-channel checkout) ---
 
 def get_cart(user_id):
-    return user_carts.setdefault(user_id, [])
+    """Returns the user's in-memory cart. If it's not loaded yet (e.g. right after a
+    process restart), the persisted copy in carts_col is restored so an abandoned-cart
+    nudge's 'View Cart' button still shows the right items."""
+    if user_id not in user_carts:
+        try:
+            doc = carts_col.find_one({"user_id": int(user_id)})
+        except Exception:
+            doc = None
+        if doc and doc.get('items'):
+            user_carts[user_id] = list(doc['items'])
+        else:
+            user_carts[user_id] = []
+    return user_carts[user_id]
+
+def _persist_cart(user_id):
+    """Mirror the in-memory cart into carts_col so abandoned carts can be nudged.
+    A fresh cart records its created_at; subsequent changes only bump updated_at.
+    Any item change re-arms the nudge (nudged=False) so a genuinely new cart session
+    can be reminded again — a cart left untouched after its nudge stays marked."""
+    items = user_carts.get(user_id) or []
+    if not items:
+        _clear_persisted_cart(user_id)
+        return
+    try:
+        carts_col.update_one(
+            {"user_id": int(user_id)},
+            {"$set": {"items": items, "updated_at": datetime.now(), "nudged": False},
+             "$setOnInsert": {"created_at": datetime.now()}},
+            upsert=True
+        )
+    except Exception:
+        pass
+
+def _clear_persisted_cart(user_id):
+    try:
+        carts_col.delete_one({"user_id": int(user_id)})
+    except Exception:
+        pass
 
 def cart_total(items):
     return sum(int(i['price']) for i in items)
 
+def bundle_discount(items):
+    """Bundle deal: 3+ distinct channels in one cart => 10% off the whole order.
+    Returns (discount, grand_total). Prices are whole rupees, discount rounds down."""
+    total = cart_total(items)
+    distinct_channels = len({i['channel_id'] for i in items})
+    if distinct_channels >= BUNDLE_MIN_CHANNELS:
+        discount = (total * BUNDLE_DISCOUNT_PERCENT) // 100
+        return discount, total - discount
+    return 0, total
+
 def add_to_cart(user_id, ch_id, t):
     """Adds a channel+plan to the user's cart. Returns the channel doc, or None if the
-    plan no longer exists. Adding the same channel+plan twice is a no-op (no duplicates)."""
+    plan no longer exists or the channel is paused. Adding the same channel+plan twice
+    is a no-op (no duplicates)."""
     ch_data = channels_col.find_one({"channel_id": ch_id})
-    if not ch_data or t not in ch_data.get('plans', {}):
+    if not ch_data or ch_data.get('paused') or t not in ch_data.get('plans', {}):
         return None
     price = int(ch_data['plans'][t])
     items = get_cart(user_id)
@@ -918,6 +1389,7 @@ def add_to_cart(user_id, ch_id, t):
         if i['channel_id'] == ch_id and i['t'] == t:
             return ch_data  # already in cart
     items.append({"channel_id": ch_id, "name": ch_data['name'], "t": t, "price": price})
+    _persist_cart(user_id)
     return ch_data
 
 def build_cart_summary(user_id):
@@ -936,12 +1408,18 @@ def build_cart_summary(user_id):
     for i in items:
         lines.append(f"• {i['name']} — {format_label(i['t'])} — ₹{i['price']}")
     total = cart_total(items)
-    lines.append(f"\n💰 *Total: ₹{total}*")
+    discount, grand_total = bundle_discount(items)
+    lines.append(f"\n💰 *Subtotal: ₹{total}*")
+    if discount:
+        lines.append(f"🎁 *Bundle Deal:* {len({i['channel_id'] for i in items})} channels → {BUNDLE_DISCOUNT_PERCENT}% off (−₹{discount})")
+        lines.append(f"✅ *Total: ₹{grand_total}*")
+    else:
+        lines.append(f"💡 *Total: ₹{total}*")
     text = "\n".join(lines)
 
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("➕ Add Another Channel", callback_data="cart_browse"))
-    markup.add(InlineKeyboardButton(f"✅ Checkout & Pay ₹{total}", callback_data="cart_checkout"))
+    markup.add(InlineKeyboardButton(f"✅ Checkout & Pay ₹{grand_total}", callback_data="cart_checkout"))
     markup.add(InlineKeyboardButton("🗑 Clear Cart", callback_data="cart_clear_ask"))
     contact_url = contact_admin_url()
     if contact_url:
@@ -973,15 +1451,20 @@ def _ensure_channel_order(admin_id):
 
 def channel_button_label(ch, position):
     """Clean minimal style: top-3 by position get a medal + name, everything else gets
-    a plain running number + name."""
+    a plain running number + name. Paused channels get a ⏸ prefix."""
+    name = ch['name']
+    if ch.get('paused'):
+        name = f"⏸ {name}"
     badge = RANK_BADGES.get(position)
     if badge:
-        return f"{badge} {ch['name']}"
-    return f"{position}. {ch['name']}"
+        return f"{badge} {name}"
+    return f"{position}. {name}"
 
-def build_channel_list(user_id):
+def build_channel_list(user_id, back_to_menu=False):
     """Builds the (text, markup) for browsing all channels, with a cart button if the
-    user already has items waiting. Returns (None, None) if no channels exist."""
+    user already has items waiting. Returns (None, None) if no channels exist.
+    When back_to_menu is True, an extra '🏠 Main Menu' button is appended (used when this
+    view was reached from the main hub, so the user can step back out to it)."""
     channels = get_sorted_channels(ADMIN_ID)
     markup = InlineKeyboardMarkup()
     for i, ch in enumerate(channels, start=1):
@@ -990,28 +1473,39 @@ def build_channel_list(user_id):
     if not channels:
         return None, None
 
+    markup.add(InlineKeyboardButton("🔍 Search Channels", callback_data="search_prompt"))
+
     items = get_cart(user_id)
     if items:
         total = cart_total(items)
-        markup.add(InlineKeyboardButton(f"🛒 View Cart ({len(items)}) — ₹{total}", callback_data="cart_view"))
+        discount, grand_total = bundle_discount(items)
+        if discount:
+            markup.add(InlineKeyboardButton(f"🛒 View Cart ({len(items)}) — ₹{grand_total}", callback_data="cart_view"))
+        else:
+            markup.add(InlineKeyboardButton(f"🛒 View Cart ({len(items)}) — ₹{total}", callback_data="cart_view"))
 
     contact_url = contact_admin_url()
     if contact_url:
         markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
-    text = ("👋 <b>Welcome Dallo !</b> \n\nShaana banne ki Koshish mat karna  😂😂\n\nPlease select a channel/group you'd like to join.\n\n"
-            "💡 <b><i>You can add multiple channels to your cart and pay for all of them at once!</i></b>")
+    if back_to_menu:
+        markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
+    text = (f"👋 <b>Welcome Dallo !</b> \n\nShaana banne ki Koshish mat karna  😂😂\n\nPlease select a channel/group you'd like to join.\n\n"
+            f"💡 <b><i>You can add multiple channels to your cart and pay for all of them at once!</i></b>\n"
+            f"🎁 <b><i>Bundle deal: buy {BUNDLE_MIN_CHANNELS}+ channels together and get {BUNDLE_DISCOUNT_PERCENT}% off!</i></b>")
     return text, markup
 
-def show_all_channels(chat_id, user_id):
+def show_all_channels(chat_id, user_id, back_to_menu=False):
     """Shows every channel the admin manages, so a user can pick one to join.
-    Reached directly via /start or /buy; the new message is tracked for animated dismissal
-    on the next command."""
-    text, markup = build_channel_list(user_id)
+    Reached directly via /buy (or the '📺 Groups/Channels' button on the main menu); the
+    new message is tracked for animated dismissal on the next command."""
+    text, markup = build_channel_list(user_id, back_to_menu=back_to_menu)
     if text is None:
         contact_url = contact_admin_url()
         reply_markup = InlineKeyboardMarkup()
         if contact_url:
             reply_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+        if back_to_menu:
+            reply_markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
         reply = bot.send_message(chat_id, "No channels are available right now. Please check back later, or contact the admin.",
                           reply_markup=reply_markup)
         schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
@@ -1021,20 +1515,253 @@ def show_all_channels(chat_id, user_id):
     schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
     track_msg(user_id, reply)
 
-def edit_all_channels(chat_id, message_id, user_id, message_obj=None):
+def edit_all_channels(chat_id, message_id, user_id, message_obj=None, back_to_menu=False):
     """Same as show_all_channels, but edits an existing button-driven message in place
-    (used for 'Back to Channels' / 'Add Another Channel' taps)."""
-    text, markup = build_channel_list(user_id)
+    (used for 'Back to Channels' / 'Add Another Channel' / '📺 Groups/Channels' taps)."""
+    text, markup = build_channel_list(user_id, back_to_menu=back_to_menu)
     if text is None:
         contact_url = contact_admin_url()
         reply_markup = InlineKeyboardMarkup()
         if contact_url:
             reply_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+        if back_to_menu:
+            reply_markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
         edit_menu(chat_id, message_id, "No channels are available right now. Please check back later, or contact the admin.",
                   reply_markup=reply_markup,
                   message_obj=message_obj)
         return
     edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=message_obj)
+
+# --- USER: MAIN MENU (shown on plain /start) ---
+
+def build_main_menu():
+    """Builds the (text, markup) for the main hub shown on a plain /start (no deep link,
+    non-admin): a landing screen with Groups/Channels, Offers, and Contact — rather than
+    dumping the full channel list on the user immediately."""
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("📺 Groups / Channels", callback_data="main_channels"))
+    markup.add(InlineKeyboardButton("🎁 Offers", callback_data="main_offers"))
+    contact_url = contact_admin_url()
+    if contact_url:
+        markup.add(InlineKeyboardButton("📞 Contact", url=contact_url))
+    text = ("👋 <b>Welcome!</b>\n\n"
+            "What would you like to do?\n\n"
+            "📺 <b>Groups / Channels</b> — browse and join available channels\n"
+            "🎁 <b>Offers</b> — check out current deals")
+    return text, markup
+
+def _render_main_menu(chat_id, user_id=None, message_id=None):
+    """Sends the main hub, as a photo (with caption) if the admin has set a menu image,
+    otherwise as plain text. If message_id is given, the old message is removed first —
+    Telegram can't edit a text message into a photo message (or vice versa) in place, so
+    switching between the two always means delete + resend."""
+    text, markup = build_main_menu()
+    if message_id:
+        cancel_delete(chat_id, message_id)
+        try:
+            bot.delete_message(chat_id, message_id)
+        except Exception:
+            pass
+
+    image_file_id = get_menu_image_file_id()
+    reply = None
+    if image_file_id:
+        try:
+            reply = bot.send_photo(chat_id, image_file_id, caption=text, reply_markup=markup, parse_mode="HTML")
+        except Exception:
+            reply = None  # bad/expired file_id -> fall back to text below
+    if reply is None:
+        reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
+
+    schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
+    if user_id:
+        track_msg(user_id, reply)
+    return reply
+
+def show_main_menu(chat_id, user_id):
+    """Sends the main hub as a fresh message (used on /start)."""
+    dismiss_previous(chat_id, user_id)
+    _render_main_menu(chat_id, user_id=user_id)
+
+def edit_main_menu(chat_id, message_id, message_obj=None):
+    """Rebuilds the main hub in place (used for the '🏠 Main Menu' back button)."""
+    _render_main_menu(chat_id, message_id=message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "main_menu_back")
+def cb_main_menu_back(call):
+    bot.answer_callback_query(call.id)
+    edit_main_menu(call.message.chat.id, call.message.message_id, message_obj=call.message)
+
+# --- ADMIN: SET MAIN MENU IMAGE ---
+# get_menu_image_file_id/set_menu_image_file_id/clear_menu_image already existed and
+# _render_main_menu already used get_menu_image_file_id() — but nothing ever called the
+# setter, so there was no actual way for the admin to add the image in the first place.
+# This wires up the missing admin-facing command + button for it.
+
+@bot.message_handler(commands=['setmenuimage'], func=lambda m: m.from_user.id == ADMIN_ID)
+def set_menu_image_start(message):
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🗑 Remove current image", callback_data="menuimg_remove"))
+    msg = send_prompt(ADMIN_ID,
+        "🖼 Send the PNG/JPG image you want shown as the main menu banner.\n\n"
+        "It will appear above the Groups/Channels & Offers menu for every user.\n\n"
+        "Send a photo now, or type /skip to cancel.", reply_markup=markup)
+    bot.register_next_step_handler(msg, save_menu_image)
+
+@bot.callback_query_handler(func=lambda call: call.data == "menuimg_remove")
+def cb_menuimg_remove(call):
+    bot.answer_callback_query(call.id, "Menu image removed.")
+    clear_menu_image()
+    send_admin_reply("✅ Main menu image removed. The menu will show as plain text again.")
+
+def save_menu_image(message):
+    if message.text and message.text.strip().lower() in ('/skip', 'skip'):
+        send_admin_reply("❌ Cancelled — menu image unchanged.")
+        return
+    if not message.photo:
+        msg = send_prompt(ADMIN_ID,
+            "❌ That doesn't look like an image. Please send a PNG/JPG photo, or type /skip to cancel.")
+        bot.register_next_step_handler(msg, save_menu_image)
+        return
+    file_id = message.photo[-1].file_id  # highest resolution
+    set_menu_image_file_id(file_id)
+    send_admin_reply("✅ Main menu image saved! It will now show above the menu for every user.")
+
+@bot.callback_query_handler(func=lambda call: call.data == "main_channels")
+def cb_main_channels(call):
+    record_seen_user(call.from_user)
+    bot.answer_callback_query(call.id)
+    edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id,
+                       message_obj=call.message, back_to_menu=True)
+
+@bot.callback_query_handler(func=lambda call: call.data == "main_offers")
+def cb_main_offers(call):
+    bot.answer_callback_query(call.id)
+    text = (f"🎁 <b>Current Offer</b>\n\n"
+            f"Buy {BUNDLE_MIN_CHANNELS}+ channels together in one order and get "
+            f"<b>{BUNDLE_DISCOUNT_PERCENT}% off</b> the whole cart!\n\n"
+            f"Add channels to your cart from the Groups/Channels menu to unlock it.")
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("📺 Groups / Channels", callback_data="main_channels"))
+    markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
+    edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=call.message)
+
+# --- USER: SEARCH / FILTER CHANNELS ---
+
+SEARCH_PER_PAGE = 15  # results per page so a long channel list stays scrollable
+search_state = {}      # user_id -> {'keyword': str, 'page': int}
+
+def search_channels_by_keyword(keyword):
+    """Case-insensitive search across each channel's name and description."""
+    kw = (keyword or '').strip().lower()
+    if not kw:
+        return []
+    results = []
+    for ch in get_sorted_channels(ADMIN_ID):
+        hay = ch.get('name') or ''
+        if ch.get('description'):
+            hay += ' ' + ch['description']
+        if kw in hay.lower():
+            results.append(ch)
+    return results
+
+def render_search_results(chat_id, message_id, user_id, keyword, page=0, message_obj=None):
+    """Renders a paginated list of channels matching `keyword`. Edits an existing
+    message when message_id is given, otherwise sends a fresh one."""
+    state = search_state.setdefault(user_id, {'keyword': keyword, 'page': 0})
+    state['keyword'] = keyword
+    state['page'] = page
+    results = search_channels_by_keyword(keyword)
+
+    if not results:
+        text = f"🔍 No channels found for \"{escape(keyword)}\".\n\nTry a different keyword."
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("🔍 New Search", callback_data="search_prompt"))
+        markup.add(InlineKeyboardButton("📺 All Channels", callback_data="cart_browse"))
+        if message_id:
+            edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=message_obj)
+        else:
+            dismiss_previous(chat_id, user_id)
+            reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
+            schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
+            track_msg(user_id, reply)
+        return
+
+    total = len(results)
+    start = page * SEARCH_PER_PAGE
+    end = min(start + SEARCH_PER_PAGE, total)
+    page_items = results[start:end]
+
+    # Real position in the full channel list, so top-3 medals still apply
+    all_channels = get_sorted_channels(ADMIN_ID)
+    position_map = {ch['channel_id']: i for i, ch in enumerate(all_channels, start=1)}
+
+    markup = InlineKeyboardMarkup()
+    for i, ch in enumerate(page_items, start=start + 1):
+        real_pos = position_map.get(ch['channel_id'])
+        label = channel_button_label(ch, real_pos) if real_pos else ch['name']
+        markup.add(InlineKeyboardButton(f"{i}. {label}", callback_data=f"browse_{ch['channel_id']}"))
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"searchpage_{page - 1}"))
+    if end < total:
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"searchpage_{page + 1}"))
+    if nav:
+        markup.row(*nav)
+    markup.add(InlineKeyboardButton("🔍 New Search", callback_data="search_prompt"))
+    markup.add(InlineKeyboardButton("📺 All Channels", callback_data="cart_browse"))
+
+    text = f"🔍 <b>Search results</b> for \"{escape(keyword)}\"\n\nShowing {start + 1}-{end} of {total}:"
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=message_obj)
+    else:
+        dismiss_previous(chat_id, user_id)
+        reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
+        schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
+        track_msg(user_id, reply)
+
+@bot.message_handler(commands=['search'])
+def search_handler(message):
+    record_seen_user(message.from_user)
+    parts = message.text.split(None, 1)
+    keyword = parts[1].strip() if len(parts) > 1 else ''
+    if not keyword:
+        msg = send_prompt(message.chat.id, "🔍 Enter a keyword to search channels by name or description:")
+        bot.register_next_step_handler(msg, search_next_step, message.from_user.id)
+        return
+    render_search_results(message.chat.id, None, message.from_user.id, keyword)
+
+def search_next_step(message, user_id):
+    if not getattr(message, 'text', None):
+        msg = send_prompt(message.chat.id, "🔍 Please send a search keyword as text:")
+        bot.register_next_step_handler(msg, search_next_step, user_id)
+        return
+    keyword = message.text.strip()
+    render_search_results(message.chat.id, None, user_id, keyword)
+
+@bot.callback_query_handler(func=lambda call: call.data == "search_prompt")
+def cb_search_prompt(call):
+    record_seen_user(call.from_user)
+    bot.answer_callback_query(call.id)
+    cancel_delete(call.message.chat.id, call.message.message_id)
+    msg = send_prompt(call.message.chat.id, "🔍 Enter a keyword to search channels by name or description:")
+    bot.register_next_step_handler(msg, search_next_step, call.from_user.id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('searchpage_'))
+def cb_search_page(call):
+    record_seen_user(call.from_user)
+    bot.answer_callback_query(call.id)
+    try:
+        page = int(call.data.split('_', 1)[1])
+    except (TypeError, ValueError, IndexError):
+        page = 0
+    state = search_state.get(call.from_user.id, {})
+    keyword = state.get('keyword') or ''
+    if not keyword:
+        edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message)
+        return
+    render_search_results(call.message.chat.id, call.message.message_id, call.from_user.id, keyword, page=page, message_obj=call.message)
 
 
 def format_time_left(seconds):
@@ -1425,6 +2152,8 @@ def setup_commands():
     user_commands = [
         BotCommand("start", "Browse channels & get started"),
         BotCommand("buy", "Browse channels to subscribe"),
+        BotCommand("search", "Search channels by keyword"),
+        BotCommand("user", "View your profile & stats"),
         BotCommand("myplans", "Check your active subscriptions"),
         BotCommand("cancel", "Cancel a pending payment"),
         BotCommand("help", "Help & contact admin"),
@@ -1432,9 +2161,12 @@ def setup_commands():
     admin_commands = user_commands + [
         BotCommand("add", "Add a new channel"),
         BotCommand("channels", "Manage channels (edit/delete)"),
+        BotCommand("setmenuimage", "Set/remove the main menu image"),
+        BotCommand("forcejoin", "Require users to join a channel (Force Join settings)"),
         BotCommand("removeuser", "Remove a subscriber early"),
         BotCommand("stats", "View bot stats & revenue"),
         BotCommand("broadcast", "Message everyone who has used the bot"),
+        BotCommand("listbroadcasts", "List scheduled broadcasts"),
         BotCommand("dbstats", "Check database storage usage"),
         BotCommand("cleanup", "Free up database space"),
         BotCommand("import", "Import member list for a group/channel"),
@@ -2221,7 +2953,7 @@ def cb_buy_paid(call):
                   reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse")),
                   message_obj=call.message)
         return
-    edit_plan_selection(call.message.chat.id, call.message.message_id, ch_data)
+    edit_plan_selection(call.message.chat.id, call.message.message_id, ch_data, call.from_user.id)
 
 @bot.message_handler(commands=['start'])
 def start_handler(message):
@@ -2235,7 +2967,7 @@ def start_handler(message):
             ch_id = int(text[1])
             ch_data = channels_col.find_one({"channel_id": ch_id})
             if ch_data:
-                send_plan_selection(message.chat.id, ch_data)
+                send_plan_selection(message.chat.id, ch_data, user_id)
                 return
         except Exception:
             pass
@@ -2253,12 +2985,16 @@ def start_handler(message):
             "/dbstats - Check database storage usage\n"
             "/cleanup - Free up database space\n"
             "/import - Bulk-import a group/channel member list\n"
+            "/setmenuimage - Set/replace the image shown on the main menu\n"
+            "/removemenuimage - Remove the main menu image\n"
+            "/forcejoin - Require users to join a channel before using the bot\n"
             "/buy - Preview the buyer flow yourself", parse_mode="Markdown")
         schedule_delete(message.chat.id, reply.message_id, COMMAND_VANISH_SECONDS)
         track_msg(user_id, reply)
     else:
-        # No deep link, not the admin -> let them browse all available channels
-        show_all_channels(message.chat.id, user_id)
+        # No deep link, not the admin -> show the main hub (Groups/Channels, Offers,
+        # Contact) instead of dumping the full channel list on them immediately.
+        show_main_menu(message.chat.id, user_id)
 
 # --- USER: EXTRA COMMANDS (/buy, /myplans, /help) ---
 
@@ -2276,26 +3012,142 @@ def myplans_handler(message):
     subs = list(users_col.find({"user_id": user_id}))
     now = datetime.now().timestamp()
 
+    markup = InlineKeyboardMarkup()
     lines = []
     for s in subs:
         ch = channels_col.find_one({"channel_id": s['channel_id']})
         ch_name = ch['name'] if ch else "Unknown Channel"
+        if not ch:
+            continue
         if s.get('lifetime'):
             lines.append(f"• *{ch_name}* — Lifetime access ♾️")
-            continue
-        remaining = s['expiry'] - now
-        if remaining <= 0:
-            continue
-        if s.get('subscription_type') == 'free_trial':
-            lines.append(f"• *{ch_name}* — Free Trial — expires in {format_time_left(remaining)}")
         else:
-            lines.append(f"• *{ch_name}* — expires in {format_time_left(remaining)}")
+            remaining = s['expiry'] - now
+            if remaining <= 0:
+                continue
+            if s.get('subscription_type') == 'free_trial':
+                lines.append(f"• *{ch_name}* — Free Trial — expires in {format_time_left(remaining)}")
+            else:
+                lines.append(f"• *{ch_name}* — expires in {format_time_left(remaining)}")
+        markup.add(InlineKeyboardButton(f"🔄 Renew — {ch_name}", callback_data=f"renew_{s['channel_id']}"))
 
     if not lines:
         send_command_reply(message, "You don't have any active subscriptions right now.\n\nUse /buy to browse channels.")
         return
 
-    send_command_reply(message, "📋 *Your Active Subscriptions:*\n\n" + "\n".join(lines), parse_mode="Markdown")
+    send_command_reply(message, "📋 *Your Active Subscriptions:*\n\n" + "\n".join(lines), reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('renew_'))
+def cb_renew(call):
+    """Renew button from /myplans — jumps straight to the plan picker for that channel."""
+    record_seen_user(call.from_user)
+    bot.answer_callback_query(call.id)
+    try:
+        ch_id = int(call.data.split('_', 1)[1])
+    except (TypeError, ValueError, IndexError):
+        return
+    ch_data = channels_col.find_one({"channel_id": ch_id})
+    if not ch_data:
+        edit_menu(call.message.chat.id, call.message.message_id,
+                  "❌ This channel is no longer available.",
+                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse")),
+                  message_obj=call.message)
+        return
+    edit_plan_selection(call.message.chat.id, call.message.message_id, ch_data, call.from_user.id)
+
+@bot.message_handler(commands=['user'])
+def user_handler(message):
+    """/user: for the admin, shows all active subscribers across their groups/channels
+    (same listing used by /removeuser). For everyone else, shows their own profile & stats:
+    join date, active/expired subscriptions, spending history, etc."""
+    if ADMIN_ID and message.from_user.id == ADMIN_ID:
+        dismiss_previous(message.chat.id, message.from_user.id)
+        show_active_users(message.chat.id, message=message)
+        return
+
+    user_id = message.from_user.id
+    user_name = message.from_user.first_name or "User"
+    record_seen_user(message.from_user)
+    
+    try:
+        # Get user basic info
+        user_doc = users_col.find_one({"user_id": user_id})
+        
+        # Count active subscriptions
+        now = datetime.now().timestamp()
+        active_subs = list(users_col.find({
+            "user_id": user_id,
+            "$or": [
+                {"lifetime": True},
+                {"expiry": {"$gt": now}}
+            ]
+        }))
+        
+        # Count expired subscriptions
+        expired_subs = list(users_col.find({
+            "user_id": user_id,
+            "lifetime": {"$ne": True},
+            "expiry": {"$lte": now}
+        }))
+        
+        # Get total payments
+        payments = list(payments_col.find({"user_id": user_id}))
+        total_spent = sum(p.get('amount', 0) for p in payments)
+        total_transactions = len(payments)
+        
+        # Get first join date
+        first_user = users_col.find_one({"user_id": user_id}, sort=[("_id", 1)])
+        join_date = "Unknown"
+        if first_user and 'created_at' in first_user:
+            join_date = first_user['created_at'].strftime("%d %b %Y") if isinstance(first_user['created_at'], datetime) else str(first_user['created_at'])
+        
+        # Get subscription breakdown
+        subscription_summary = []
+        for sub in active_subs:
+            ch = channels_col.find_one({"channel_id": sub['channel_id']})
+            if not ch:
+                continue
+            ch_name = ch['name']
+            if sub.get('lifetime'):
+                subscription_summary.append(f"  • {ch_name} (Lifetime ♾️)")
+            else:
+                remaining = sub['expiry'] - now
+                subscription_summary.append(f"  • {ch_name} ({format_time_left(remaining)} left)")
+        
+        # Build user profile message
+        lines = [
+            f"👤 *User Profile — {user_name}*\n",
+            f"🆔 *User ID:* `{user_id}`",
+            f"📅 *Member Since:* {join_date}",
+            f"\n💳 *Payment History:*",
+            f"  • Total Spent: ₹{total_spent}",
+            f"  • Total Transactions: {total_transactions}",
+        ]
+        
+        if active_subs:
+            lines.append(f"\n🔓 *Active Subscriptions:* {len(active_subs)}")
+            lines.extend(subscription_summary)
+        else:
+            lines.append(f"\n🔓 *Active Subscriptions:* None")
+        
+        if expired_subs:
+            lines.append(f"\n⏰ *Expired Subscriptions:* {len(expired_subs)}")
+            for sub in expired_subs:
+                ch = channels_col.find_one({"channel_id": sub['channel_id']})
+                if ch:
+                    lines.append(f"  • {ch['name']}")
+        
+        # Add action buttons
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse"))
+        markup.add(InlineKeyboardButton("📋 My Subscriptions", callback_data="cb_myplans"))
+        
+        profile_text = "\n".join(lines)
+        send_command_reply(message, profile_text, reply_markup=markup, parse_mode="Markdown")
+        
+    except Exception as e:
+        print(f"[user] error fetching profile for {user_id}: {e}")
+        send_command_reply(message, "❌ Error loading your profile. Please try again.")
 
 @bot.message_handler(commands=['help'])
 def help_handler(message):
@@ -2325,7 +3177,7 @@ def browse_channel(call):
     if not ch_data:
         bot.send_message(call.message.chat.id, "❌ This channel is no longer available.")
         return
-    edit_plan_selection(call.message.chat.id, call.message.message_id, ch_data)
+    edit_plan_selection(call.message.chat.id, call.message.message_id, ch_data, call.from_user.id)
 
 # --- ADMIN: CHANNEL LIST ---
 
@@ -2482,6 +3334,8 @@ def manage_ch(call):
     markup.add(InlineKeyboardButton("📝 Edit About/Description", callback_data=f"editdesc_{ch_id}"))
     markup.add(InlineKeyboardButton("📸 Update Screenshot", callback_data=f"editss_{ch_id}"))
     markup.add(InlineKeyboardButton("🔀 Reorder Channels", callback_data="chorder_menu"))
+    markup.add(InlineKeyboardButton(("▶️ Resume Channel" if ch_data.get('paused') else "⏸ Pause Channel"),
+                                    callback_data=f"pausech_{ch_id}"))
     markup.add(InlineKeyboardButton("🗑 Delete Channel", callback_data=f"delch_{ch_id}"))
     markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="back_channels"))
 
@@ -2489,14 +3343,107 @@ def manage_ch(call):
     desc_status = ch_data.get('description', 'None set')
     position = next((i for i, c in enumerate(get_sorted_channels(ADMIN_ID), start=1) if c['channel_id'] == ch_id), None)
     position_status = f"{RANK_BADGES.get(position, '')} #{position}".strip() if position else "Unset"
+    pause_status = "⏸ Paused (waitlist open)" if ch_data.get('paused') else "▶️ Active"
+    try:
+        waitlist_count = waitlist_col.count_documents({"channel_id": ch_id})
+    except Exception:
+        waitlist_count = 0
     edit_menu(call.message.chat.id, call.message.message_id,
         f"⚙️ Settings for: *{ch_data['name']}*\n\n"
         f"🔗 Invite Link:\n`{link}`\n\n"
         f"📝 Description:\n_{desc_status}_\n\n"
         f"💰 Current Plans:\n{format_plans_text(ch_data)}\n\n"
         f"🔀 Position: {position_status}\n\n"
+        f"⏯ Status: {pause_status}\n"
+        f"👥 On waitlist: {waitlist_count}\n\n"
         f"🖼 {ss_status}",
         reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('pausech_'))
+def cb_toggle_pause(call):
+    """Admin pauses/resumes a channel. Pausing stops sales and lets users join a waitlist;
+    resuming notifies everyone on the waitlist that the channel is back."""
+    if not _require_admin(call):
+        return
+    bot.answer_callback_query(call.id)
+    try:
+        ch_id = int(call.data.split('_', 1)[1])
+    except (TypeError, ValueError, IndexError):
+        return
+    ch_data = channels_col.find_one({"channel_id": ch_id})
+    if not ch_data:
+        send_admin_reply("❌ Channel not found.")
+        return
+    now_paused = not ch_data.get('paused')
+    try:
+        channels_col.update_one({"channel_id": ch_id}, {"$set": {"paused": now_paused}})
+    except Exception:
+        send_admin_reply("❌ Couldn't update the channel.")
+        return
+    if now_paused:
+        try:
+            waitlist_count = waitlist_col.count_documents({"channel_id": ch_id})
+        except Exception:
+            waitlist_count = 0
+        send_admin_reply(
+            f"⏸ *{ch_data['name']}* is now paused. Users can no longer buy it — they can join the waitlist instead.\n\n"
+            f"👥 Currently on the waitlist: {waitlist_count}",
+            parse_mode="Markdown")
+    else:
+        notified = _notify_waitlist(ch_id, ch_data['name'])
+        try:
+            waitlist_col.delete_many({"channel_id": ch_id})
+        except Exception:
+            pass
+        send_admin_reply(
+            f"▶️ *{ch_data['name']}* is back! Notified {notified} user(s) on the waitlist.",
+            parse_mode="Markdown")
+
+def _notify_waitlist(ch_id, ch_name):
+    """DMs every waitlisted user that a paused channel is available again. Returns the
+    number of users successfully notified."""
+    notified = 0
+    try:
+        bot_username = bot.get_me().username
+    except Exception:
+        bot_username = None
+    link = f"https://t.me/{bot_username}?start={ch_id}" if bot_username else None
+    for doc in waitlist_col.find({"channel_id": ch_id}):
+        try:
+            markup = InlineKeyboardMarkup()
+            if link:
+                markup.add(InlineKeyboardButton("📺 View Channel", url=link))
+            bot.send_message(
+                doc['user_id'],
+                f"🔔 Good news! *{ch_name}* is back!\n\nTap below to check out the plans and grab a subscription.",
+                reply_markup=markup, parse_mode="Markdown", vanish_delay=None)
+            notified += 1
+        except Exception:
+            pass
+    return notified
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('waitlist_'))
+def cb_waitlist(call):
+    """User taps 'Notify me when it's back' on a paused channel."""
+    record_seen_user(call.from_user)
+    try:
+        ch_id = int(call.data.split('_', 1)[1])
+    except (TypeError, ValueError, IndexError):
+        bot.answer_callback_query(call.id, "Invalid channel.")
+        return
+    ch_data = channels_col.find_one({"channel_id": ch_id})
+    if not ch_data:
+        bot.answer_callback_query(call.id, "Channel not found.")
+        return
+    try:
+        waitlist_col.update_one(
+            {"user_id": int(call.from_user.id), "channel_id": ch_id},
+            {"$set": {"user_id": int(call.from_user.id), "channel_id": ch_id, "created_at": datetime.now()}},
+            upsert=True
+        )
+        bot.answer_callback_query(call.id, "🔔 You'll be notified when it's back!")
+    except Exception:
+        bot.answer_callback_query(call.id, "Couldn't add you to the waitlist.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "chorder_menu")
 def cb_channel_order_menu(call):
@@ -2857,6 +3804,7 @@ def cart_clear_ask_handler(call):
 @bot.callback_query_handler(func=lambda call: call.data == "cart_clear_confirm")
 def cart_clear_confirm_handler(call):
     user_carts[call.from_user.id] = []
+    _clear_persisted_cart(call.from_user.id)
     bot.answer_callback_query(call.id, "Cart cleared.")
     edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message)
 
@@ -2964,6 +3912,7 @@ def cart_checkout_handler(call):
         edit_all_channels(call.message.chat.id, call.message.message_id, user_id)
         return
     total = cart_total(items)
+    discount, grand_total = bundle_discount(items)
 
     # Option selected -> delete the cart-summary message immediately (don't wait for the timer)
     cancel_delete(call.message.chat.id, call.message.message_id)
@@ -2973,14 +3922,20 @@ def cart_checkout_handler(call):
         pass
 
     result = pending_checkouts_col.insert_one({
-        "user_id": user_id, "items": items, "total": total, "created_at": datetime.now()
+        "user_id": user_id, "items": items, "total": total,
+        "discount": discount, "grand_total": grand_total,
+        "created_at": datetime.now()
     })
     token = str(result.inserted_id)
+    # The cart has moved into the pending checkout — stop tracking it as an abandoned cart
+    _clear_persisted_cart(user_id)
 
     lines = [f"• {escape_markdown(i['name'])} — {format_label(i['t'])} — ₹{i['price']}" for i in items]
+    discount_line = f"\n🎁 <b>Bundle discount: −₹{discount}</b>" if discount else ""
     caption = (
         "🧾 <b>Checkout Summary</b>\n" + "\n".join(lines) +
-        f"\n\n💰 <b>Total: ₹{total}</b>\nUPI ID: <code>{UPI_ID}</code>\n\n"
+        f"\n\n💰 <b>Subtotal: ₹{total}</b>{discount_line}" +
+        f"\n<b>Total to pay: ₹{grand_total}</b>\nUPI ID: <code>{UPI_ID}</code>\n\n"
         "<b><i>Please complete the payment and tap 'I Have Paid', then send a screenshot to the admin.</i></b>"
     )
     markup = InlineKeyboardMarkup()
@@ -2993,7 +3948,7 @@ def cart_checkout_handler(call):
     # Payment QR shown for QR_SHOW_SECONDS initially; once 'I Have Paid' is tapped the timer
     # is reset to PAYMENT_VANISH_SECONDS so the user can still come back and scan if needed.
     try:
-        qr_file = _make_payment_qr(UPI_ID, total)
+        qr_file = _make_payment_qr(UPI_ID, grand_total)
         msg = bot.send_photo(call.message.chat.id, InputFile(qr_file, 'payment_qr.png'),
                              caption=caption, reply_markup=markup, parse_mode="HTML")
         schedule_delete(call.message.chat.id, msg.message_id, QR_SHOW_SECONDS)
@@ -3003,6 +3958,8 @@ def cart_checkout_handler(call):
             pending_checkouts_col.delete_one({"_id": ObjectId(token)})
         except Exception:
             pass
+        # Put the cart back into the abandoned-cart tracker so it can still be nudged.
+        _persist_cart(user_id)
         edit_menu(call.message.chat.id, call.message.message_id,
             "❌ Couldn't show the payment QR right now. Please try again.",
             reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse")),
@@ -3112,6 +4069,7 @@ def receive_cart_screenshot(message, token):
 
     # Cart has now moved into the pending checkout — clear it so a fresh /buy starts empty
     user_carts.pop(message.from_user.id, None)
+    _clear_persisted_cart(message.from_user.id)
 
 def _restore_cart_items(user_id, items):
     """Put cancelled checkout items back into the user's cart, without creating duplicates."""
@@ -3122,6 +4080,7 @@ def _restore_cart_items(user_id, items):
         if key not in existing:
             cart.append(i)
             existing.add(key)
+    _persist_cart(user_id)
 
 def _cancel_pending_checkout(token, user_id):
     """Delete a pending checkout owned by `user_id`, restoring its items to the cart.
@@ -3166,6 +4125,7 @@ def cancel_command_handler(message):
     except Exception:
         cancelled = 0
     user_carts.pop(user_id, None)
+    _clear_persisted_cart(user_id)
     if cancelled:
         send_command_reply(message, "✅ Payment cancelled. Your pending checkout has been removed. Use /buy to start again.")
     else:
@@ -3257,6 +4217,25 @@ def cout_approve_handler(call):
 
     # Always close out the checkout so it can never stay stuck half-processed.
     user_carts.pop(u_id, None)
+    _clear_persisted_cart(u_id)
+
+    # Bundle discount: keep itemized logs (and lifetime counters) honest. Each item was
+    # logged at full price; record the bundle discount as a negative adjustment row and
+    # pull it out of the lifetime revenue total.
+    discount = int(doc.get('discount') or 0)
+    if discount:
+        try:
+            payments_col.insert_one({
+                "user_id": u_id, "channel_id": None, "minutes": "bundle_discount",
+                "amount": -discount, "timestamp": datetime.now()
+            })
+        except Exception:
+            pass
+        try:
+            counters_col.update_one({"_id": "stats"}, {"$inc": {"total_revenue": -discount, "total_discount": discount}}, upsert=True)
+        except Exception:
+            pass
+
     try:
         pending_checkouts_col.delete_one({"_id": ObjectId(token)})
     except Exception:
@@ -3314,6 +4293,7 @@ def stats_handler(message):
     counters = counters_col.find_one({"_id": "stats"}) or {}
     total_sales = counters.get("total_sales", 0)
     total_revenue = counters.get("total_revenue", 0)
+    total_discount = counters.get("total_discount", 0)
 
     now = datetime.now()
     month_start = datetime(now.year, now.month, 1)
@@ -3325,6 +4305,7 @@ def stats_handler(message):
         f"👥 Active Subscriptions: {active_subs}\n"
         f"🧾 Total Sales: {total_sales}\n"
         f"💰 Total Revenue: ₹{total_revenue}\n"
+        + (f"🎁 Bundle Discounts Given: ₹{total_discount}\n" if total_discount else "") +
         f"📅 This Month's Revenue: ₹{month_revenue}"
     )
     send_command_reply(message, text, parse_mode="Markdown")
@@ -3572,13 +4553,238 @@ def pending_checkouts_handler(message):
             except Exception:
                 pass
 
+_bc_pending_text = {}  # ADMIN_ID -> text typed before asking for the schedule time
+
+def _show_broadcast_menu(chat_id, message_id=None):
+    """Admin menu for /broadcast: send now, schedule later, or list scheduled ones."""
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("📨 Broadcast Now", callback_data="bcnow"))
+    markup.add(InlineKeyboardButton("⏰ Schedule for Later", callback_data="bcsched"))
+    markup.add(InlineKeyboardButton("📋 Scheduled Broadcasts", callback_data="bclist"))
+    text = ("📣 *Broadcast* — send a message to everyone who has ever started/used this bot.\n\n"
+            "Send it right away, or schedule it for a specific time (handy for planned promotions).")
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        dismiss_previous(chat_id, ADMIN_ID)
+        reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        schedule_delete(chat_id, reply.message_id, MENU_VANISH_SECONDS)
+        track_msg(ADMIN_ID, reply)
+
 @bot.message_handler(commands=['broadcast'], func=lambda m: m.from_user.id == ADMIN_ID)
 def broadcast_start(message):
-    # Dismiss previous bot reply
-    dismiss_previous(message.chat.id, message.from_user.id)
+    _show_broadcast_menu(message.chat.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "bcnow")
+def cb_bc_now(call):
+    if not _require_admin(call):
+        return
+    bot.answer_callback_query(call.id)
     # Awaiting the broadcast text -> prompt never auto-vanishes
     msg = send_prompt(ADMIN_ID, "Send the message you want to broadcast to everyone who has ever started/used this bot:")
     bot.register_next_step_handler(msg, do_broadcast)
+
+@bot.callback_query_handler(func=lambda call: call.data == "bcsched")
+def cb_bc_sched(call):
+    if not _require_admin(call):
+        return
+    bot.answer_callback_query(call.id)
+    msg = send_prompt(ADMIN_ID, "Send the broadcast message text first (plain text only):")
+    bot.register_next_step_handler(msg, _bc_sched_time)
+
+def _bc_sched_time(message):
+    if not message.text:
+        send_admin_reply("❌ Please send plain text for the scheduled broadcast. Use /broadcast to try again.")
+        return
+    _bc_pending_text[ADMIN_ID] = message.text
+    msg = send_prompt(ADMIN_ID,
+        "⏰ *When should this be sent?*\n\n"
+        "Accepted formats:\n"
+        "• `18:00` — today at that time (or tomorrow if already past)\n"
+        "• `2026-08-20 18:00` — exact date & time\n"
+        "• `30` — minutes from now\n\n"
+        "Send the time now:", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, _bc_sched_save)
+
+def _bc_parse_time(raw):
+    """Parse a user-typed broadcast time into an epoch timestamp, or None if invalid."""
+    raw = (raw or '').strip()
+    if not raw:
+        return None
+    now = datetime.now()
+    # plain minutes from now: "30"
+    if raw.isdigit():
+        return int(time.time()) + int(raw) * 60
+    # "in N minutes" / "now + N h" / "N hours" / "10m" ...
+    m = re.match(r'^(?:in\s+|now\s*\+\s*|\+\s*)?(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours)$', raw, re.IGNORECASE)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2).lower()
+        seconds = n * 60 if unit.startswith('m') else n * 3600
+        return int(time.time()) + seconds
+    # HH:MM (today, or tomorrow if already past)
+    m = re.match(r'^(\d{1,2}):(\d{2})$', raw)
+    if m:
+        hh, mm = int(m.group(1)), int(m.group(2))
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            return None
+        when = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if when <= now:
+            when += timedelta(days=1)
+        return int(when.timestamp())
+    # YYYY-MM-DD HH:MM
+    m = re.match(r'^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})$', raw)
+    if m:
+        try:
+            when = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                            int(m.group(4)), int(m.group(5)))
+        except ValueError:
+            return None
+        return int(when.timestamp())
+    return None
+
+def _bc_sched_save(message):
+    text = _bc_pending_text.pop(ADMIN_ID, None)
+    if text is None:
+        send_admin_reply("❌ Broadcast flow expired — please start again with /broadcast.")
+        return
+    if not message.text:
+        send_admin_reply("❌ Please send a time. Use /broadcast to try again.")
+        return
+    when_ts = _bc_parse_time(message.text)
+    if when_ts is None:
+        send_admin_reply("❌ Couldn't parse that time.\n\nFormats: `18:00`, `2026-08-20 18:00`, or `30` (minutes). Use /broadcast to try again.", parse_mode="Markdown")
+        return
+    if when_ts <= int(time.time()):
+        send_admin_reply("❌ That time is in the past — pick a future time. Use /broadcast to try again.")
+        return
+    try:
+        res = scheduled_broadcasts_col.insert_one({
+            "text": text,
+            "when_ts": int(when_ts),
+            "created_at": datetime.now(),
+            "status": "pending",
+        })
+    except Exception as e:
+        send_admin_reply(f"❌ Couldn't save the scheduled broadcast: {e}")
+        return
+    when_dt = datetime.fromtimestamp(when_ts)
+    preview = text if len(text) <= 100 else text[:97] + "..."
+    markup = InlineKeyboardMarkup().add(InlineKeyboardButton("❌ Cancel Broadcast", callback_data=f"bcdel_{res.inserted_id}"))
+    send_admin_reply(
+        f"✅ *Broadcast scheduled* for {when_dt.strftime('%Y-%m-%d %H:%M')}.\n\n"
+        f"Preview:\n{escape_markdown(preview)}",
+        parse_mode="Markdown", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "bclist")
+def cb_bc_list(call):
+    if not _require_admin(call):
+        return
+    bot.answer_callback_query(call.id)
+    show_scheduled_broadcasts(call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "bc_back")
+def cb_bc_back(call):
+    if not _require_admin(call):
+        return
+    bot.answer_callback_query(call.id)
+    _show_broadcast_menu(call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('bcdel_'))
+def cb_bc_del(call):
+    if not _require_admin(call):
+        return
+    bot.answer_callback_query(call.id)
+    oid = call.data.split('_', 1)[1]
+    try:
+        doc = scheduled_broadcasts_col.find_one({"_id": ObjectId(oid)})
+        scheduled_broadcasts_col.delete_one({"_id": ObjectId(oid)})
+    except Exception:
+        doc = None
+    if doc and doc.get('status') == 'pending':
+        send_admin_reply("✅ Scheduled broadcast cancelled.")
+    else:
+        send_admin_reply("❌ That broadcast is already sent or doesn't exist.")
+
+@bot.message_handler(commands=['listbroadcasts'], func=lambda m: m.from_user.id == ADMIN_ID)
+def listbroadcasts_handler(message):
+    dismiss_previous(message.chat.id, message.from_user.id)
+    show_scheduled_broadcasts(message.chat.id)
+
+def show_scheduled_broadcasts(chat_id, message_id=None):
+    """Lists pending scheduled broadcasts (with a cancel button each) plus a few of the
+    most recent ones already sent."""
+    pending = list(scheduled_broadcasts_col.find({"status": "pending"}).sort("when_ts", 1))
+    recent = list(scheduled_broadcasts_col.find({"status": "sent"}).sort("sent_at", -1).limit(5))
+
+    markup = InlineKeyboardMarkup()
+    if pending:
+        lines = ["⏰ *Scheduled Broadcasts*\n"]
+        for d in pending:
+            when_dt = datetime.fromtimestamp(d['when_ts'])
+            preview = (d.get('text') or '').replace('\n', ' ')[:45]
+            lines.append(f"• {when_dt.strftime('%m-%d %H:%M')} — _{escape_markdown(preview)}_")
+            markup.add(InlineKeyboardButton(f"❌ Cancel — {when_dt.strftime('%m-%d %H:%M')}", callback_data=f"bcdel_{d['_id']}"))
+        text = "\n".join(lines)
+    else:
+        text = "📭 No scheduled broadcasts pending."
+
+    if recent:
+        text += "\n\n_Recently sent:_"
+        for d in recent:
+            when_dt = datetime.fromtimestamp(d.get('when_ts') or 0)
+            preview = (d.get('text') or '').replace('\n', ' ')[:40]
+            text += f"\n• {when_dt.strftime('%m-%d %H:%M')} — {escape_markdown(preview)}"
+
+    markup.add(InlineKeyboardButton("⬅️ Back", callback_data="bc_back"))
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
+        track_msg(ADMIN_ID, reply)
+
+def run_scheduled_broadcasts():
+    """Scheduler job: sends every scheduled broadcast whose time has come. Marks each as
+    sent atomically so a crash/re-run can never double-send the same message."""
+    now_ts = int(time.time())
+    try:
+        due = list(scheduled_broadcasts_col.find({"status": "pending", "when_ts": {"$lte": now_ts}}))
+    except Exception:
+        return
+    for doc in due:
+        try:
+            res = scheduled_broadcasts_col.update_one(
+                {"_id": doc["_id"], "status": "pending"},
+                {"$set": {"status": "sent", "sent_at": datetime.now()}}
+            )
+            if res.modified_count == 0:
+                continue  # already sent by a concurrent run
+        except Exception:
+            continue
+        text = doc.get('text', '')
+        sent, failed = 0, 0
+        errors = []
+        try:
+            user_ids = seen_users_col.distinct("user_id")
+        except Exception:
+            user_ids = []
+        for uid in user_ids:
+            try:
+                bot.send_message(uid, text, vanish_delay=None)
+                sent += 1
+            except Exception as e:
+                failed += 1
+                if len(errors) < 5:
+                    errors.append(f"{uid}: {e}")
+        when_dt = datetime.fromtimestamp(doc.get('when_ts') or now_ts)
+        result = f"✅ Scheduled broadcast ({when_dt.strftime('%Y-%m-%d %H:%M')}) sent to {sent} users. Failed: {failed}."
+        if errors:
+            result += "\n\nFailure details (first 5):\n" + "\n".join(errors)
+        try:
+            bot.send_message(ADMIN_ID, result, vanish_delay=None)
+        except Exception:
+            pass
 
 def do_broadcast(message):
     if not message.text:
@@ -4293,6 +5499,122 @@ def import_members_handler(message):
     else:
         send_command_reply(message, summary, parse_mode="Markdown")
 
+# --- ABANDONED CART NUDGE ---
+def send_abandoned_cart_nudges():
+    """One gentle reminder to users who added items to their cart but never checked out
+    within CART_NUDGE_MINUTES of the last cart update. Fires once per cart; carts stale
+    for CART_MAX_AGE_DAYS get pruned."""
+    now = datetime.now()
+    cutoff = now - timedelta(minutes=CART_NUDGE_MINUTES)
+    stale_cutoff = now - timedelta(days=CART_MAX_AGE_DAYS)
+    try:
+        for doc in carts_col.find({"updated_at": {"$lte": cutoff}, "nudged": {"$ne": True}}):
+            try:
+                items = doc.get('items') or []
+                if not items:
+                    continue
+                names = ", ".join(i.get('name', '?') for i in items[:3])
+                total = cart_total(items)
+                discount, grand_total = bundle_discount(items)
+                extra = f"\n🎁 Bundle deal: you save ₹{discount} with 3+ channels!" if discount else ""
+                text = (
+                    "Hey, you left some channels in your cart and never finished checkout. 🛒\n\n"
+                    f"{names}{'…' if len(items) > 3 else ''}\n\n"
+                    f"💰 Total: ₹{grand_total}{extra}\n\n"
+                    "Tap below to review your cart and complete your purchase."
+                )
+                markup = InlineKeyboardMarkup().add(
+                    InlineKeyboardButton("🛒 View Cart", callback_data="cart_view")
+                )
+                try:
+                    bot.send_message(doc['user_id'], text, reply_markup=markup, vanish_delay=None)
+                except Exception:
+                    pass
+                carts_col.update_one({"_id": doc['_id']}, {"$set": {"nudged": True, "nudge_sent_at": datetime.now()}})
+            except Exception:
+                continue
+        carts_col.delete_many({"updated_at": {"$lte": stale_cutoff}})
+    except Exception:
+        pass
+
+# --- WIN-BACK FOR EXPIRED USERS ---
+def backfill_expired_subs():
+    """One-time: derive lapsed subscriptions from historical payment logs so the win-back
+    DM can reach users whose subs expired before this feature shipped. Only fills records
+    that lapsed within the recent WINBACK_LOOKBACK_DAYS window (and more than
+    WINBACK_AFTER_DAYS ago), to avoid DMing stale contacts from months back."""
+    try:
+        if expired_subs_col.count_documents({}) > 0:
+            return
+    except Exception:
+        return
+    lookback = datetime.now() - timedelta(days=WINBACK_LOOKBACK_DAYS)
+    min_lapse = datetime.now() - timedelta(days=WINBACK_AFTER_DAYS)
+    for p in payments_col.find({}):
+        try:
+            minutes = p.get('minutes')
+            if not minutes or str(minutes).lower() in ('lifetime', 'bundle_discount'):
+                continue
+            ts = p.get('timestamp')
+            if not ts:
+                continue
+            expiry_ts = int(ts.timestamp()) + int(minutes) * 60
+            if expiry_ts <= lookback.timestamp() or expiry_ts > min_lapse.timestamp():
+                continue
+            ch_id = p.get('channel_id')
+            u_id = p.get('user_id')
+            if ch_id is None or u_id is None:
+                continue
+            expired_subs_col.update_one(
+                {"user_id": int(u_id), "channel_id": int(ch_id)},
+                {"$set": {"user_id": int(u_id), "channel_id": int(ch_id),
+                          "expired_at": datetime.fromtimestamp(expiry_ts)},
+                 "$setOnInsert": {"winback_sent": False}},
+                upsert=True
+            )
+        except Exception:
+            continue
+
+def send_winback_offers():
+    """Auto-DM users whose paid subscription lapsed WINBACK_AFTER_DAYS+ days ago with a
+    gentle 'come back' offer. Fires once per (user, channel)."""
+    try:
+        bot_username = bot.get_me().username
+    except Exception:
+        bot_username = None
+    cutoff = datetime.now() - timedelta(days=WINBACK_AFTER_DAYS)
+    try:
+        for doc in expired_subs_col.find({"expired_at": {"$lte": cutoff}, "winback_sent": {"$ne": True}}):
+            try:
+                ch = channels_col.find_one({"channel_id": int(doc.get('channel_id'))})
+            except Exception:
+                ch = None
+            ch_name = ch['name'] if ch else "your subscription"
+            ch_id = doc.get('channel_id')
+            if ch_id is None:
+                continue
+            markup = InlineKeyboardMarkup()
+            if bot_username:
+                rejoin_url = f"https://t.me/{bot_username}?start={ch_id}"
+                markup.add(InlineKeyboardButton("🔄 Come Back", url=rejoin_url))
+            body = (
+                f"👋 We miss you!\n\n"
+                f"Your subscription to *{ch_name}* lapsed a few days ago. "
+                f"Come back and jump right in — plans are still available.\n\n"
+                f"*See you there!*"
+            )
+            try:
+                bot.send_message(doc['user_id'], body, reply_markup=markup, parse_mode="Markdown", vanish_delay=None)
+            except Exception:
+                pass
+            # Mark as sent even if the DM failed (blocked bot / unreachable), so it's never retried.
+            try:
+                expired_subs_col.update_one({"_id": doc['_id']}, {"$set": {"winback_sent": True, "winback_sent_at": datetime.now()}})
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 # Automate Kicking
 def kick_expired_users():
     now = datetime.now().timestamp()
@@ -4315,6 +5637,20 @@ def kick_expired_users():
 
     for user in expired_users:
         try:
+            # Record the lapse first (for the 3-day win-back DM) — before the users_col
+            # record is removed below.
+            try:
+                ch_id = user.get('channel_id')
+                if ch_id is not None:
+                    expired_subs_col.update_one(
+                        {"user_id": int(user['user_id']), "channel_id": int(ch_id)},
+                        {"$set": {"user_id": int(user['user_id']), "channel_id": int(ch_id),
+                                  "expired_at": datetime.fromtimestamp(user.get('expiry') or now)},
+                         "$setOnInsert": {"winback_sent": False}},
+                        upsert=True
+                    )
+            except Exception:
+                pass
             removed, detail = _kick_from_group(user['channel_id'], user['user_id'])
 
             rejoin_url = f"https://t.me/{bot_username}?start={user['channel_id']}" if bot_username else f"https://t.me/{bot_username}"
@@ -4469,6 +5805,24 @@ def setup_indexes():
         pending_reactions_col.create_index([("chat_id", 1), ("message_id", 1)], unique=True)
     except Exception:
         pass
+    try:
+        carts_col.create_index([("user_id", 1)], unique=True)
+    except Exception:
+        pass
+    try:
+        scheduled_broadcasts_col.create_index([("status", 1), ("when_ts", 1)])
+    except Exception:
+        pass
+    try:
+        waitlist_col.create_index([("user_id", 1), ("channel_id", 1)], unique=True)
+        waitlist_col.create_index([("channel_id", 1)])
+    except Exception:
+        pass
+    try:
+        expired_subs_col.create_index([("user_id", 1), ("channel_id", 1)], unique=True)
+        expired_subs_col.create_index([("expired_at", 1)])
+    except Exception:
+        pass
 
 def bootstrap_counters():
     """One-time migration: if counters_col doesn't exist yet, seed it from whatever
@@ -4483,10 +5837,14 @@ if __name__ == '__main__':
     keep_alive()
     setup_indexes()
     bootstrap_counters()
+    backfill_expired_subs()
     resume_pending_reactions()
     scheduler = BackgroundScheduler()
     scheduler.add_job(kick_expired_users, 'interval', minutes=1)
     scheduler.add_job(send_expiry_reminders, 'interval', minutes=5)
+    scheduler.add_job(run_scheduled_broadcasts, 'interval', minutes=1)
+    scheduler.add_job(send_abandoned_cart_nudges, 'interval', minutes=5)
+    scheduler.add_job(send_winback_offers, 'interval', minutes=15)
     scheduler.add_job(sync_all_tracked_chats, 'interval', minutes=30)
     scheduler.start()
     bot.remove_webhook()
