@@ -446,7 +446,7 @@ def clear_menu_image():
 # =====================================================================
 
 FJ_SETTINGS_ID = "force_join"
-FJ_MSG_TEXT = "🔒 Join our channel to unlock the bot 🔓"
+FJ_MSG_TEXT = "𝙇𝙊𝘾𝙆𝙀𝘿 𝙁𝙊𝙍 𝙉𝙊𝙒 💀\n\nJoin the channels below to unlock access 🚀"
 FJ_BTN_JOIN = "📢 Join Channel"
 FJ_BTN_RETRY = "🔄 Try Again"
 FJ_CB_RETRY = "fj_retry"
@@ -455,14 +455,31 @@ FJ_BLOCK_COOLDOWN_SECONDS = 4   # don't re-send the block screen on every keystr
 _fj_last_block = {}             # user_id -> time.monotonic() of the last block screen
 
 def get_force_join_settings():
-    """Read the current Force Join config from settings_col (fail-safe defaults)."""
+    """Read the current Force Join config from settings_col (fail-safe defaults).
+    Supports both legacy single-channel format and new multi-channel format."""
     doc = settings_col.find_one({"_id": FJ_SETTINGS_ID})
     if not doc:
-        return {"enabled": False, "channel": None, "channel_title": None, "image_file_id": None}
+        return {"enabled": False, "channels": [], "image_file_id": None}
+    
+    # Backward compatibility: convert legacy single-channel to list format
+    if "channels" not in doc:
+        channels = []
+        legacy_channel = doc.get("channel")
+        legacy_title = doc.get("channel_title")
+        if legacy_channel:
+            channels.append({
+                "channel": legacy_channel,
+                "title": legacy_title or legacy_channel,
+            })
+        return {
+            "enabled": bool(doc.get("enabled", False)),
+            "channels": channels,
+            "image_file_id": doc.get("image_file_id"),
+        }
+    
     return {
         "enabled": bool(doc.get("enabled", False)),
-        "channel": doc.get("channel"),
-        "channel_title": doc.get("channel_title"),
+        "channels": doc.get("channels", []),
         "image_file_id": doc.get("image_file_id"),
     }
 
@@ -481,10 +498,10 @@ def _fj_resolve_chat_id(channel):
         return int(raw)
     return raw.lstrip('@')
 
-def _fj_channel_url(settings):
-    """Best-effort https://t.me/... link for the configured channel, or None if it
+def _fj_channel_url(channel_obj):
+    """Best-effort https://t.me/... link for a channel dict, or None if it
     cannot be built (numeric id with no resolvable public username)."""
-    channel = settings.get('channel')
+    channel = channel_obj.get('channel', '') if isinstance(channel_obj, dict) else str(channel_obj)
     raw = str(channel).strip() if channel else ''
     if not raw:
         return None
@@ -498,31 +515,42 @@ def _fj_channel_url(settings):
 
 def _fj_membership_status(user_id, settings):
     """Returns ('joined', None), ('not_joined', None) or ('error', reason).
+    For multiple channels, user must join ALL of them.
     reason is 'config' (channel gone / bot not in it / no rights) or 'transient'
     (network, rate-limit, other API failure). Never raises — the middleware and
     the Try-Again button both rely on this to keep the bot running no matter what."""
-    chat_id = _fj_resolve_chat_id(settings.get('channel'))
-    if chat_id is None:
+    channels = settings.get('channels', [])
+    if not channels:
         return 'error', 'config'
-    try:
-        member = bot.get_chat_member(chat_id, user_id)
-        status = getattr(member, 'status', None)
-        if status in ('creator', 'administrator', 'member'):
-            return 'joined', None
-        if status == 'restricted':
-            # Restricted users are still members unless explicitly removed.
-            is_member = getattr(member, 'is_member', None)
-            return ('joined', None) if is_member in (None, True) else ('not_joined', None)
-        return 'not_joined', None
-    except telebot.apihelper.ApiTelegramException as e:
-        code = getattr(e, 'error_code', None)
-        desc = (getattr(e, 'description', '') or '').lower()
-        if code == 400 and ('user not found' in desc or 'user_not_participant' in desc or 'participant' in desc):
-            # Telegram reports users who were never / are no longer in the chat this way.
-            return 'not_joined', None
-        return 'error', 'config'
-    except Exception:
-        return 'error', 'transient'
+    
+    not_joined = []
+    for ch in channels:
+        chat_id = _fj_resolve_chat_id(ch.get('channel'))
+        if chat_id is None:
+            continue
+        try:
+            member = bot.get_chat_member(chat_id, user_id)
+            status = getattr(member, 'status', None)
+            if status in ('creator', 'administrator', 'member'):
+                continue
+            if status == 'restricted':
+                is_member = getattr(member, 'is_member', None)
+                if is_member in (None, True):
+                    continue
+            not_joined.append(ch.get('title') or ch.get('channel'))
+        except telebot.apihelper.ApiTelegramException as e:
+            code = getattr(e, 'error_code', None)
+            desc = (getattr(e, 'description', '') or '').lower()
+            if code == 400 and ('user not found' in desc or 'user_not_participant' in desc or 'participant' in desc):
+                not_joined.append(ch.get('title') or ch.get('channel'))
+            else:
+                return 'error', 'config'
+        except Exception:
+            return 'error', 'transient'
+    
+    if not_joined:
+        return 'not_joined', not_joined
+    return 'joined', None
 
 def user_has_force_join_pass(user_id):
     """REUSABLE membership gate. True = the user may proceed, False = they must be
@@ -536,8 +564,9 @@ def user_has_force_join_pass(user_id):
         return True
     if not settings.get('enabled'):
         return True
-    if not settings.get('channel'):
-        return True  # enabled but no channel configured yet -> fail open
+    channels = settings.get('channels', [])
+    if not channels:
+        return True  # enabled but no channels configured yet -> fail open
     try:
         verdict, _reason = _fj_membership_status(user_id, settings)
     except Exception:
@@ -547,26 +576,29 @@ def user_has_force_join_pass(user_id):
     return verdict == 'joined'
 
 def send_force_join_block(chat_id, user_id):
-    """Send (or refresh, throttled by cooldown) the 'join our channel' gate screen:
-    optional banner image, the lock message, and the Join / Try Again buttons.
+    """Send (or refresh, throttled by cooldown) the 'join our channels' gate screen:
+    optional banner image, the lock message, and Join/Try Again buttons.
     The message persists (vanish_delay=None) so the user can tap Try Again."""
     now = time.monotonic()
     if now - _fj_last_block.get(user_id, 0) < FJ_BLOCK_COOLDOWN_SECONDS:
         return None
     _fj_last_block[user_id] = now
     settings = get_force_join_settings()
+    channels = settings.get('channels', [])
     markup = InlineKeyboardMarkup(row_width=1)
-    url = _fj_channel_url(settings)
-    if url:
-        markup.add(InlineKeyboardButton(FJ_BTN_JOIN, url=url))
-    else:
-        # No public link available (e.g. invite-only numeric id) -> instruct via alert.
-        markup.add(InlineKeyboardButton(FJ_BTN_JOIN, callback_data=FJ_CB_JOIN))
+    
+    # Add a join button for each channel
+    for ch in channels:
+        url = _fj_channel_url(ch)
+        if url:
+            markup.add(InlineKeyboardButton(f"📢 {ch.get('title', 'Join Channel')}", url=url))
+        else:
+            markup.add(InlineKeyboardButton(f"📢 {ch.get('title', 'Join Channel')}", callback_data=FJ_CB_JOIN))
+    
     markup.add(InlineKeyboardButton(FJ_BTN_RETRY, callback_data=FJ_CB_RETRY))
+    
     text = FJ_MSG_TEXT
-    title = settings.get('channel_title')
-    if title:
-        text += f"\n\n📢 {title}"
+    
     try:
         img = settings.get('image_file_id')
         if img:
@@ -624,6 +656,9 @@ class ForceJoinMiddleware(BaseMiddleware):
             print(f"[force-join] middleware error: {e}")
             return None
 
+    def post_process(self, message, data, exception):
+        pass
+
 bot.setup_middleware(ForceJoinMiddleware())
 
 # ---- Admin: /forcejoin settings panel ----
@@ -635,24 +670,34 @@ def forcejoin_command(message):
 def send_force_join_menu(chat_id, message_id=None):
     s = get_force_join_settings()
     status = "🟢 Enabled" if s.get('enabled') else "🔴 Disabled"
-    channel = s.get('channel')
-    title = s.get('channel_title')
-    channel_str = escape_markdown(title or channel) if channel else "— not set —"
+    channels = s.get('channels', [])
+    
+    if channels:
+        channel_lines = []
+        for i, ch in enumerate(channels, 1):
+            title = ch.get('title') or ch.get('channel') or f"Channel {i}"
+            channel_lines.append(f"{i}. {escape_markdown(title)} (`{escape_markdown(ch.get('channel', ''))}`)")
+        channel_str = "\n".join(channel_lines)
+    else:
+        channel_str = "— no channels set —"
+    
     text = ("╭━━━ 🔒 𝙁𝙊𝙍𝘾𝙀 𝙅𝙊𝙄𝙉 ━━━╮\n\n"
             f"Status: {status}\n"
-            f"Channel: {channel_str}\n\n"
-            "When enabled, users must join this channel before they can "
+            f"Channels:\n{channel_str}\n\n"
+            "When enabled, users must join ALL channels below before they can "
             "use the bot. Covers /start, all commands, menu buttons & callbacks.\n\n"
             "╰━━━━━━━━━━━━━━━━━━━━╯")
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton(
         "🔴 Disable" if s.get('enabled') else "🟢 Enable",
         callback_data="fj_disable" if s.get('enabled') else "fj_enable"))
-    markup.add(InlineKeyboardButton("📢 Set Channel", callback_data="fj_setchannel"))
+    markup.add(InlineKeyboardButton("➕ Add Channel", callback_data="fj_setchannel"))
+    if channels:
+        markup.add(InlineKeyboardButton("➖ Remove Channel", callback_data="fj_removechannel_menu"))
     markup.add(InlineKeyboardButton("🖼 Set Banner Image", callback_data="fj_setbanner"))
     if s.get('image_file_id'):
         markup.add(InlineKeyboardButton("🗑 Remove Banner", callback_data="fj_rmbanner"))
-    markup.add(InlineKeyboardButton("🔎 Verify Channel", callback_data="fj_verify"))
+    markup.add(InlineKeyboardButton("🔎 Verify Channels", callback_data="fj_verify"))
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
     else:
@@ -684,7 +729,7 @@ def cb_fj_setchannel(call):
     if not _fj_admin(call):
         return
     msg = send_prompt(call.message.chat.id,
-        "📢 Send the channel username or numeric chat ID, e.g. `@my_updates` or `-1001234567890`.\n\n"
+        "📢 Send the channel username or numeric chat ID to add to Force Join, e.g. `@my_updates` or `-1001234567890`.\n\n"
         "Make sure the bot is a member (admin) of that channel so membership checks can run.\n\n"
         "Type /skip to cancel.",
         parse_mode="Markdown")
@@ -693,7 +738,7 @@ def cb_fj_setchannel(call):
 def _fj_save_channel(message):
     raw = (getattr(message, 'text', '') or '').strip()
     if raw.lower() in ('/skip', 'skip'):
-        send_admin_reply("❌ Cancelled — channel unchanged.")
+        send_admin_reply("❌ Cancelled — channel not added.")
         return
     chat_id = _fj_resolve_chat_id(raw)
     if chat_id is None:
@@ -705,8 +750,60 @@ def _fj_save_channel(message):
         send_admin_reply("❌ Could not find that channel. Double-check the username/ID and that the bot can access it.")
         return
     title = getattr(chat_obj, 'title', None) or raw
-    save_force_join_settings(channel=raw, channel_title=title)
-    send_admin_reply(f"✅ Force Join channel set to *{escape_markdown(title)}* ({raw}).\n\nOpen /forcejoin to see the updated settings.", parse_mode="Markdown")
+    
+    # Add to channels list (multi-channel support)
+    settings = get_force_join_settings()
+    channels = settings.get('channels', [])
+    
+    # Check if channel already exists
+    for ch in channels:
+        if ch.get('channel') == raw:
+            send_admin_reply(f"❌ Channel *{escape_markdown(title)}* is already in the list.", parse_mode="Markdown")
+            return
+    
+    channels.append({"channel": raw, "title": title})
+    save_force_join_settings(channels=channels)
+    send_admin_reply(f"✅ Added *{escape_markdown(title)}* ({raw}) to Force Join.\n\nTotal channels: {len(channels)}\n\nOpen /forcejoin to see the updated settings.", parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data == "fj_removechannel_menu")
+def cb_fj_removechannel_menu(call):
+    if not _fj_admin(call):
+        return
+    s = get_force_join_settings()
+    channels = s.get('channels', [])
+    if not channels:
+        send_force_join_menu(call.message.chat.id, call.message.message_id)
+        return
+    
+    text = "🗑 *Remove Force Join Channel*\n\nSelect a channel to remove:"
+    markup = InlineKeyboardMarkup()
+    for i, ch in enumerate(channels, 1):
+        title = ch.get('title') or ch.get('channel') or f"Channel {i}"
+        markup.add(InlineKeyboardButton(f"🗑 {title}", callback_data=f"fj_rmch_{i}"))
+    markup.add(InlineKeyboardButton("🔙 Back", callback_data="fj_back"))
+    edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data == "fj_back")
+def cb_fj_back(call):
+    if not _fj_admin(call):
+        return
+    send_force_join_menu(call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('fj_rmch_'))
+def cb_fj_remove_channel(call):
+    if not _fj_admin(call):
+        return
+    try:
+        idx = int(call.data.split('_')[2]) - 1
+    except (ValueError, IndexError):
+        return
+    s = get_force_join_settings()
+    channels = s.get('channels', [])
+    if 0 <= idx < len(channels):
+        removed = channels.pop(idx)
+        save_force_join_settings(channels=channels)
+        bot.answer_callback_query(call.id, f"Removed {removed.get('title', 'channel')}")
+    send_force_join_menu(call.message.chat.id, call.message.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "fj_setbanner")
 def cb_fj_setbanner(call):
@@ -742,40 +839,50 @@ def cb_fj_verify(call):
     if not _fj_admin(call):
         return
     s = get_force_join_settings()
-    channel = s.get('channel')
-    if not channel:
-        send_admin_reply("❌ No channel configured yet — set one first.")
+    channels = s.get('channels', [])
+    if not channels:
+        send_admin_reply("❌ No channels configured yet — add one first.")
         return
-    chat_id = _fj_resolve_chat_id(channel)
     lines = []
-    try:
-        chat_obj = bot.get_chat(chat_id)
-        title = getattr(chat_obj, 'title', None) or channel
-        uname = getattr(chat_obj, 'username', None)
-        lines.append(f"✅ Channel resolves: {title}")
-        lines.append(f"🔗 https://t.me/{uname}" if uname else "🔗 No public username (invite-only).")
-    except Exception:
-        lines.append("❌ Channel could not be resolved. Check the username/ID and that the bot can access it.")
-    if getattr(bot, 'user', None):
+    for i, ch in enumerate(channels, 1):
+        channel = ch.get('channel', '')
+        chat_id = _fj_resolve_chat_id(channel)
+        lines.append(f"━━━ Channel {i}: {ch.get('title', channel)} ━━━")
         try:
-            bot_member = bot.get_chat_member(chat_id, bot.user.id)
-            bstatus = getattr(bot_member, 'status', None)
-            if bstatus in ('creator', 'administrator', 'member'):
-                lines.append(f"🤖 Bot is in the channel ({bstatus}) — checks will work.")
-            else:
-                lines.append(f"⚠️ Bot status: {bstatus}. Add the bot to the channel so checks work.")
+            chat_obj = bot.get_chat(chat_id)
+            title = getattr(chat_obj, 'title', None) or channel
+            uname = getattr(chat_obj, 'username', None)
+            lines.append(f"✅ Resolves: {title}")
+            lines.append(f"🔗 https://t.me/{uname}" if uname else "🔗 No public username (invite-only).")
         except Exception:
-            lines.append("⚠️ Bot is not in the channel. Add the bot so membership checks work.")
+            lines.append("❌ Could not resolve. Check username/ID and bot permissions.")
+        if getattr(bot, 'user', None):
+            try:
+                bot_member = bot.get_chat_member(chat_id, bot.user.id)
+                bstatus = getattr(bot_member, 'status', None)
+                if bstatus in ('creator', 'administrator', 'member'):
+                    lines.append(f"🤖 Bot is in the channel ({bstatus}) — checks will work.")
+                else:
+                    lines.append(f"⚠️ Bot status: {bstatus}. Add the bot so checks work.")
+            except Exception:
+                lines.append("⚠️ Bot is not in the channel. Add it so membership checks work.")
     send_admin_reply("\n".join(lines))
 
 # ---- User-facing Force Join buttons ----
 
 @bot.callback_query_handler(func=lambda call: call.data == FJ_CB_JOIN)
 def cb_fj_join(call):
-    """Fallback when the configured channel has no public t.me link."""
+    """Fallback when the configured channel(s) have no public t.me link."""
     s = get_force_join_settings()
-    channel = s.get('channel') or ''
-    bot.answer_callback_query(call.id, f"Open Telegram and search for: {channel}", show_alert=True)
+    channels = s.get('channels', [])
+    if len(channels) == 1:
+        channel = channels[0].get('channel', '')
+        bot.answer_callback_query(call.id, f"Open Telegram and search for: {channel}", show_alert=True)
+    elif len(channels) > 1:
+        names = ", ".join(ch.get('channel', '') for ch in channels)
+        bot.answer_callback_query(call.id, f"Join these channels in Telegram:\n{names}", show_alert=True)
+    else:
+        bot.answer_callback_query(call.id, "No channels configured.", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data == FJ_CB_RETRY)
 def cb_fj_retry(call):
@@ -1301,7 +1408,7 @@ def send_plan_selection(chat_id, ch_data, user_id=None):
     screenshot = ch_data.get('screenshot_file_id')
     if screenshot:
         try:
-            bot.send_photo(chat_id, screenshot, caption=text, reply_markup=markup, parse_mode="Markdown")
+            bot.send_photo(chat_id, screenshot, caption=text, reply_markup=markup, parse_mode="HTML")
             return
         except Exception:
             pass  # fallback to text if photo fails
@@ -1403,7 +1510,7 @@ def build_cart_summary(user_id):
     if not items:
         text = "🛒 Your cart is empty.\n\nBrowse channels below and add something 🔥"
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse"))
+        markup.add(InlineKeyboardButton("😍 Browse Channels", callback_data="cart_browse"))
         contact_url = contact_admin_url()
         if contact_url:
             markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
@@ -1411,7 +1518,7 @@ def build_cart_summary(user_id):
 
     lines = ["🛒 <b>Your Cart</b> 🛒\n"]
     for i in items:
-        lines.append(f"• {i['name']} — {format_label(i['t'])} — ₹{i['price']}")
+        lines.append(f"• {escape(i['name'])} — {format_label(i['t'])} — ₹{i['price']}")
     total = cart_total(items)
     discount, grand_total = bundle_discount(items)
     lines.append(f"\n💰 <b>Subtotal: ₹{total}</b>")
@@ -1467,6 +1574,7 @@ def build_channel_list(user_id, back_to_menu=False):
     When back_to_menu is True, an extra '🏠 Main Menu' button is appended (used when this
     view was reached from the main hub, so the user can step back out to it)."""
     channels = get_sorted_channels(ADMIN_ID)
+    print(f"[build_channel_list] user={user_id} back_to_menu={back_to_menu} channel_count={len(channels)}")
     markup = InlineKeyboardMarkup()
     for i, ch in enumerate(channels, start=1):
         markup.add(InlineKeyboardButton(channel_button_label(ch, i), callback_data=f"browse_{ch['channel_id']}"))
@@ -1492,45 +1600,63 @@ def build_channel_list(user_id, back_to_menu=False):
         markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
         text = (f"👋 <b>Welcome Dallo !</b> \n\nShaana banne ki Koshish mat karna 😂😂\n\nPick a channel/group you'd like to join below 👇\n\n"
             f"💡 <b><i>Stack multiple channels in your cart and pay once — easy money 🫶🏻</i></b>")
+    else:
+        text = (f"👋 <b>Pick a channel</b> 👇\n\n"
+                f"💡 <b><i>Stack multiple channels in your cart and pay once — easy money 🫶🏻</i></b>")
     return text, markup
 
 def show_all_channels(chat_id, user_id, back_to_menu=False):
     """Shows every channel the admin manages, so a user can pick one to join.
-    Reached directly via /buy (or the '📺 Groups/Channels' button on the main menu); the
+    Reached directly via /buy (or the '😍 Groups/Channels' button on the main menu); the
     new message is tracked for animated dismissal on the next command."""
-    text, markup = build_channel_list(user_id, back_to_menu=back_to_menu)
-    if text is None:
-        contact_url = contact_admin_url()
-        reply_markup = InlineKeyboardMarkup()
-        if contact_url:
-            reply_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
-        if back_to_menu:
-            reply_markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
-        reply = bot.send_message(chat_id, "Nothing here right now 😕\nCheck back later or contact the admin.",
-                          reply_markup=reply_markup)
+    try:
+        print(f"[show_all_channels] chat={chat_id} user={user_id} back_to_menu={back_to_menu}")
+        text, markup = build_channel_list(user_id, back_to_menu=back_to_menu)
+        print(f"[show_all_channels] text_is_none={text is None} channels_present={text is not None}")
+        if text is None:
+            contact_url = contact_admin_url()
+            reply_markup = InlineKeyboardMarkup()
+            if contact_url:
+                reply_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+            if back_to_menu:
+                reply_markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
+            reply = bot.send_message(chat_id, "Nothing here right now 😕\nCheck back later or contact the admin.",
+                              reply_markup=reply_markup)
+            schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
+            track_msg(user_id, reply)
+            return
+        reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
         schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
         track_msg(user_id, reply)
-        return
-    reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
-    schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
-    track_msg(user_id, reply)
+    except Exception as e:
+        print(f"[show_all_channels] error: {e}")
+        bot.send_message(chat_id, "⚠️ Couldn't load channels. Please try again later.")
 
 def edit_all_channels(chat_id, message_id, user_id, message_obj=None, back_to_menu=False):
     """Same as show_all_channels, but edits an existing button-driven message in place
-    (used for 'Back to Channels' / 'Add Another Channel' / '📺 Groups/Channels' taps)."""
-    text, markup = build_channel_list(user_id, back_to_menu=back_to_menu)
-    if text is None:
-        contact_url = contact_admin_url()
-        reply_markup = InlineKeyboardMarkup()
-        if contact_url:
-            reply_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
-        if back_to_menu:
-            reply_markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
-        edit_menu(chat_id, message_id, "Nothing here right now 😕\nCheck back later or contact the admin.",
-                  reply_markup=reply_markup,
-                  message_obj=message_obj)
-        return
-    edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=message_obj)
+    (used for 'Back to Channels' / 'Add Another Channel' / '😍 Groups/Channels' taps)."""
+    try:
+        text, markup = build_channel_list(user_id, back_to_menu=back_to_menu)
+        if text is None:
+            contact_url = contact_admin_url()
+            reply_markup = InlineKeyboardMarkup()
+            if contact_url:
+                reply_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+            if back_to_menu:
+                reply_markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
+            edit_menu(chat_id, message_id, "Nothing here right now 😕\nCheck back later or contact the admin.",
+                      reply_markup=reply_markup,
+                      message_obj=message_obj)
+            return
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=message_obj)
+    except Exception as e:
+        print(f"[edit_all_channels] error: {e}")
+        try:
+            bot.delete_message(chat_id, message_id)
+        except Exception:
+            pass
+        bot.send_message(chat_id, "⚠️ Couldn't load channels. Tap below to try again.",
+                         reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 Browse Channels", callback_data="cart_browse")))
 
 # --- USER: MAIN MENU (shown on plain /start) ---
 
@@ -1539,16 +1665,16 @@ def build_main_menu():
     non-admin): a landing screen with Groups/Channels, Offers, and Contact — rather than
     dumping the full channel list on the user immediately."""
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("📺 Groups / Channels", callback_data="main_channels"))
+    markup.add(InlineKeyboardButton("😍 Groups / Channels", callback_data="main_channels"))
     if offer_bundles_col.count_documents({"enabled": True}) > 0:
-        markup.add(InlineKeyboardButton("📦 Offers", callback_data="main_obundles"))
+        markup.add(InlineKeyboardButton("🎉 Offers", callback_data="main_obundles"))
     contact_url = contact_admin_url()
     if contact_url:
         markup.add(InlineKeyboardButton("📞 Contact", url=contact_url))
     text = ("╭━━━ 🪩 𝙒𝙀𝙇𝘾𝙊𝙈𝙀 ━━━╮\n\n"
-            "What's the move? 👇\n\n"
-            "📺 <b>Groups / Channels</b> — browse & join\n"
-            "📦 <b>Offers</b> — stack channels for one price\n\n"
+            "<i>Less Goooo </i> 👇\n\n"
+            "😍 <b>Groups / Channels</b> — browse & join\n"
+            "🎉 <b>Offers</b> — stack channels for one price\n\n"
             "╰━━━━━━━━━━━━━━━━━━━━╯")
     return text, markup
 
@@ -1644,8 +1770,8 @@ def cb_main_offers(call):
             "set by the admin, or browse individual channels.")
     markup = InlineKeyboardMarkup()
     if offer_bundles_col.count_documents({"enabled": True}) > 0:
-        markup.add(InlineKeyboardButton("📦 View Offers", callback_data="main_obundles"))
-    markup.add(InlineKeyboardButton("📺 Groups / Channels", callback_data="main_channels"))
+        markup.add(InlineKeyboardButton("🎉 View Offers", callback_data="main_obundles"))
+    markup.add(InlineKeyboardButton("😍 Groups / Channels", callback_data="main_channels"))
     markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
     edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=call.message)
 
@@ -1689,7 +1815,7 @@ def _render_bundle_list(chat_id, message_id=None):
                 callback_data=f"obdetail_{bundle['bundle_id']}"),
             InlineKeyboardButton(toggle_label, callback_data=f"obtogglelist_{bundle['bundle_id']}"))
     markup.add(InlineKeyboardButton("➕ Create Offer", callback_data="obadd"))
-    text = "📦 *Offers*\n\nStack channels at one fixed price — built by the admin."
+    text = "'🎉 *Offers*\n\nStack channels at one fixed price — built by the admin."
     if not bundles:
         text += "\n\nNo offers yet."
     if message_id:
@@ -1717,11 +1843,11 @@ def _render_user_bundles(chat_id, message_id=None):
     bundles = list(offer_bundles_col.find({"admin_id": ADMIN_ID, "enabled": True}).sort("created_at", 1))
     markup = InlineKeyboardMarkup()
     for bundle in bundles:
-        markup.add(InlineKeyboardButton(f"📦 {bundle.get('title')} — ₹{bundle.get('price')}",
+        markup.add(InlineKeyboardButton(f"🎉 {bundle.get('title')} — ₹{bundle.get('price')}",
                                         callback_data=f"obuy_{bundle['bundle_id']}"))
-    markup.add(InlineKeyboardButton("📺 Groups / Channels", callback_data="main_channels"))
+    markup.add(InlineKeyboardButton("😍 Groups / Channels", callback_data="main_channels"))
     markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
-    text = "📦 <b>Offers</b>\n\nEach offer has a fixed price and includes the channels shown below."
+    text = "🎉 <b>Offers</b>\n\nEach offer has a fixed price and includes the channels shown below."
     if not bundles:
         text = "No offers available right now."
     if message_id:
@@ -1737,7 +1863,7 @@ def _render_bundle_detail(chat_id, message_id, bundle_id, user_view=False):
     channels = _bundle_channels(bundle)
     names = "\n".join(f"• {escape(ch.get('name', 'Channel'))}" for ch in channels) or "• No valid channels"
     description = escape(bundle.get('description') or 'No description provided.')
-    text = (f"📦 <b>{escape(bundle.get('title', 'Unnamed'))}</b>\n\n{description}\n\n"
+    text = (f"🎉 <b>{escape(bundle.get('title', 'Unnamed'))}</b>\n\n{description}\n\n"
             f"<b>Included channels:</b>\n{names}\n\n"
             f"⏱ Duration: <b>{escape(_bundle_duration_label(bundle))}</b>\n"
             f"💰 <b>Fixed price: ₹{int(bundle.get('price', 0))}</b>")
@@ -1750,7 +1876,7 @@ def _render_bundle_detail(chat_id, message_id, bundle_id, user_view=False):
         markup.add(InlineKeyboardButton("📝 Edit Description", callback_data=f"obdesc_{bundle['bundle_id']}"))
         markup.add(InlineKeyboardButton("💰 Edit Price", callback_data=f"obprice_{bundle['bundle_id']}"))
         markup.add(InlineKeyboardButton("⏱ Edit Duration", callback_data=f"obduration_{bundle['bundle_id']}"))
-        markup.add(InlineKeyboardButton("📺 Select Channels", callback_data=f"obchannels_{bundle['bundle_id']}"))
+        markup.add(InlineKeyboardButton("😍 Select Channels", callback_data=f"obchannels_{bundle['bundle_id']}"))
         markup.add(InlineKeyboardButton("🔴 Disable" if bundle.get('enabled') else "🟢 Enable", callback_data=f"obtoggle_{bundle['bundle_id']}"))
         markup.add(InlineKeyboardButton("🗑 Delete", callback_data=f"obdelete_{bundle['bundle_id']}"))
         markup.add(InlineKeyboardButton("⬅️ Back", callback_data="oblist"))
@@ -1826,7 +1952,7 @@ def _render_bundle_channel_picker(chat_id, message_id, bundle_id=None):
         markup.add(InlineKeyboardButton(f"{mark} {ch['name']}", callback_data=f"obpick_{ch['channel_id']}"))
     markup.add(InlineKeyboardButton("💾 Save Offer", callback_data="obsave"))
     markup.add(InlineKeyboardButton("❌ Cancel", callback_data="oblist"))
-    text = f"📺 Select channels for <b>{escape(state.get('title', 'offer'))}</b>.\nSelected: {len(selected)}"
+    text = f"😍 Select channels for <b>{escape(state.get('title', 'offer'))}</b>.\nSelected: {len(selected)}"
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML")
     else:
@@ -1950,7 +2076,7 @@ def render_search_results(chat_id, message_id, user_id, keyword, page=0, message
         text = f"🔍 No channels found for \"{escape(keyword)}\"\n\nTry a different keyword."
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("🔍 New Search", callback_data="search_prompt"))
-        markup.add(InlineKeyboardButton("📺 All Channels", callback_data="cart_browse"))
+        markup.add(InlineKeyboardButton("😍 All Channels", callback_data="cart_browse"))
         if message_id:
             edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=message_obj)
         else:
@@ -1983,7 +2109,7 @@ def render_search_results(chat_id, message_id, user_id, keyword, page=0, message
     if nav:
         markup.row(*nav)
     markup.add(InlineKeyboardButton("🔍 New Search", callback_data="search_prompt"))
-    markup.add(InlineKeyboardButton("📺 All Channels", callback_data="cart_browse"))
+    markup.add(InlineKeyboardButton("😍 All Channels", callback_data="cart_browse"))
 
     text = f"🔍 <b>Search results</b> for \"{escape(keyword)}\"\n\nShowing {start + 1}-{end} of {total}:"
     if message_id:
@@ -2430,9 +2556,7 @@ def setup_commands():
         BotCommand("cancel", "Cancel a pending payment"),
         BotCommand("help", "Help & contact admin"),
     ]
-    admin_commands = [
-        BotCommand("users", "List all active subscribers & plans"),
-    ] + user_commands + [
+    admin_commands =  user_commands + [
         BotCommand("add", "Add a new channel"),
         BotCommand("channels", "Manage channels (edit/delete)"),
         BotCommand("bundles", "Manage offers (custom fixed-price offers)"),
@@ -2449,6 +2573,7 @@ def setup_commands():
         BotCommand("pending", "Review pending payment checkouts"),
         BotCommand("reactcachestatus", "Check auto-react backlog size"),
         BotCommand("clearreactcache", "Clear the auto-react backlog"),
+        BotCommand("users", "List all active subscribers & plans"),
     ]
     group_admin_commands = [
         BotCommand("remove", "Remove user(s) from this group/channel"),
@@ -2576,7 +2701,7 @@ def _render_trial_detail(chat_id, message_id, trial_id):
     updated_str = updated.strftime("%Y-%m-%d") if updated else "?"
     edit_menu(chat_id, message_id,
               f"🎁 *{escape_markdown(trial.get('name') or 'Unnamed')}*\n\n"
-              f"📺 Channel: {escape_markdown(ch_name)}\n"
+              f"😍 Channel: {escape_markdown(ch_name)}\n"
               f"⏱ Duration: {format_label(trial.get('duration_minutes'))}\n"
               f"Status: {status}\n"
               f"Created: {created_str}\n"
@@ -3173,7 +3298,7 @@ def _process_trial_claim(call, raw_trial_id):
     ch_name = channel.get('name') or f"Channel {ch_id}"
     text = (
         f"🎁 <b>Free trial activated!</b>\n\n"
-        f"📺 Channel: {escape_markdown(ch_name)}\n"
+        f"😍 Channel: {escape_markdown(ch_name)}\n"
         f"⏱ Duration: {format_label(trial['duration_minutes'])}\n"
         f"⌛ Expires: {expiry_dt.strftime('%Y-%m-%d %H:%M')}\n\n"
         f"🔗 Your invite link (single use):\n{link_str}\n\n"
@@ -3223,7 +3348,7 @@ def cb_buy_paid(call):
     if not ch_data:
         edit_menu(call.message.chat.id, call.message.message_id,
                   "❌ This channel is no longer available.",
-                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse")),
+                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 Browse Channels", callback_data="cart_browse")),
                   message_obj=call.message)
         return
     edit_plan_selection(call.message.chat.id, call.message.message_id, ch_data, call.from_user.id)
@@ -3276,10 +3401,23 @@ def start_handler(message):
 
 @bot.message_handler(commands=['buy'])
 def buy_handler(message):
-    record_seen_user(message.from_user)
-    # Dismiss previous bot reply with animation
-    dismiss_previous(message.chat.id, message.from_user.id)
-    show_all_channels(message.chat.id, message.from_user.id)
+    try:
+        record_seen_user(message.from_user)
+        user_id = getattr(message.from_user, 'id', None)
+        chat_id = getattr(message.chat, 'id', None)
+        print(f"[buy] chat={chat_id} user={user_id}")
+        if not user_id or not chat_id:
+            print("[buy] missing ids; aborting")
+            return
+        dismiss_previous(chat_id, user_id)
+        show_all_channels(chat_id, user_id)
+    except Exception as e:
+        print(f"[buy] handler error: {e}")
+        traceback.print_exc()
+        try:
+            bot.send_message(message.chat.id, "⚠️ Something went wrong. Please try again.")
+        except Exception:
+            pass
 
 @bot.message_handler(commands=['myplans'])
 def myplans_handler(message):
@@ -3326,7 +3464,7 @@ def cb_renew(call):
     if not ch_data:
         edit_menu(call.message.chat.id, call.message.message_id,
                   "❌ This channel is no longer available.",
-                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse")),
+                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 Browse Channels", callback_data="cart_browse")),
                   message_obj=call.message)
         return
     edit_plan_selection(call.message.chat.id, call.message.message_id, ch_data, call.from_user.id)
@@ -3446,7 +3584,7 @@ def show_users_list(chat_id, user_id=None, message=None, message_id=None, page=0
                 f"  • 🆔 *User ID:* `{uid}`\n"
                 f"  • 📛 *First Name:* {first_name} | *Last Name:* {last_name}\n"
                 f"  • 🏷 *Username:* {username}\n"
-                f"  • 📺 *Plan/Offer:* {plan_display}\n"
+                f"  • 😍 *Plan/Offer:* {plan_display}\n"
                 f"  • 📅 *Start Date:* {start_str}\n"
                 f"  • ⏳ *Expiry:* {expiry_str}\n\n"
             )
@@ -3768,7 +3906,7 @@ def _notify_waitlist(ch_id, ch_name):
         try:
             markup = InlineKeyboardMarkup()
             if link:
-                markup.add(InlineKeyboardButton("📺 View Channel", url=link))
+                markup.add(InlineKeyboardButton("😍 View Channel", url=link))
             bot.send_message(
                 doc['user_id'],
                 f"🔔 Good news! *{ch_name}* is back!\n\nTap below to check out the plans and grab a subscription.",
@@ -4131,23 +4269,47 @@ def cart_add_handler(call):
     bot.answer_callback_query(call.id, "Added to cart! 🛒")
     if not ch_data:
         edit_menu(call.message.chat.id, call.message.message_id, "❌ That plan is no longer available.",
-                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse")),
+                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 Browse Channels", callback_data="cart_browse")),
                   message_obj=call.message)
         return
     # Option selected -> the plan-picker message instantly becomes the cart summary (no lingering message)
     text, markup = build_cart_summary(call.from_user.id)
-    edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="Markdown", message_obj=call.message)
+    try:
+        edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=call.message)
+    except Exception as e:
+        print(f"[cart_add] edit_menu failed: {e}")
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        bot.send_message(call.message.chat.id, text, reply_markup=markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "cart_view")
 def cart_view_handler(call):
     bot.answer_callback_query(call.id)
     text, markup = build_cart_summary(call.from_user.id)
-    edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="Markdown", message_obj=call.message)
+    try:
+        edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=call.message)
+    except Exception as e:
+        print(f"[cart_view] edit_menu failed: {e}")
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        bot.send_message(call.message.chat.id, text, reply_markup=markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data == "cart_browse")
 def cart_browse_handler(call):
     bot.answer_callback_query(call.id)
-    edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message)
+    try:
+        edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message)
+    except Exception as e:
+        print(f"[cart_browse] edit_all_channels failed: {e}")
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        show_all_channels(call.message.chat.id, call.from_user.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "cart_clear_ask")
 def cart_clear_ask_handler(call):
@@ -4155,14 +4317,30 @@ def cart_clear_ask_handler(call):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ Yes, Clear Cart", callback_data="cart_clear_confirm"))
     markup.add(InlineKeyboardButton("❌ Cancel", callback_data="cart_view"))
-    edit_menu(call.message.chat.id, call.message.message_id, "⚠️ Clear your entire cart?", reply_markup=markup, message_obj=call.message)
+    try:
+        edit_menu(call.message.chat.id, call.message.message_id, "⚠️ Clear your entire cart?", reply_markup=markup, message_obj=call.message)
+    except Exception as e:
+        print(f"[cart_clear_ask] edit_menu failed: {e}")
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        bot.send_message(call.message.chat.id, "⚠️ Clear your entire cart?", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "cart_clear_confirm")
 def cart_clear_confirm_handler(call):
     user_carts[call.from_user.id] = []
     _clear_persisted_cart(call.from_user.id)
     bot.answer_callback_query(call.id, "Cart cleared.")
-    edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message)
+    try:
+        edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message)
+    except Exception as e:
+        print(f"[cart_clear_confirm] edit_all_channels failed: {e}")
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        show_all_channels(call.message.chat.id, call.from_user.id)
 
 
 # --- USER: CHECKOUT & PAYMENT ---
@@ -4311,7 +4489,7 @@ def cart_checkout_handler(call):
         _persist_cart(user_id)
         edit_menu(call.message.chat.id, call.message.message_id,
                   "❌ Couldn't show the payment QR right now. Please try again.",
-                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("📺 Browse Channels", callback_data="cart_browse")),
+                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 Browse Channels", callback_data="cart_browse")),
                   message_obj=call.message)
         return
 
@@ -4791,7 +4969,7 @@ def stats_handler(message):
 
     text = (
         "📊 *Bot Stats*\n\n"
-        f"📺 Channels: {total_channels}\n"
+        f"😍 Channels: {total_channels}\n"
         f"👥 Active Subscriptions: {active_subs}\n"
         f"🧾 Total Sales: {total_sales}\n"
         f"💰 Total Revenue: ₹{total_revenue}\n"
