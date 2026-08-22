@@ -2075,26 +2075,26 @@ def _send_bundle_preview_media(chat_id, bundle, channels):
     try:
         screenshots = [ch.get('screenshot_file_id') for ch in channels if ch.get('screenshot_file_id')]
         
-        # Build numbered channel list
+        # Build numbered channel list with clean formatting
         channel_lines = []
         for idx, ch in enumerate(channels, 1):
             ch_name = escape(ch.get('name', f'Channel {idx}'))
             desc = ch.get('description')
             if desc:
-                channel_lines.append(f"<b>{idx}.</b> 😍 <b>{ch_name}</b>\n   {escape(desc)}")
+                channel_lines.append(f"<b>{idx}. {ch_name}</b>\nDescription: {escape(desc)}")
             else:
-                channel_lines.append(f"<b>{idx}.</b> 😍 <b>{ch_name}</b>")
+                channel_lines.append(f"<b>{idx}. {ch_name}</b>")
         
-        # Build attractive UI
+        # Build attractive UI with bundle details first
         text = (
             f"╭━━━ 🎉 <b>{escape(bundle.get('title', 'Offer'))}</b> ━━━╮\n\n"
-            f"📺 <b>Included Channels:</b>\n"
-            f"{chr(10).join(channel_lines)}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
             f"💰 <b>𝙁𝙄𝙓𝙀𝘿 𝙋𝙍𝙄𝘾𝙀</b>\n"
             f"   ₹<b>{int(bundle.get('price', 0))}</b>\n\n"
             f"⏱ <b>𝘿𝙐𝙍𝘼𝙏𝙄𝙊𝙉</b>\n"
             f"   {escape(_bundle_duration_label(bundle))}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📺 <b>𝙊𝙁𝙁𝙀𝙍 𝘾𝙊𝙉𝙏𝘼𝙄𝙉𝙎:</b>\n"
+            f"{chr(10).join(channel_lines)}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🔥 Ready to lock it in?\n"
             f"Tap below to grab this offer 👇"
