@@ -470,6 +470,8 @@ def get_force_join_settings():
             channels.append({
                 "channel": legacy_channel,
                 "title": legacy_title or legacy_channel,
+                "is_private": False,
+                "invite_link": None,
             })
         return {
             "enabled": bool(doc.get("enabled", False)),
@@ -477,9 +479,19 @@ def get_force_join_settings():
             "image_file_id": doc.get("image_file_id"),
         }
     
+    # Ensure all channels have required fields
+    channels = []
+    for ch in doc.get("channels", []):
+        channels.append({
+            "channel": ch.get("channel", ""),
+            "title": ch.get("title") or ch.get("channel", ""),
+            "is_private": ch.get("is_private", False),
+            "invite_link": ch.get("invite_link"),
+        })
+    
     return {
         "enabled": bool(doc.get("enabled", False)),
-        "channels": doc.get("channels", []),
+        "channels": channels,
         "image_file_id": doc.get("image_file_id"),
     }
 
@@ -500,11 +512,25 @@ def _fj_resolve_chat_id(channel):
 
 def _fj_channel_url(channel_obj):
     """Best-effort https://t.me/... link for a channel dict, or None if it
-    cannot be built (numeric id with no resolvable public username)."""
-    channel = channel_obj.get('channel', '') if isinstance(channel_obj, dict) else str(channel_obj)
+    cannot be built. For private channels, uses the stored invite link."""
+    if isinstance(channel_obj, dict):
+        channel = channel_obj.get('channel', '')
+        invite_link = channel_obj.get('invite_link')
+        is_private = channel_obj.get('is_private', False)
+    else:
+        channel = str(channel_obj)
+        invite_link = None
+        is_private = False
+    
     raw = str(channel).strip() if channel else ''
     if not raw:
         return None
+    
+    # For private channels, use the stored invite link
+    if is_private and invite_link:
+        return invite_link
+    
+    # For public channels or channels without stored invite link
     if raw.lstrip('-').isdigit():
         try:
             uname = getattr(bot.get_chat(int(raw)), 'username', None)
@@ -513,9 +539,29 @@ def _fj_channel_url(channel_obj):
             return None
     return f"https://t.me/{raw.lstrip('@')}"
 
+def _fj_check_pending_join_request(user_id, chat_id):
+    """Check if the user has a pending join request for the given channel.
+    Returns True if a pending join request exists, False otherwise.
+    The bot must be an admin in the channel with can_invite_users permission."""
+    try:
+        request = bot.get_chat_join_request(chat_id, user_id)
+        return request is not None
+    except telebot.apihelper.ApiTelegramException as e:
+        code = getattr(e, 'error_code', None)
+        desc = (getattr(e, 'description', '') or '').lower()
+        if code == 400:
+            if 'user not found' in desc or 'no pending join request' in desc or 'join_request' in desc:
+                return False
+            if 'chat not found' in desc or 'bot is not a member' in desc:
+                return False
+        return False
+    except Exception:
+        return False
+
 def _fj_membership_status(user_id, settings):
     """Returns ('joined', None), ('not_joined', None) or ('error', reason).
     For multiple channels, user must join ALL of them.
+    For private channels, also checks pending join requests.
     reason is 'config' (channel gone / bot not in it / no rights) or 'transient'
     (network, rate-limit, other API failure). Never raises — the middleware and
     the Try-Again button both rely on this to keep the bot running no matter what."""
@@ -537,11 +583,21 @@ def _fj_membership_status(user_id, settings):
                 is_member = getattr(member, 'is_member', None)
                 if is_member in (None, True):
                     continue
+            
+            # Not a member — check if there's a pending join request for private channels
+            if ch.get('is_private'):
+                if _fj_check_pending_join_request(user_id, chat_id):
+                    continue  # Pending request exists, treat as joined for force join
+            
             not_joined.append(ch.get('title') or ch.get('channel'))
         except telebot.apihelper.ApiTelegramException as e:
             code = getattr(e, 'error_code', None)
             desc = (getattr(e, 'description', '') or '').lower()
             if code == 400 and ('user not found' in desc or 'user_not_participant' in desc or 'participant' in desc):
+                # For private channels, also check pending join request on error
+                if ch.get('is_private'):
+                    if _fj_check_pending_join_request(user_id, chat_id):
+                        continue
                 not_joined.append(ch.get('title') or ch.get('channel'))
             else:
                 return 'error', 'config'
@@ -599,11 +655,16 @@ def send_force_join_block(chat_id, user_id):
     
     text = FJ_MSG_TEXT
     
+    # For private channels, add instructions about join requests
+    private_channels = [ch for ch in channels if ch.get('is_private')]
+    if private_channels:
+        text += "\n\n⚠️ *Note: For private channels, submit a join request and tap Try Again once submitted.*"
+    
     try:
         img = settings.get('image_file_id')
         if img:
-            return bot.send_photo(chat_id, img, caption=text, reply_markup=markup, vanish_delay=None)
-        return bot.send_message(chat_id, text, reply_markup=markup, vanish_delay=None)
+            return bot.send_photo(chat_id, img, caption=text, reply_markup=markup, parse_mode="Markdown", vanish_delay=None)
+        return bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown", vanish_delay=None)
     except Exception as e:
         print(f"[force-join] could not send block screen to {user_id}: {e}")
         return None
@@ -676,7 +737,8 @@ def send_force_join_menu(chat_id, message_id=None):
         channel_lines = []
         for i, ch in enumerate(channels, 1):
             title = ch.get('title') or ch.get('channel') or f"Channel {i}"
-            channel_lines.append(f"{i}. {escape_markdown(title)} (`{escape_markdown(ch.get('channel', ''))}`)")
+            channel_type = "🔒 Private" if ch.get('is_private') else "🌐 Public"
+            channel_lines.append(f"{i}. {escape_markdown(title)} (`{escape_markdown(ch.get('channel', ''))}`) — {channel_type}")
         channel_str = "\n".join(channel_lines)
     else:
         channel_str = "— no channels set —"
@@ -742,7 +804,7 @@ def _fj_save_channel(message):
         return
     chat_id = _fj_resolve_chat_id(raw)
     if chat_id is None:
-        send_admin_reply("❌ That doesn't look like a channel. Send a username (e.g. @my_updates) or a numeric ID.")
+        send_admin_reply("❌ That doesn't look like a channel. Send a username (e.g. @my_updates), a numeric ID, or a private invite link.")
         return
     try:
         chat_obj = bot.get_chat(chat_id)
@@ -750,6 +812,9 @@ def _fj_save_channel(message):
         send_admin_reply("❌ Could not find that channel. Double-check the username/ID and that the bot can access it.")
         return
     title = getattr(chat_obj, 'title', None) or raw
+    username = getattr(chat_obj, 'username', None)
+    is_private = not bool(username)
+    invite_link = getattr(chat_obj, 'invite_link', None)
     
     # Add to channels list (multi-channel support)
     settings = get_force_join_settings()
@@ -761,9 +826,22 @@ def _fj_save_channel(message):
             send_admin_reply(f"❌ Channel *{escape_markdown(title)}* is already in the list.", parse_mode="Markdown")
             return
     
-    channels.append({"channel": raw, "title": title})
+    channels.append({
+        "channel": raw,
+        "title": title,
+        "is_private": is_private,
+        "invite_link": invite_link,
+    })
     save_force_join_settings(channels=channels)
-    send_admin_reply(f"✅ Added *{escape_markdown(title)}* ({raw}) to Force Join.\n\nTotal channels: {len(channels)}\n\nOpen /forcejoin to see the updated settings.", parse_mode="Markdown")
+    
+    channel_type = "🔒 Private" if is_private else "🌐 Public"
+    send_admin_reply(
+        f"✅ Added *{escape_markdown(title)}* ({raw}) to Force Join.\n"
+        f"Type: {channel_type}\n"
+        f"Total channels: {len(channels)}\n\n"
+        f"Open /forcejoin to see the updated settings.",
+        parse_mode="Markdown"
+    )
 
 @bot.callback_query_handler(func=lambda call: call.data == "fj_removechannel_menu")
 def cb_fj_removechannel_menu(call):
@@ -847,7 +925,8 @@ def cb_fj_verify(call):
     for i, ch in enumerate(channels, 1):
         channel = ch.get('channel', '')
         chat_id = _fj_resolve_chat_id(channel)
-        lines.append(f"━━━ Channel {i}: {ch.get('title', channel)} ━━━")
+        channel_type = "🔒 Private" if ch.get('is_private') else "🌐 Public"
+        lines.append(f"━━━ Channel {i}: {ch.get('title', channel)} ({channel_type}) ━━━")
         try:
             chat_obj = bot.get_chat(chat_id)
             title = getattr(chat_obj, 'title', None) or channel
@@ -866,6 +945,22 @@ def cb_fj_verify(call):
                     lines.append(f"⚠️ Bot status: {bstatus}. Add the bot so checks work.")
             except Exception:
                 lines.append("⚠️ Bot is not in the channel. Add it so membership checks work.")
+        
+        # For private channels, check if we can access join requests
+        if ch.get('is_private'):
+            try:
+                # Try to get join request info to verify bot has permission
+                test_request = bot.get_chat_join_request(chat_id, bot.user.id)
+                lines.append("✅ Bot can check pending join requests.")
+            except telebot.apihelper.ApiTelegramException as e:
+                code = getattr(e, 'error_code', None)
+                desc = (getattr(e, 'description', '') or '').lower()
+                if code == 400 and ('user not found' in desc or 'no pending' in desc):
+                    lines.append("✅ Bot can check pending join requests.")
+                else:
+                    lines.append("⚠️ Bot may not have permission to check join requests. Ensure bot is admin with 'Invite Users' permission.")
+            except Exception:
+                lines.append("⚠️ Could not verify join request checking ability.")
     send_admin_reply("\n".join(lines))
 
 # ---- User-facing Force Join buttons ----
