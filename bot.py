@@ -460,7 +460,7 @@ def get_force_join_settings():
     Supports both legacy single-channel format and new multi-channel format."""
     doc = settings_col.find_one({"_id": FJ_SETTINGS_ID})
     if not doc:
-        return {"enabled": False, "channels": [], "image_file_id": None}
+        return {"enabled": False, "channels": [], "image_file_id": None, "auto_approve": False}
     
     # Backward compatibility: convert legacy single-channel to list format
     if "channels" not in doc:
@@ -478,6 +478,7 @@ def get_force_join_settings():
             "enabled": bool(doc.get("enabled", False)),
             "channels": channels,
             "image_file_id": doc.get("image_file_id"),
+            "auto_approve": bool(doc.get("auto_approve", False)),
         }
     
     # Ensure all channels have required fields
@@ -494,6 +495,7 @@ def get_force_join_settings():
         "enabled": bool(doc.get("enabled", False)),
         "channels": channels,
         "image_file_id": doc.get("image_file_id"),
+        "auto_approve": bool(doc.get("auto_approve", False)),
     }
 
 def save_force_join_settings(**fields):
@@ -684,12 +686,12 @@ def send_force_join_block(chat_id, user_id):
     markup = InlineKeyboardMarkup(row_width=1)
     
     # Add a join button for each channel
-    for ch in channels:
+    for idx, ch in enumerate(channels, 1):
         url = _fj_channel_url(ch)
         if url:
-            markup.add(InlineKeyboardButton(f"📢 {ch.get('title', 'Join Channel')}", url=url))
+            markup.add(InlineKeyboardButton(f"📢 Join Channel {idx}", url=url))
         else:
-            markup.add(InlineKeyboardButton(f"📢 {ch.get('title', 'Join Channel')}", callback_data=FJ_CB_JOIN))
+            markup.add(InlineKeyboardButton(f"📢 Join Channel {idx}", callback_data=FJ_CB_JOIN))
     
     markup.add(InlineKeyboardButton(FJ_BTN_RETRY, callback_data=FJ_CB_RETRY))
     
@@ -1056,8 +1058,8 @@ def cb_fj_join(call):
         channel = channels[0].get('channel', '')
         bot.answer_callback_query(call.id, f"Open Telegram and search for: {channel}", show_alert=True)
     elif len(channels) > 1:
-        names = ", ".join(ch.get('channel', '') for ch in channels)
-        bot.answer_callback_query(call.id, f"Join these channels in Telegram:\n{names}", show_alert=True)
+        lines = [f"Channel {i}: {ch.get('channel', '')}" for i, ch in enumerate(channels, 1)]
+        bot.answer_callback_query(call.id, "Join these channels in Telegram:\n" + "\n".join(lines), show_alert=True)
     else:
         bot.answer_callback_query(call.id, "No channels configured.", show_alert=True)
 
@@ -1187,6 +1189,7 @@ def sync_all_tracked_chats():
 # Intentionally NOT persisted to Mongo — carts are transient (pre-payment); if the bot restarts
 # mid-browsing the user just re-adds items, no paid transaction data is ever at risk.
 user_carts = {}
+_bundle_nav_state = {}  # chat_id -> {screenshots, current_index, bundle_id, message_id}
 
 # How old data has to be before /cleanup will offer to delete it
 CLEANUP_PAYMENTS_DAYS = 180   # keep itemized payment logs for 6 months; lifetime totals in counters_col are unaffected
@@ -2011,13 +2014,21 @@ def bundles_command(message):
 def cb_main_bundles(call):
     record_seen_user(call.from_user)
     bot.answer_callback_query(call.id)
-    _render_user_bundles(call.message.chat.id, call.message.message_id)
+    chat_id = call.message.chat.id
+    _bundle_nav_state.pop(chat_id, None)
+    _render_user_bundles(chat_id, call.message.message_id)
+
 
 @bot.callback_query_handler(func=lambda call: call.data == "oblist")
 def cb_bundle_admin_list(call):
     if _require_admin(call):
         bot.answer_callback_query(call.id)
         _render_bundle_list(call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'noop')
+def bundle_nav_noop(call):
+    bot.answer_callback_query(call.id)
+
 
 def _render_user_bundles(chat_id, message_id=None):
     bundles = list(offer_bundles_col.find({"admin_id": ADMIN_ID, "enabled": True}).sort("created_at", 1))
@@ -2036,9 +2047,10 @@ def _render_user_bundles(chat_id, message_id=None):
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
 
 def _send_bundle_preview_media(chat_id, bundle, channels):
-    """Send preview for each channel: screenshot with description, or description only."""
+    """Send bundle preview with screenshot navigation arrows."""
     try:
-        # Build all descriptions
+        screenshots = [ch.get('screenshot_file_id') for ch in channels if ch.get('screenshot_file_id')]
+        
         desc_parts = []
         for ch in channels:
             ch_name = escape(ch.get('name', 'Channel'))
@@ -2046,56 +2058,97 @@ def _send_bundle_preview_media(chat_id, bundle, channels):
             if desc:
                 desc_parts.append(f"😍 <b>{ch_name}</b>\n{escape(desc)}")
         
-        # Build bundle details text
         bundle_details = (
             f"\n🎉 <b>{escape(bundle.get('title', 'Offer'))}</b>\n\n"
             f"💰 <b>Fixed price: ₹{int(bundle.get('price', 0))}</b>\n"
             f"⏱ Duration: <b>{escape(_bundle_duration_label(bundle))}</b>\n\n"
             "Tap below to purchase 👇"
         )
-        
-        # Combine descriptions and bundle details
         full_text = "\n\n".join(desc_parts) + bundle_details if desc_parts else bundle_details
         
-        # Collect screenshots
-        screenshots = [ch.get('screenshot_file_id') for ch in channels if ch.get('screenshot_file_id')]
+        markup = InlineKeyboardMarkup(row_width=5)
         
         if screenshots:
-            # Send first screenshot with all text and buttons
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("✅ Purchase", callback_data=f"obcheckout_{bundle['bundle_id']}"))
-            markup.add(InlineKeyboardButton("⬅️ Back to Offers", callback_data="main_obundles"))
-            
-            # First photo gets all descriptions + bundle details as caption
-            first_caption = f"🎉 <b>{escape(bundle.get('title', 'Offer Preview'))}</b>\n\n<b>Included channels:</b> {len(channels)}\n\n"
-            if desc_parts:
-                first_caption += "\n\n".join(desc_parts) + "\n\n"
-            first_caption += f"💰 <b>Fixed price: ₹{int(bundle.get('price', 0))}</b>\n⏱ Duration: <b>{escape(_bundle_duration_label(bundle))}</b>\n\nTap below to purchase 👇"
-            
-            try:
-                bot.send_photo(chat_id, screenshots[0], caption=first_caption, reply_markup=markup, parse_mode="HTML")
-            except Exception as e:
-                print(f"[bundle_preview_media] failed to send first screenshot: {e}")
-                # Fallback: send text only with buttons
-                bot.send_message(chat_id, full_text, reply_markup=markup, parse_mode="HTML")
-            
-            # Send remaining screenshots as media group
-            if len(screenshots) > 1:
-                media_group = [InputMediaPhoto(screenshot) for screenshot in screenshots[1:]]
-                try:
-                    bot.send_media_group(chat_id, media_group)
-                except Exception as e:
-                    print(f"[bundle_preview_media] media group failed: {e}")
+            total = len(screenshots)
+            markup.row(
+                InlineKeyboardButton("⬅️", callback_data=f"bundleprev_{bundle['bundle_id']}_0"),
+                InlineKeyboardButton(f"1/{total}", callback_data="noop"),
+                InlineKeyboardButton("➡️", callback_data=f"bundlenext_{bundle['bundle_id']}_0")
+            )
+        
+        markup.add(
+            InlineKeyboardButton("✅ Purchase", callback_data=f"obcheckout_{bundle['bundle_id']}"),
+            InlineKeyboardButton("⬅️ Back to Offers", callback_data="main_obundles")
+        )
+        
+        if screenshots:
+            msg = bot.send_photo(chat_id, screenshots[0], caption=full_text, reply_markup=markup, parse_mode="HTML")
+            _bundle_nav_state[chat_id] = {
+                'screenshots': screenshots,
+                'current_index': 0,
+                'bundle_id': bundle['bundle_id'],
+                'message_id': msg.message_id,
+            }
         else:
-            # No screenshots, send text only with buttons
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("✅ Purchase", callback_data=f"obcheckout_{bundle['bundle_id']}"))
-            markup.add(InlineKeyboardButton("⬅️ Back to Offers", callback_data="main_obundles"))
             bot.send_message(chat_id, full_text, reply_markup=markup, parse_mode="HTML")
             
     except Exception as e:
         print(f"[bundle_preview_media] error: {e}")
-        # Don't crash the whole flow if preview fails
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('bundleprev_') or call.data.startswith('bundlenext_'))
+def bundle_nav_handler(call):
+    """Handle prev/next navigation for bundle screenshot preview."""
+    chat_id = call.message.chat.id
+    state = _bundle_nav_state.get(chat_id)
+    if not state:
+        bot.answer_callback_query(call.id, "Session expired. Please open the offer again.")
+        return
+    
+    parts = call.data.split('_')
+    direction = parts[0]
+    bundle_id = parts[1]
+    current_index = int(parts[2])
+    
+    if str(bundle_id) != str(state['bundle_id']):
+        bot.answer_callback_query(call.id, "Invalid session.")
+        return
+    
+    screenshots = state['screenshots']
+    total = len(screenshots)
+    if total == 0:
+        bot.answer_callback_query(call.id)
+        return
+    
+    if direction == 'bundleprev':
+        new_index = (current_index - 1) % total
+    else:
+        new_index = (current_index + 1) % total
+    
+    state['current_index'] = new_index
+    
+    markup = InlineKeyboardMarkup(row_width=5)
+    markup.row(
+        InlineKeyboardButton("⬅️", callback_data=f"bundleprev_{bundle_id}_{new_index}"),
+        InlineKeyboardButton(f"{new_index + 1}/{total}", callback_data="noop"),
+        InlineKeyboardButton("➡️", callback_data=f"bundlenext_{bundle_id}_{new_index}")
+    )
+    markup.add(
+        InlineKeyboardButton("✅ Purchase", callback_data=f"obcheckout_{bundle_id}"),
+        InlineKeyboardButton("⬅️ Back to Offers", callback_data="main_obundles")
+    )
+    
+    try:
+        bot.edit_message_media(
+            chat_id=chat_id,
+            message_id=state['message_id'],
+            media=InputMediaPhoto(screenshots[new_index]),
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print(f"[bundle_nav] error: {e}")
+        bot.answer_callback_query(call.id, "Couldn't update preview. Please try again.")
 
 def _render_bundle_detail(chat_id, message_id, bundle_id, user_view=False):
     bundle = _bundle_doc(bundle_id)
