@@ -448,7 +448,7 @@ def clear_menu_image():
 
 FJ_SETTINGS_ID = "force_join"
 FJ_MSG_TEXT = "<i>Hey <a href='tg://user?id={user_id}'>{username}</a> </i>👋\n\nJoin the channels below to unlock access 🚀"
-FJ_BTN_JOIN = "📢 Join Channel"
+FJ_BTN_JOIN = "Join Channel"
 FJ_BTN_RETRY = "🔄 Try Again"
 FJ_CB_RETRY = "fj_retry"
 FJ_CB_JOIN = "fj_join"
@@ -689,9 +689,9 @@ def send_force_join_block(chat_id, user_id):
     for idx, ch in enumerate(channels, 1):
         url = _fj_channel_url(ch)
         if url:
-            markup.add(InlineKeyboardButton(f"📢 Join Channel {idx}", url=url))
+            markup.add(InlineKeyboardButton(f"Join Channel {idx}", url=url))
         else:
-            markup.add(InlineKeyboardButton(f"📢 Join Channel {idx}", callback_data=FJ_CB_JOIN))
+            markup.add(InlineKeyboardButton(f"Join Channel {idx}", callback_data=FJ_CB_JOIN))
     
     markup.add(InlineKeyboardButton(FJ_BTN_RETRY, callback_data=FJ_CB_RETRY))
     
@@ -900,7 +900,7 @@ def cb_fj_setchannel(call):
     if not _fj_admin(call):
         return
     msg = send_prompt(call.message.chat.id,
-        "📢 Send the channel username or numeric chat ID to add to Force Join, e.g. `@my_updates` or `-1001234567890`.\n\n"
+        "Send the channel username or numeric chat ID to add to Force Join, e.g. `@my_updates` or `-1001234567890`.\n\n"
         "Make sure the bot is a member (admin) of that channel so membership checks can run.\n\n"
         "Type /skip to cancel.",
         parse_mode="Markdown")
@@ -1778,7 +1778,7 @@ def channel_button_label(ch, position):
 def build_channel_list(user_id, back_to_menu=False):
     """Builds the (text, markup) for browsing all channels, with a cart button if the
     user already has items waiting. Returns (None, None) if no channels exist.
-    When back_to_menu is True, an extra '🏠 Main Menu' button is appended (used when this
+    When back_to_menu is True, an extra 'Home' button is appended (used when this
     view was reached from the main hub, so the user can step back out to it)."""
     channels = get_sorted_channels(ADMIN_ID)
     print(f"[build_channel_list] user={user_id} back_to_menu={back_to_menu} channel_count={len(channels)}")
@@ -1804,7 +1804,7 @@ def build_channel_list(user_id, back_to_menu=False):
     if contact_url:
         markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
     if back_to_menu:
-        markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
+        markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
         text = (f"👋 <b>Welcome Dallo !</b> \n\nShaana banne ki Koshish mat karna 😂😂\n\nPick a channel/group you'd like to join below 👇\n\n"
             f"💡 <b><i>Stack multiple channels in your cart and pay once — easy money 🫶🏻</i></b>")
     else:
@@ -1826,7 +1826,7 @@ def show_all_channels(chat_id, user_id, back_to_menu=False):
             if contact_url:
                 reply_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
             if back_to_menu:
-                reply_markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
+                reply_markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
             reply = bot.send_message(chat_id, "Nothing here right now 😕\nCheck back later or contact the admin.",
                               reply_markup=reply_markup)
             schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
@@ -1850,7 +1850,7 @@ def edit_all_channels(chat_id, message_id, user_id, message_obj=None, back_to_me
             if contact_url:
                 reply_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
             if back_to_menu:
-                reply_markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
+                reply_markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
             edit_menu(chat_id, message_id, "Nothing here right now 😕\nCheck back later or contact the admin.",
                       reply_markup=reply_markup,
                       message_obj=message_obj)
@@ -1881,7 +1881,7 @@ def build_main_menu():
     text = ("╭━━━ 🪩 𝙒𝙀𝙇𝘾𝙊𝙈𝙀 ━━━╮\n\n"
             "<i>Less Goooo </i> 👇\n\n"
             "😍 <b>Groups / Channels</b> — browse & join\n"
-            "🎉 <b>Offers</b> — stack channels for one price\n\n"
+            "🎉 <b>Offers</b> — Checkout Premium Packs in Cheap Price 🔥\n\n"
             "╰━━━━━━━━━━━━━━━━━━━━╯")
     return text, markup
 
@@ -1919,7 +1919,7 @@ def show_main_menu(chat_id, user_id):
     _render_main_menu(chat_id, user_id=user_id)
 
 def edit_main_menu(chat_id, message_id, message_obj=None):
-    """Rebuilds the main hub in place (used for the '🏠 Main Menu' back button)."""
+    """Rebuilds the main hub in place (used for the 'Home' back button)."""
     _render_main_menu(chat_id, message_id=message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "main_menu_back")
@@ -1979,7 +1979,7 @@ def cb_main_offers(call):
     if offer_bundles_col.count_documents({"enabled": True}) > 0:
         markup.add(InlineKeyboardButton("🎉 View Offers", callback_data="main_obundles"))
     markup.add(InlineKeyboardButton("😍 Groups / Channels", callback_data="main_channels"))
-    markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
     edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=call.message)
 
 # --- CUSTOM OFFER BUNDLES ---
@@ -2061,7 +2061,7 @@ def _render_user_bundles(chat_id, message_id=None):
         markup.add(InlineKeyboardButton(f"🎉 {bundle.get('title')} — ₹{bundle.get('price')}",
                                         callback_data=f"obuy_{bundle['bundle_id']}"))
     markup.add(InlineKeyboardButton("😍 Groups / Channels", callback_data="main_channels"))
-    markup.add(InlineKeyboardButton("🏠 Main Menu", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
     text = "🎉 <b>Offers</b>\n\nEach offer has a fixed price and includes the channels shown below."
     if not bundles:
         text = "No offers available right now."
@@ -2081,9 +2081,11 @@ def _send_bundle_preview_media(chat_id, bundle, channels):
             ch_name = escape(ch.get('name', f'Channel {idx}'))
             desc = ch.get('description')
             if desc:
-                channel_lines.append(f"<b>{idx}. {ch_name}</b>\nDescription: {escape(desc)}")
+                channel_lines.append(f"<b>{idx}. {ch_name}</b>\n<i>Description: {escape(desc)}</i>")
             else:
                 channel_lines.append(f"<b>{idx}. {ch_name}</b>")
+            if idx < len(channels):
+                channel_lines.append("━━━━━━━━━━━━━━━━━━━━")
         
         # Build attractive UI with bundle details first
         text = (
@@ -2106,7 +2108,7 @@ def _send_bundle_preview_media(chat_id, bundle, channels):
             total = len(screenshots)
             markup.row(
                 InlineKeyboardButton("◀️", callback_data=f"bundleprev_{bundle['bundle_id']}_0"),
-                InlineKeyboardButton(f"<b>{1}</b>/<b>{total}</b>", callback_data="noop"),
+                InlineKeyboardButton(f"{1}/{total}", callback_data="noop"),
                 InlineKeyboardButton("▶️", callback_data=f"bundlenext_{bundle['bundle_id']}_0")
             )
         
@@ -2116,12 +2118,19 @@ def _send_bundle_preview_media(chat_id, bundle, channels):
         )
         
         if screenshots:
-            msg = bot.send_photo(chat_id, screenshots[0], caption=text, reply_markup=markup, parse_mode="HTML")
+            # Add initial channel preview
+            first_channel = channels[0] if channels else None
+            first_channel_name = escape(first_channel.get('name', 'Channel 1')) if first_channel else 'Channel 1'
+            initial_text = text + f"\n\n👆 <b>Now viewing: 1. {first_channel_name}</b>"
+            
+            msg = bot.send_photo(chat_id, screenshots[0], caption=initial_text, reply_markup=markup, parse_mode="HTML")
             _bundle_nav_state[chat_id] = {
                 'screenshots': screenshots,
                 'current_index': 0,
                 'bundle_id': bundle['bundle_id'],
                 'message_id': msg.message_id,
+                'text': text,
+                'channels': channels,
             }
         else:
             bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
@@ -2161,22 +2170,37 @@ def bundle_nav_handler(call):
     
     state['current_index'] = new_index
     
+    # Get channel name for current screenshot
+    channels = state.get('channels', [])
+    current_channel = channels[new_index] if new_index < len(channels) else None
+    channel_name = escape(current_channel.get('name', f'Channel {new_index + 1}')) if current_channel else f'Channel {new_index + 1}'
+    
+    # Build caption with channel preview
+    base_text = state.get('text', '')
+    preview_text = f"\n\n👆 <b>Now viewing: {new_index + 1}. {channel_name}</b>"
+    
     markup = InlineKeyboardMarkup(row_width=5)
     markup.row(
-        InlineKeyboardButton("⬅️", callback_data=f"bundleprev_{bundle_id}_{new_index}"),
+        InlineKeyboardButton("◀️", callback_data=f"bundleprev_{bundle_id}_{new_index}"),
         InlineKeyboardButton(f"{new_index + 1}/{total}", callback_data="noop"),
-        InlineKeyboardButton("➡️", callback_data=f"bundlenext_{bundle_id}_{new_index}")
+        InlineKeyboardButton("▶️", callback_data=f"bundlenext_{bundle_id}_{new_index}")
     )
     markup.add(
-        InlineKeyboardButton("✅ Purchase", callback_data=f"obcheckout_{bundle_id}"),
-        InlineKeyboardButton("⬅️ Back to Offers", callback_data="main_obundles")
+        InlineKeyboardButton("✅ 𝙂𝙀𝙏 𝙊𝙁𝙁𝙀𝙍", callback_data=f"obcheckout_{bundle_id}"),
+        InlineKeyboardButton("⬅️ 𝘽𝘼𝘾𝙆", callback_data="main_obundles")
     )
     
     try:
+        # Include caption when editing media to preserve offer text
+        media = InputMediaPhoto(
+            screenshots[new_index],
+            caption=base_text + preview_text,
+            parse_mode="HTML"
+        )
         bot.edit_message_media(
             chat_id=chat_id,
             message_id=state['message_id'],
-            media=InputMediaPhoto(screenshots[new_index]),
+            media=media,
             reply_markup=markup
         )
         bot.answer_callback_query(call.id)
