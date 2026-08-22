@@ -17,7 +17,7 @@ try:
 except ImportError:
     qrcode = None
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputFile
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputFile, InputMediaPhoto
 from telebot.handler_backends import BaseMiddleware, CancelUpdate
 from pymongo import MongoClient
 from pymongo import ReturnDocument
@@ -545,36 +545,55 @@ def _fj_check_pending_join_request(user_id, chat_id):
     The bot must be an admin in the channel with can_invite_users permission."""
     try:
         request = bot.get_chat_join_request(chat_id, user_id)
-        print(f"[fj_check] found pending join request for user {user_id} in chat {chat_id}: {request is not None}")
-        return request is not None
+        has_request = request is not None
+        print(f"[fj_check] user {user_id} chat {chat_id}: get_chat_join_request returned {type(request).__name__} has_request={has_request}")
+        if has_request:
+            try:
+                req_user = getattr(request, 'from_user', None)
+                req_user_id = getattr(req_user, 'id', None) if req_user else None
+                req_status = getattr(request, 'status', None)
+                print(f"[fj_check] user {user_id} chat {chat_id}: request_user_id={req_user_id} request_status={req_status}")
+            except Exception as log_err:
+                print(f"[fj_check] user {user_id} chat {chat_id}: could not inspect request details: {log_err}")
+        return has_request
     except telebot.apihelper.ApiTelegramException as e:
         code = getattr(e, 'error_code', None)
         desc = (getattr(e, 'description', '') or '').lower()
-        print(f"[fj_check] api error for user {user_id} in chat {chat_id}: code={code} desc={desc}")
+        print(f"[fj_check] user {user_id} chat {chat_id}: ApiTelegramException code={code} desc={desc}")
         if code == 400:
-            if any(msg in desc for msg in [
-                'user not found',
+            known_no_request_messages = [
                 'no pending join request',
                 'join_request',
-                'user_not_participant',
-                'not found',
                 'USER_NOT_PARTICIPANT',
                 'NO_PENDING_JOIN_REQUEST',
-            ]):
-                return False
-            if any(msg in desc for msg in [
+                'user not found',
+                'not found',
+            ]
+            known_permission_messages = [
                 'chat not found',
                 'bot is not a member',
                 'forbidden',
                 'chat_write_forbidden',
                 'not enough rights',
                 'permission',
-            ]):
-                print(f"[fj_check] bot lacks permission for chat {chat_id}")
+                'bot was kicked',
+                'bot is not a member of',
+            ]
+            if any(msg in desc for msg in known_no_request_messages):
+                print(f"[fj_check] user {user_id} chat {chat_id}: no pending request (matched no-request pattern)")
                 return False
+            if any(msg in desc for msg in known_permission_messages):
+                print(f"[fj_check] user {user_id} chat {chat_id}: bot lacks permission to check join requests")
+                return False
+            print(f"[fj_check] user {user_id} chat {chat_id}: unhandled 400 error, treating as no request")
+            return False
+        print(f"[fj_check] user {user_id} chat {chat_id}: non-400 error code={code}, treating as no request")
+        return False
+    except AttributeError as e:
+        print(f"[fj_check] user {user_id} chat {chat_id}: AttributeError - get_chat_join_request may not be available: {e}")
         return False
     except Exception as e:
-        print(f"[fj_check] unexpected error for user {user_id} in chat {chat_id}: {e}")
+        print(f"[fj_check] user {user_id} chat {chat_id}: unexpected error type={type(e).__name__}: {e}")
         return False
 
 def _fj_membership_status(user_id, settings):
@@ -4632,9 +4651,88 @@ def bundle_checkout_handler(call):
         bot.answer_callback_query(call.id, "This offer is no longer available.", show_alert=True)
         return
     bot.answer_callback_query(call.id)
+    _send_bundle_preview(call.message.chat.id, call.message.message_id, bundle, channels)
+
+def _send_bundle_preview(chat_id, message_id, bundle, channels):
+    """Send a preview of the bundle with screenshots and descriptions before payment."""
+    screenshot_file_ids = []
+    description_parts = []
+    
+    for ch in channels:
+        screenshot = ch.get('screenshot_file_id')
+        if screenshot:
+            screenshot_file_ids.append(screenshot)
+        else:
+            desc = ch.get('description')
+            if desc:
+                description_parts.append(f"😍 <b>{escape(ch.get('name', 'Channel'))}</b>\n{escape(desc)}")
+    
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("✅ Proceed to Payment", callback_data=f"obpay_{bundle['bundle_id']}"))
+    markup.add(InlineKeyboardButton("⬅️ Back to Offers", callback_data="main_obundles"))
+    
+    try:
+        if screenshot_file_ids:
+            # Send screenshots as media group (album)
+            media_group = []
+            for idx, file_id in enumerate(screenshot_file_ids):
+                if idx == 0:
+                    # First image gets the bundle info as caption
+                    caption = (f"🎉 <b>{escape(bundle.get('title', 'Offer Preview'))}</b>\n\n"
+                               f"<b>Included channels:</b> {len(channels)}\n\n"
+                               "Swipe to see all channels 👇")
+                    media_group.append(InputMediaPhoto(file_id, caption=caption, parse_mode="HTML"))
+                else:
+                    media_group.append(InputMediaPhoto(file_id))
+            
+            bot.send_media_group(chat_id, media_group)
+            
+            # Send descriptions for channels without screenshots
+            if description_parts:
+                desc_text = "\n\n".join(description_parts)
+                bot.send_message(chat_id, desc_text, parse_mode="HTML")
+            
+            # Send the proceed button
+            preview_msg = bot.send_message(chat_id, 
+                f"💰 <b>Fixed price: ₹{int(bundle.get('price', 0))}</b>\n\n"
+                "Tap below to proceed to payment 👇",
+                reply_markup=markup, parse_mode="HTML")
+        else:
+            # No screenshots, just send descriptions
+            if description_parts:
+                desc_text = "\n\n".join(description_parts)
+            else:
+                desc_text = f"🎉 <b>{escape(bundle.get('title', 'Offer'))}</b>\n\nNo channel previews available."
+            
+            preview_msg = bot.send_message(chat_id, desc_text, reply_markup=markup, parse_mode="HTML")
+        
+        schedule_delete(chat_id, preview_msg.message_id, MENU_VANISH_SECONDS)
+    except Exception as e:
+        print(f"[bundle_preview] error: {e}")
+        # Fallback: proceed directly to payment
+        try:
+            _proceed_bundle_payment(chat_id, message_id, bundle)
+        except Exception as inner_e:
+            print(f"[bundle_preview] fallback payment also failed: {inner_e}")
+            edit_menu(chat_id, message_id, "❌ Couldn't load the offer preview. Please try again.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('obpay_'))
+def bundle_proceed_payment_handler(call):
+    bundle_id = _safe_bundle_id(call.data.split('_', 1)[1])
+    bundle = _bundle_doc(bundle_id)
+    channels = _bundle_channels(bundle) if bundle and bundle.get('enabled') else []
+    if not bundle or not channels or int(bundle.get('price', 0)) <= 0:
+        bot.answer_callback_query(call.id, "This offer is no longer available.", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    _proceed_bundle_payment(call.message.chat.id, call.message.message_id, bundle)
+
+def _proceed_bundle_payment(chat_id, message_id, bundle):
+    """Show the payment QR for the bundle."""
+    channels = _bundle_channels(bundle)
     snapshot = [{'channel_id': int(ch['channel_id']), 'name': ch['name']} for ch in channels]
     doc = {
-        'user_id': call.from_user.id, 'bundle_id': bundle_id,
+        'user_id': chat_id, 'bundle_id': bundle['bundle_id'],
         'bundle_title': bundle.get('title', 'Offer'), 'items': snapshot,
         'duration_minutes': bundle.get('duration_minutes'), 'amount': int(bundle['price']),
         'created_at': datetime.now()
@@ -4651,12 +4749,12 @@ def bundle_checkout_handler(call):
     markup.add(InlineKeyboardButton("❌ Cancel Payment", callback_data=f"obcancel_{token}"))
     try:
         qr_file = _make_payment_qr(UPI_ID, int(bundle['price']))
-        msg = bot.send_photo(call.message.chat.id, InputFile(qr_file, 'offer_payment_qr.png'),
+        msg = bot.send_photo(chat_id, InputFile(qr_file, 'offer_payment_qr.png'),
                              caption=caption, reply_markup=markup, parse_mode='HTML')
-        schedule_delete(call.message.chat.id, msg.message_id, QR_SHOW_SECONDS)
+        schedule_delete(chat_id, msg.message_id, QR_SHOW_SECONDS)
     except Exception:
         pending_offer_bundle_checkouts_col.delete_one({'_id': ObjectId(token)})
-        edit_menu(call.message.chat.id, call.message.message_id, "❌ Couldn't show the payment QR. Please try again.")
+        edit_menu(chat_id, message_id, "❌ Couldn't show the payment QR. Please try again.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('obcancel_'))
 def bundle_cancel_handler(call):
