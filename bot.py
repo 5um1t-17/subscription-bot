@@ -446,7 +446,7 @@ def clear_menu_image():
 # =====================================================================
 
 FJ_SETTINGS_ID = "force_join"
-FJ_MSG_TEXT = "𝙇𝙊𝘾𝙆𝙀𝘿 𝙁𝙊𝙍 𝙉𝙊𝙒 💀\n\nJoin the channels below to unlock access 🚀"
+FJ_MSG_TEXT = "𝙇𝙊𝘾𝙆𝙀𝘿 𝙁𝙊𝙍 𝙉𝙊𝙒 🐬\n\nJoin the channels below to unlock access 🚀"
 FJ_BTN_JOIN = "📢 Join Channel"
 FJ_BTN_RETRY = "🔄 Try Again"
 FJ_CB_RETRY = "fj_retry"
@@ -545,17 +545,36 @@ def _fj_check_pending_join_request(user_id, chat_id):
     The bot must be an admin in the channel with can_invite_users permission."""
     try:
         request = bot.get_chat_join_request(chat_id, user_id)
+        print(f"[fj_check] found pending join request for user {user_id} in chat {chat_id}: {request is not None}")
         return request is not None
     except telebot.apihelper.ApiTelegramException as e:
         code = getattr(e, 'error_code', None)
         desc = (getattr(e, 'description', '') or '').lower()
+        print(f"[fj_check] api error for user {user_id} in chat {chat_id}: code={code} desc={desc}")
         if code == 400:
-            if 'user not found' in desc or 'no pending join request' in desc or 'join_request' in desc:
+            if any(msg in desc for msg in [
+                'user not found',
+                'no pending join request',
+                'join_request',
+                'user_not_participant',
+                'not found',
+                'USER_NOT_PARTICIPANT',
+                'NO_PENDING_JOIN_REQUEST',
+            ]):
                 return False
-            if 'chat not found' in desc or 'bot is not a member' in desc:
+            if any(msg in desc for msg in [
+                'chat not found',
+                'bot is not a member',
+                'forbidden',
+                'chat_write_forbidden',
+                'not enough rights',
+                'permission',
+            ]):
+                print(f"[fj_check] bot lacks permission for chat {chat_id}")
                 return False
         return False
-    except Exception:
+    except Exception as e:
+        print(f"[fj_check] unexpected error for user {user_id} in chat {chat_id}: {e}")
         return False
 
 def _fj_membership_status(user_id, settings):
@@ -573,10 +592,12 @@ def _fj_membership_status(user_id, settings):
     for ch in channels:
         chat_id = _fj_resolve_chat_id(ch.get('channel'))
         if chat_id is None:
+            print(f"[fj_status] skipping channel {ch.get('title', '?')} - unresolved chat_id")
             continue
         try:
             member = bot.get_chat_member(chat_id, user_id)
             status = getattr(member, 'status', None)
+            print(f"[fj_status] user {user_id} in chat {chat_id}: status={status}")
             if status in ('creator', 'administrator', 'member'):
                 continue
             if status == 'restricted':
@@ -584,28 +605,39 @@ def _fj_membership_status(user_id, settings):
                 if is_member in (None, True):
                     continue
             
-            # Not a member — check if there's a pending join request for private channels
+            # Not a confirmed member — for private channels, check pending join requests
             if ch.get('is_private'):
+                print(f"[fj_status] checking pending join request for user {user_id} in private chat {chat_id}")
                 if _fj_check_pending_join_request(user_id, chat_id):
+                    print(f"[fj_status] user {user_id} has pending join request in chat {chat_id} - treating as joined")
                     continue  # Pending request exists, treat as joined for force join
             
             not_joined.append(ch.get('title') or ch.get('channel'))
         except telebot.apihelper.ApiTelegramException as e:
             code = getattr(e, 'error_code', None)
             desc = (getattr(e, 'description', '') or '').lower()
-            if code == 400 and ('user not found' in desc or 'user_not_participant' in desc or 'participant' in desc):
-                # For private channels, also check pending join request on error
+            print(f"[fj_status] api error for user {user_id} in chat {chat_id}: code={code} desc={desc}")
+            if code == 400:
+                # For private channels, always check pending join request on any member-check failure
                 if ch.get('is_private'):
+                    print(f"[fj_status] checking pending join request after api error for user {user_id} in chat {chat_id}")
                     if _fj_check_pending_join_request(user_id, chat_id):
+                        print(f"[fj_status] user {user_id} has pending join request after error - treating as joined")
                         continue
-                not_joined.append(ch.get('title') or ch.get('channel'))
+                if any(msg in desc for msg in ['user not found', 'user_not_participant', 'participant', 'not found']):
+                    not_joined.append(ch.get('title') or ch.get('channel'))
+                else:
+                    return 'error', 'config'
             else:
                 return 'error', 'config'
-        except Exception:
+        except Exception as e:
+            print(f"[fj_status] unexpected error for user {user_id} in chat {chat_id}: {e}")
             return 'error', 'transient'
     
     if not_joined:
+        print(f"[fj_status] user {user_id} not joined in: {not_joined}")
         return 'not_joined', not_joined
+    print(f"[fj_status] user {user_id} joined all channels")
     return 'joined', None
 
 def user_has_force_join_pass(user_id):
@@ -658,7 +690,7 @@ def send_force_join_block(chat_id, user_id):
     # For private channels, add instructions about join requests
     private_channels = [ch for ch in channels if ch.get('is_private')]
     if private_channels:
-        text += "\n\n⚠️ *Note: For private channels, submit a join request and tap Try Again once submitted.*"
+        text += ""
     
     try:
         img = settings.get('image_file_id')
@@ -985,7 +1017,10 @@ def cb_fj_retry(call):
     normal interface; not joined -> stay blocked with a clear alert."""
     user_id = call.from_user.id
     record_seen_user(call.from_user)
-    if user_has_force_join_pass(user_id):
+    print(f"[fj_retry] user={user_id} checking force join pass")
+    passed = user_has_force_join_pass(user_id)
+    print(f"[fj_retry] user={user_id} passed={passed}")
+    if passed:
         bot.answer_callback_query(call.id, "✅ Welcome! You're all set.")
         chat_id = call.message.chat.id
         msg_id = call.message.message_id
