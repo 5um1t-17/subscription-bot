@@ -2071,42 +2071,52 @@ def _render_user_bundles(chat_id, message_id=None):
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
 
 def _send_bundle_preview_media(chat_id, bundle, channels):
-    """Send bundle preview with screenshot navigation arrows."""
+    """Send bundle preview with numbered channels and attractive UI."""
     try:
         screenshots = [ch.get('screenshot_file_id') for ch in channels if ch.get('screenshot_file_id')]
         
-        desc_parts = []
-        for ch in channels:
-            ch_name = escape(ch.get('name', 'Channel'))
+        # Build numbered channel list
+        channel_lines = []
+        for idx, ch in enumerate(channels, 1):
+            ch_name = escape(ch.get('name', f'Channel {idx}'))
             desc = ch.get('description')
             if desc:
-                desc_parts.append(f"😍 <b>{ch_name}</b>\n{escape(desc)}")
+                channel_lines.append(f"<b>{idx}.</b> 😍 <b>{ch_name}</b>\n   {escape(desc)}")
+            else:
+                channel_lines.append(f"<b>{idx}.</b> 😍 <b>{ch_name}</b>")
         
-        bundle_details = (
-            f"\n🎉 <b>{escape(bundle.get('title', 'Offer'))}</b>\n\n"
-            f"💰 <b>Fixed price: ₹{int(bundle.get('price', 0))}</b>\n"
-            f"⏱ Duration: <b>{escape(_bundle_duration_label(bundle))}</b>\n\n"
-            "Tap below to purchase 👇"
+        # Build attractive UI
+        text = (
+            f"╭━━━ 🎉 <b>{escape(bundle.get('title', 'Offer'))}</b> ━━━╮\n\n"
+            f"📺 <b>Included Channels:</b>\n"
+            f"{chr(10).join(channel_lines)}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 <b>𝙁𝙄𝙓𝙀𝘿 𝙋𝙍𝙄𝘾𝙀</b>\n"
+            f"   ₹<b>{int(bundle.get('price', 0))}</b>\n\n"
+            f"⏱ <b>𝘿𝙐𝙍𝘼𝙏𝙄𝙊𝙉</b>\n"
+            f"   {escape(_bundle_duration_label(bundle))}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔥 Ready to lock it in?\n"
+            f"Tap below to grab this offer 👇"
         )
-        full_text = "\n\n".join(desc_parts) + bundle_details if desc_parts else bundle_details
         
         markup = InlineKeyboardMarkup(row_width=5)
         
         if screenshots:
             total = len(screenshots)
             markup.row(
-                InlineKeyboardButton("⬅️", callback_data=f"bundleprev_{bundle['bundle_id']}_0"),
-                InlineKeyboardButton(f"1/{total}", callback_data="noop"),
-                InlineKeyboardButton("➡️", callback_data=f"bundlenext_{bundle['bundle_id']}_0")
+                InlineKeyboardButton("◀️", callback_data=f"bundleprev_{bundle['bundle_id']}_0"),
+                InlineKeyboardButton(f"<b>{1}</b>/<b>{total}</b>", callback_data="noop"),
+                InlineKeyboardButton("▶️", callback_data=f"bundlenext_{bundle['bundle_id']}_0")
             )
         
         markup.add(
-            InlineKeyboardButton("✅ Purchase", callback_data=f"obcheckout_{bundle['bundle_id']}"),
-            InlineKeyboardButton("⬅️ Back to Offers", callback_data="main_obundles")
+            InlineKeyboardButton("✅ 𝙂𝙀𝙏 𝙊𝙁𝙁𝙀𝙍", callback_data=f"obcheckout_{bundle['bundle_id']}"),
+            InlineKeyboardButton("⬅️ 𝘽𝘼𝘾𝙆", callback_data="main_obundles")
         )
         
         if screenshots:
-            msg = bot.send_photo(chat_id, screenshots[0], caption=full_text, reply_markup=markup, parse_mode="HTML")
+            msg = bot.send_photo(chat_id, screenshots[0], caption=text, reply_markup=markup, parse_mode="HTML")
             _bundle_nav_state[chat_id] = {
                 'screenshots': screenshots,
                 'current_index': 0,
@@ -2114,7 +2124,7 @@ def _send_bundle_preview_media(chat_id, bundle, channels):
                 'message_id': msg.message_id,
             }
         else:
-            bot.send_message(chat_id, full_text, reply_markup=markup, parse_mode="HTML")
+            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
             
     except Exception as e:
         print(f"[bundle_preview_media] error: {e}")
@@ -2180,17 +2190,17 @@ def _render_bundle_detail(chat_id, message_id, bundle_id, user_view=False):
         edit_menu(chat_id, message_id, "❌ This offer is no longer available.", reply_markup=None)
         return
     channels = _bundle_channels(bundle)
-    names = "\n".join(f"• {escape(ch.get('name', 'Channel'))}" for ch in channels) or "• No valid channels"
-    description = escape(bundle.get('description') or 'No description provided.')
-    text = (f"🎉 <b>{escape(bundle.get('title', 'Unnamed'))}</b>\n\n{description}\n\n"
-            f"<b>Included channels:</b>\n{names}\n\n"
-            f"⏱ Duration: <b>{escape(_bundle_duration_label(bundle))}</b>\n"
-            f"💰 <b>Fixed price: ₹{int(bundle.get('price', 0))}</b>")
-    markup = InlineKeyboardMarkup()
+    
     if user_view:
-        markup.add(InlineKeyboardButton(f"✅ Purchase for ₹{int(bundle.get('price', 0))}", callback_data=f"obcheckout_{bundle['bundle_id']}"))
-        markup.add(InlineKeyboardButton("⬅️ Back to Offers", callback_data="main_obundles"))
+        _send_bundle_preview_media(chat_id, bundle, channels)
     else:
+        names = "\n".join(f"• {escape(ch.get('name', 'Channel'))}" for ch in channels) or "• No valid channels"
+        description = escape(bundle.get('description') or 'No description provided.')
+        text = (f"🎉 <b>{escape(bundle.get('title', 'Unnamed'))}</b>\n\n{description}\n\n"
+                f"<b>Included channels:</b>\n{names}\n\n"
+                f"⏱ Duration: <b>{escape(_bundle_duration_label(bundle))}</b>\n"
+                f"💰 <b>Fixed price: ₹{int(bundle.get('price', 0))}</b>")
+        markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("✏️ Edit Title", callback_data=f"obtitle_{bundle['bundle_id']}"))
         markup.add(InlineKeyboardButton("📝 Edit Description", callback_data=f"obdesc_{bundle['bundle_id']}"))
         markup.add(InlineKeyboardButton("💰 Edit Price", callback_data=f"obprice_{bundle['bundle_id']}"))
@@ -2199,26 +2209,6 @@ def _render_bundle_detail(chat_id, message_id, bundle_id, user_view=False):
         markup.add(InlineKeyboardButton("🔴 Disable" if bundle.get('enabled') else "🟢 Enable", callback_data=f"obtoggle_{bundle['bundle_id']}"))
         markup.add(InlineKeyboardButton("🗑 Delete", callback_data=f"obdelete_{bundle['bundle_id']}"))
         markup.add(InlineKeyboardButton("⬅️ Back", callback_data="oblist"))
-    
-    if user_view:
-        # For user view: send preview media with all content in one go
-        try:
-            try:
-                bot.delete_message(chat_id, message_id)
-            except Exception:
-                pass
-            _send_bundle_preview_media(chat_id, bundle, channels)
-        except Exception as e:
-            print(f"[bundle_detail] user view error: {e}")
-            try:
-                markup = InlineKeyboardMarkup()
-                markup.add(InlineKeyboardButton(f"✅ Purchase for ₹{int(bundle.get('price', 0))}", callback_data=f"obcheckout_{bundle['bundle_id']}"))
-                markup.add(InlineKeyboardButton("⬅️ Back to Offers", callback_data="main_obundles"))
-                edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML")
-            except Exception:
-                pass
-    else:
-        # For admin view: just edit the message as before
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('obdetail_'))
