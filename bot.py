@@ -416,6 +416,7 @@ expired_subs_col = db['expired_subs']          # lapsed subscriptions, for the 3
 settings_col = db['settings']                  # small key/value bot settings (e.g. main menu image)
 offer_bundles_col = db['offer_bundles']        # admin-created custom bundles (fixed manual price, any set of channels)
 pending_offer_bundle_checkouts_col = db['pending_offer_bundle_checkouts']  # bundle purchases awaiting admin approval
+fj_pending_requests_col = db['fj_pending_requests']  # Force Join pending join requests (event-based tracking)
 
 def get_menu_image_file_id():
     """Returns the Telegram file_id of the admin-set main menu image, or None if not set."""
@@ -446,7 +447,7 @@ def clear_menu_image():
 # =====================================================================
 
 FJ_SETTINGS_ID = "force_join"
-FJ_MSG_TEXT = "𝙇𝙊𝘾𝙆𝙀𝘿 𝙁𝙊𝙍 𝙉𝙊𝙒 🐬\n\nJoin the channels below to unlock access 🚀"
+FJ_MSG_TEXT = "<i>Hey <a href='tg://user?id={user_id}'>{username}</a> </i>👋\n\nJoin the channels below to unlock access 🚀"
 FJ_BTN_JOIN = "📢 Join Channel"
 FJ_BTN_RETRY = "🔄 Try Again"
 FJ_CB_RETRY = "fj_retry"
@@ -498,6 +499,55 @@ def get_force_join_settings():
 def save_force_join_settings(**fields):
     settings_col.update_one({"_id": FJ_SETTINGS_ID}, {"$set": dict(fields)}, upsert=True)
 
+# --- Event-based pending join-request tracking ---
+
+def _fj_record_pending_request(chat_id, user_id, invite_link=None):
+    """Record a pending join request in MongoDB. Idempotent: upsert by unique key."""
+    try:
+        fj_pending_requests_col.update_one(
+            {"channel_id": int(chat_id), "user_id": int(user_id)},
+            {"$set": {
+                "channel_id": int(chat_id),
+                "user_id": int(user_id),
+                "requested_at": datetime.now(),
+                "invite_link": invite_link,
+                "active": True,
+            }},
+            upsert=True
+        )
+        print(f"JOIN_REQUEST_RECEIVED channel={chat_id} user={user_id}")
+    except Exception as e:
+        print(f"[fj_track] error recording pending request for user {user_id} in chat {chat_id}: {e}")
+
+def _fj_remove_pending_request(chat_id, user_id):
+    """Remove a pending join request record (e.g. approved, rejected, expired)."""
+    try:
+        result = fj_pending_requests_col.delete_one({"channel_id": int(chat_id), "user_id": int(user_id)})
+        print(f"[fj_track] removed pending request for user {user_id} in chat {chat_id}: deleted={result.deleted_count}")
+    except Exception as e:
+        print(f"[fj_track] error removing pending request for user {user_id} in chat {chat_id}: {e}")
+
+def _fj_has_pending_request(user_id, chat_id):
+    """Check MongoDB for an active pending join-request record."""
+    try:
+        doc = fj_pending_requests_col.find_one({"channel_id": int(chat_id), "user_id": int(user_id), "active": True})
+        return doc is not None
+    except Exception:
+        return False
+
+def _fj_is_force_join_channel(chat_id):
+    """Check if the given chat_id is configured as a Force Join channel."""
+    try:
+        settings = get_force_join_settings()
+        channels = settings.get('channels', [])
+        for ch in channels:
+            resolved = _fj_resolve_chat_id(ch.get('channel'))
+            if resolved == chat_id:
+                return True
+        return False
+    except Exception:
+        return False
+
 def _fj_resolve_chat_id(channel):
     """Accept '@username', bare 'username' or a numeric chat id string and return a
     value accepted by getChat/getChatMember (int for numeric ids). None if empty."""
@@ -539,110 +589,12 @@ def _fj_channel_url(channel_obj):
             return None
     return f"https://t.me/{raw.lstrip('@')}"
 
-def _fj_check_pending_join_request(user_id, chat_id):
-    """Check if the user has a pending join request for the given channel.
-    Returns True if a pending join request exists, False otherwise.
-    The bot must be an admin in the channel with can_invite_users permission."""
-    try:
-        request = bot.get_chat_join_request(chat_id, user_id)
-        has_request = request is not None
-        print(f"[fj_check] user {user_id} chat {chat_id}: get_chat_join_request returned {type(request).__name__} has_request={has_request}")
-        if has_request:
-            try:
-                req_user = getattr(request, 'from_user', None)
-                req_user_id = getattr(req_user, 'id', None) if req_user else None
-                req_status = getattr(request, 'status', None)
-                print(f"[fj_check] user {user_id} chat {chat_id}: request_user_id={req_user_id} request_status={req_status}")
-            except Exception as log_err:
-                print(f"[fj_check] user {user_id} chat {chat_id}: could not inspect request details: {log_err}")
-        return has_request
-    except telebot.apihelper.ApiTelegramException as e:
-        code = getattr(e, 'error_code', None)
-        desc = (getattr(e, 'description', '') or '').lower()
-        print(f"[fj_check] user {user_id} chat {chat_id}: ApiTelegramException code={code} desc={desc}")
-        if code == 400:
-            known_no_request_messages = [
-                'no pending join request',
-                'join_request',
-                'USER_NOT_PARTICIPANT',
-                'NO_PENDING_JOIN_REQUEST',
-                'user not found',
-                'not found',
-            ]
-            known_permission_messages = [
-                'chat not found',
-                'bot is not a member',
-                'forbidden',
-                'chat_write_forbidden',
-                'not enough rights',
-                'permission',
-                'bot was kicked',
-                'bot is not a member of',
-            ]
-            if any(msg in desc for msg in known_no_request_messages):
-                print(f"[fj_check] user {user_id} chat {chat_id}: no pending request (matched no-request pattern)")
-                return False
-            if any(msg in desc for msg in known_permission_messages):
-                print(f"[fj_check] user {user_id} chat {chat_id}: bot lacks permission to check join requests")
-                return False
-            print(f"[fj_check] user {user_id} chat {chat_id}: unhandled 400 error, treating as no request")
-            return False
-        print(f"[fj_check] user {user_id} chat {chat_id}: non-400 error code={code}, treating as no request")
-        return False
-    except AttributeError as e:
-        print(f"[fj_check] user {user_id} chat {chat_id}: AttributeError - get_chat_join_request may not be available: {e}")
-        print(f"[fj_check] user {user_id} chat {chat_id}: trying direct API fallback")
-        return _fj_check_pending_join_request_direct_api(user_id, chat_id)
-    except Exception as e:
-        print(f"[fj_check] user {user_id} chat {chat_id}: unexpected error type={type(e).__name__}: {e}")
-        return False
-
-
-def _fj_check_pending_join_request_direct_api(user_id, chat_id):
-    """Fallback: call Telegram Bot API directly via HTTP if the telebot method is unavailable."""
-    try:
-        import urllib.request
-        import json
-        token = BOT_TOKEN
-        if not token:
-            print("[fj_check] direct_api: BOT_TOKEN not available")
-            return False
-        url = f"https://api.telegram.org/bot{token}/getChatJoinRequest?chat_id={chat_id}&user_id={user_id}"
-        req = urllib.request.Request(url, method='GET')
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-            if data.get('ok') and data.get('result'):
-                print(f"[fj_check] direct_api: user {user_id} chat {chat_id}: pending request FOUND")
-                return True
-            print(f"[fj_check] direct_api: user {user_id} chat {chat_id}: no pending request (ok={data.get('ok')} result={data.get('result')})")
-            return False
-    except urllib.error.HTTPError as e:
-        body = ''
-        try:
-            body = e.read().decode('utf-8', errors='ignore')
-        except Exception:
-            pass
-        print(f"[fj_check] direct_api: user {user_id} chat {chat_id}: HTTPError {e.code} {e.reason} body={body[:200]}")
-        if e.code == 400:
-            try:
-                err = json.loads(body)
-                desc = (err.get('description', '') or '').lower()
-                if 'no pending join request' in desc or 'user not found' in desc or 'not found' in desc:
-                    return False
-            except Exception:
-                pass
-            print(f"[fj_check] direct_api: user {user_id} chat {chat_id}: 400 error, treating as no request")
-            return False
-        print(f"[fj_check] direct_api: user {user_id} chat {chat_id}: non-400 HTTP error, treating as no request")
-        return False
-    except Exception as e:
-        print(f"[fj_check] direct_api: user {user_id} chat {chat_id}: unexpected error type={type(e).__name__}: {e}")
-        return False
-
 def _fj_membership_status(user_id, settings):
     """Returns ('joined', None), ('not_joined', None) or ('error', reason).
     For multiple channels, user must join ALL of them.
-    For private channels, also checks pending join requests.
+    Check is based on:
+    1. get_chat_member() confirming membership
+    2. MongoDB pending join-request record (event-based tracking)
     reason is 'config' (channel gone / bot not in it / no rights) or 'transient'
     (network, rate-limit, other API failure). Never raises — the middleware and
     the Try-Again button both rely on this to keep the bot running no matter what."""
@@ -656,50 +608,44 @@ def _fj_membership_status(user_id, settings):
         if chat_id is None:
             print(f"[fj_status] skipping channel {ch.get('title', '?')} - unresolved chat_id")
             continue
+        
+        member_status = None
         try:
             member = bot.get_chat_member(chat_id, user_id)
-            status = getattr(member, 'status', None)
-            print(f"[fj_status] user {user_id} in chat {chat_id}: status={status}")
-            if status in ('creator', 'administrator', 'member'):
-                continue
-            if status == 'restricted':
-                is_member = getattr(member, 'is_member', None)
-                if is_member in (None, True):
-                    continue
-            
-            # Not a confirmed member — for private channels, check pending join requests
-            if ch.get('is_private'):
-                print(f"[fj_status] checking pending join request for user {user_id} in private chat {chat_id}")
-                if _fj_check_pending_join_request(user_id, chat_id):
-                    print(f"[fj_status] user {user_id} has pending join request in chat {chat_id} - treating as joined")
-                    continue  # Pending request exists, treat as joined for force join
-            
-            not_joined.append(ch.get('title') or ch.get('channel'))
+            member_status = getattr(member, 'status', None)
         except telebot.apihelper.ApiTelegramException as e:
             code = getattr(e, 'error_code', None)
             desc = (getattr(e, 'description', '') or '').lower()
-            print(f"[fj_status] api error for user {user_id} in chat {chat_id}: code={code} desc={desc}")
-            if code == 400:
-                # For private channels, always check pending join request on any member-check failure
-                if ch.get('is_private'):
-                    print(f"[fj_status] checking pending join request after api error for user {user_id} in chat {chat_id}")
-                    if _fj_check_pending_join_request(user_id, chat_id):
-                        print(f"[fj_status] user {user_id} has pending join request after error - treating as joined")
-                        continue
-                if any(msg in desc for msg in ['user not found', 'user_not_participant', 'participant', 'not found']):
-                    not_joined.append(ch.get('title') or ch.get('channel'))
-                else:
-                    return 'error', 'config'
+            if code == 400 and any(msg in desc for msg in ['user not found', 'user_not_participant', 'participant', 'not found']):
+                member_status = None  # definitely not a member
             else:
-                return 'error', 'config'
+                print(f"[fj_status] api error for user {user_id} in chat {chat_id}: code={code} desc={desc}")
         except Exception as e:
-            print(f"[fj_status] unexpected error for user {user_id} in chat {chat_id}: {e}")
-            return 'error', 'transient'
+            print(f"[fj_status] unexpected error checking member for user {user_id} in chat {chat_id}: {e}")
+        
+        is_member = member_status in ('creator', 'administrator', 'member') or (
+            member_status == 'restricted' and getattr(member, 'is_member', None) in (None, True)
+        )
+        
+        # Check MongoDB pending request record
+        pending = _fj_has_pending_request(user_id, chat_id)
+        print(f"FORCE_JOIN_CHECK user={user_id} channel={chat_id} member={is_member} pending_request={pending}")
+        
+        if is_member:
+            print(f"FORCE_JOIN_RESULT user={user_id} allowed=true reason=member")
+            continue
+        if pending:
+            print(f"FORCE_JOIN_RESULT user={user_id} allowed=true reason=pending_request")
+            continue
+        
+        # Neither member nor pending request
+        not_joined.append(ch.get('title') or ch.get('channel'))
     
     if not_joined:
-        print(f"[fj_status] user {user_id} not joined in: {not_joined}")
+        print(f"FORCE_JOIN_RESULT user={user_id} allowed=false reason=not_joined")
         return 'not_joined', not_joined
-    print(f"[fj_status] user {user_id} joined all channels")
+    
+    print(f"FORCE_JOIN_RESULT user={user_id} allowed=true reason=member")
     return 'joined', None
 
 def user_has_force_join_pass(user_id):
@@ -747,18 +693,24 @@ def send_force_join_block(chat_id, user_id):
     
     markup.add(InlineKeyboardButton(FJ_BTN_RETRY, callback_data=FJ_CB_RETRY))
     
-    text = FJ_MSG_TEXT
+    # Build personalized message with username
+    try:
+        user_chat = bot.get_chat(user_id)
+        username = getattr(user_chat, 'first_name', None) or getattr(user_chat, 'title', None) or str(user_id)
+        text = FJ_MSG_TEXT.format(user_id=user_id, username=escape(username))
+    except Exception:
+        text = FJ_MSG_TEXT.format(user_id=user_id, username=str(user_id))
     
     # For private channels, add instructions about join requests
     private_channels = [ch for ch in channels if ch.get('is_private')]
     if private_channels:
-        text += ""
+        text += "\n\n⚠️ <i>For private channels, submit a join request and tap Try Again once submitted.</i>"
     
     try:
         img = settings.get('image_file_id')
         if img:
-            return bot.send_photo(chat_id, img, caption=text, reply_markup=markup, parse_mode="Markdown", vanish_delay=None)
-        return bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown", vanish_delay=None)
+            return bot.send_photo(chat_id, img, caption=text, reply_markup=markup, parse_mode="HTML", vanish_delay=None)
+        return bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML", vanish_delay=None)
     except Exception as e:
         print(f"[force-join] could not send block screen to {user_id}: {e}")
         return None
@@ -815,6 +767,43 @@ class ForceJoinMiddleware(BaseMiddleware):
         pass
 
 bot.setup_middleware(ForceJoinMiddleware())
+
+# ---- Force Join join-request event tracking ----
+
+@bot.chat_join_request_handler(func=lambda req: _fj_is_force_join_channel(req.chat.id))
+def handle_fj_chat_join_request(req):
+    """Capture join requests for configured Force Join channels and store them in MongoDB.
+    Does NOT approve or decline the request — admin must do that manually."""
+    try:
+        chat_id = req.chat.id
+        user_id = req.from_user.id
+        invite_link = getattr(req, 'invite_link', None)
+        
+        # Only track if this is a configured Force Join channel
+        if not _fj_is_force_join_channel(chat_id):
+            return
+        
+        # Record the pending request
+        _fj_record_pending_request(chat_id, user_id, invite_link)
+    except Exception as e:
+        print(f"[fj_track] error handling chat_join_request: {e}")
+
+@bot.chat_member_handler(func=lambda update: _fj_is_force_join_channel(update.chat.id))
+def handle_fj_chat_member_update(update):
+    """Clean up pending request records when a user's membership status changes.
+    If a user becomes a member, remove their pending request record.
+    If a user is kicked/leaves, also remove the pending request record."""
+    try:
+        chat_id = update.chat.id
+        new_member = update.new_chat_member
+        user_id = new_member.user.id
+        status = getattr(new_member, 'status', None)
+        
+        # If user became a member, or was removed, clean up pending request
+        if status in ('creator', 'administrator', 'member', 'restricted', 'left', 'kicked'):
+            _fj_remove_pending_request(chat_id, user_id)
+    except Exception as e:
+        print(f"[fj_track] error handling chat_member update: {e}")
 
 # ---- Admin: /forcejoin settings panel ----
 
@@ -1040,21 +1029,20 @@ def cb_fj_verify(call):
             except Exception:
                 lines.append("⚠️ Bot is not in the channel. Add it so membership checks work.")
         
-        # For private channels, check if we can access join requests
+        # For private channels, check MongoDB for pending requests and event tracking status
         if ch.get('is_private'):
             try:
-                # Try to get join request info to verify bot has permission
-                test_request = bot.get_chat_join_request(chat_id, bot.user.id)
-                lines.append("✅ Bot can check pending join requests.")
-            except telebot.apihelper.ApiTelegramException as e:
-                code = getattr(e, 'error_code', None)
-                desc = (getattr(e, 'description', '') or '').lower()
-                if code == 400 and ('user not found' in desc or 'no pending' in desc):
-                    lines.append("✅ Bot can check pending join requests.")
-                else:
-                    lines.append("⚠️ Bot may not have permission to check join requests. Ensure bot is admin with 'Invite Users' permission.")
-            except Exception:
-                lines.append("⚠️ Could not verify join request checking ability.")
+                # Check MongoDB for active pending requests
+                pending_count = fj_pending_requests_col.count_documents({
+                    "channel_id": int(chat_id),
+                    "active": True
+                })
+                lines.append(f"📋 Pending join requests in DB: {pending_count}")
+                
+                # Check if chat_join_request handler is working
+                lines.append("✅ Event-based join-request tracking is active.")
+            except Exception as e:
+                lines.append(f"⚠️ Could not check pending requests: {e}")
     send_admin_reply("\n".join(lines))
 
 # ---- User-facing Force Join buttons ----
@@ -2048,26 +2036,63 @@ def _render_user_bundles(chat_id, message_id=None):
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
 
 def _send_bundle_preview_media(chat_id, bundle, channels):
-    """Send preview for each channel: screenshot + description, or description only."""
+    """Send preview for each channel: screenshot with description, or description only."""
     try:
+        # Build all descriptions
+        desc_parts = []
         for ch in channels:
             ch_name = escape(ch.get('name', 'Channel'))
-            screenshot = ch.get('screenshot_file_id')
             desc = ch.get('description')
+            if desc:
+                desc_parts.append(f"😍 <b>{ch_name}</b>\n{escape(desc)}")
+        
+        # Build bundle details text
+        bundle_details = (
+            f"\n🎉 <b>{escape(bundle.get('title', 'Offer'))}</b>\n\n"
+            f"💰 <b>Fixed price: ₹{int(bundle.get('price', 0))}</b>\n"
+            f"⏱ Duration: <b>{escape(_bundle_duration_label(bundle))}</b>\n\n"
+            "Tap below to purchase 👇"
+        )
+        
+        # Combine descriptions and bundle details
+        full_text = "\n\n".join(desc_parts) + bundle_details if desc_parts else bundle_details
+        
+        # Collect screenshots
+        screenshots = [ch.get('screenshot_file_id') for ch in channels if ch.get('screenshot_file_id')]
+        
+        if screenshots:
+            # Send first screenshot with all text and buttons
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("✅ Purchase", callback_data=f"obcheckout_{bundle['bundle_id']}"))
+            markup.add(InlineKeyboardButton("⬅️ Back to Offers", callback_data="main_obundles"))
             
-            if screenshot:
-                caption = f"😍 <b>{ch_name}</b>"
-                if desc:
-                    caption += f"\n{escape(desc)}"
+            # First photo gets all descriptions + bundle details as caption
+            first_caption = f"🎉 <b>{escape(bundle.get('title', 'Offer Preview'))}</b>\n\n<b>Included channels:</b> {len(channels)}\n\n"
+            if desc_parts:
+                first_caption += "\n\n".join(desc_parts) + "\n\n"
+            first_caption += f"💰 <b>Fixed price: ₹{int(bundle.get('price', 0))}</b>\n⏱ Duration: <b>{escape(_bundle_duration_label(bundle))}</b>\n\nTap below to purchase 👇"
+            
+            try:
+                bot.send_photo(chat_id, screenshots[0], caption=first_caption, reply_markup=markup, parse_mode="HTML")
+            except Exception as e:
+                print(f"[bundle_preview_media] failed to send first screenshot: {e}")
+                # Fallback: send text only with buttons
+                bot.send_message(chat_id, full_text, reply_markup=markup, parse_mode="HTML")
+            
+            # Send remaining screenshots as media group
+            if len(screenshots) > 1:
+                media_group = [InputMediaPhoto(screenshot) for screenshot in screenshots[1:]]
                 try:
-                    bot.send_photo(chat_id, screenshot, caption=caption, parse_mode="HTML")
+                    bot.send_media_group(chat_id, media_group)
                 except Exception as e:
-                    print(f"[bundle_preview_media] failed to send screenshot for {ch_name}: {e}")
-                    if desc:
-                        bot.send_message(chat_id, f"😍 <b>{ch_name}</b>\n{escape(desc)}", parse_mode="HTML")
-            else:
-                if desc:
-                    bot.send_message(chat_id, f"😍 <b>{ch_name}</b>\n{escape(desc)}", parse_mode="HTML")
+                    print(f"[bundle_preview_media] media group failed: {e}")
+        else:
+            # No screenshots, send text only with buttons
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("✅ Purchase", callback_data=f"obcheckout_{bundle['bundle_id']}"))
+            markup.add(InlineKeyboardButton("⬅️ Back to Offers", callback_data="main_obundles"))
+            bot.send_message(chat_id, full_text, reply_markup=markup, parse_mode="HTML")
+            
     except Exception as e:
         print(f"[bundle_preview_media] error: {e}")
         # Don't crash the whole flow if preview fails
@@ -2099,17 +2124,19 @@ def _render_bundle_detail(chat_id, message_id, bundle_id, user_view=False):
         markup.add(InlineKeyboardButton("⬅️ Back", callback_data="oblist"))
     
     if user_view:
-        # For user view: send preview media first, then detail with buttons
+        # For user view: send preview media with all content in one go
         try:
             try:
                 bot.delete_message(chat_id, message_id)
             except Exception:
                 pass
             _send_bundle_preview_media(chat_id, bundle, channels)
-            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
         except Exception as e:
             print(f"[bundle_detail] user view error: {e}")
             try:
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton(f"✅ Purchase for ₹{int(bundle.get('price', 0))}", callback_data=f"obcheckout_{bundle['bundle_id']}"))
+                markup.add(InlineKeyboardButton("⬅️ Back to Offers", callback_data="main_obundles"))
                 edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML")
             except Exception:
                 pass
@@ -6818,6 +6845,12 @@ def setup_indexes():
         pending_offer_bundle_checkouts_col.create_index([("user_id", 1)])
     except Exception:
         pass
+    try:
+        fj_pending_requests_col.create_index([("channel_id", 1), ("user_id", 1)], unique=True)
+        fj_pending_requests_col.create_index([("active", 1)])
+        fj_pending_requests_col.create_index([("requested_at", 1)])
+    except Exception:
+        pass
 
 def bootstrap_counters():
     """One-time migration: if counters_col doesn't exist yet, seed it from whatever
@@ -6827,6 +6860,21 @@ def bootstrap_counters():
         existing_revenue = sum(p.get('amount', 0) for p in payments_col.find({}))
         counters_col.insert_one({"_id": "stats", "total_sales": existing_sales, "total_revenue": existing_revenue})
         print(f"Bootstrapped counters from existing history: {existing_sales} sales, ₹{existing_revenue} revenue.")
+
+def cleanup_stale_fj_pending_requests():
+    """Clean up stale pending join requests that are no longer valid.
+    This runs periodically to remove requests that were never approved/rejected
+    but the user is no longer pending (e.g. request expired, was cancelled, etc.)."""
+    try:
+        cutoff = datetime.now() - timedelta(days=7)  # remove requests older than 7 days
+        result = fj_pending_requests_col.delete_many({
+            "active": True,
+            "requested_at": {"$lt": cutoff}
+        })
+        if result.deleted_count > 0:
+            print(f"[fj_cleanup] removed {result.deleted_count} stale pending join requests")
+    except Exception as e:
+        print(f"[fj_cleanup] error: {e}")
 
 if __name__ == '__main__':
     keep_alive()
@@ -6841,6 +6889,7 @@ if __name__ == '__main__':
     scheduler.add_job(send_abandoned_cart_nudges, 'interval', minutes=5)
     scheduler.add_job(send_winback_offers, 'interval', minutes=15)
     scheduler.add_job(sync_all_tracked_chats, 'interval', minutes=30)
+    scheduler.add_job(cleanup_stale_fj_pending_requests, 'interval', hours=1)
     scheduler.start()
     bot.remove_webhook()
     # Small pause so that if a previous deploy's instance is still shutting down
@@ -6856,10 +6905,10 @@ if __name__ == '__main__':
         fj_settings = get_force_join_settings()
         if fj_settings.get('enabled') and fj_settings.get('channels'):
             print("[fj_startup] Force Join is enabled. Running diagnostics...")
-            has_method = hasattr(bot, 'get_chat_join_request')
-            print(f"[fj_startup] bot.get_chat_join_request available: {has_method}")
-            if not has_method:
-                print("[fj_startup] WARNING: get_chat_join_request is NOT available. Pending join request checks will fail.")
+            has_chat_join_handler = hasattr(bot, 'chat_join_request_handler') or hasattr(bot, 'register_chat_join_request_handler')
+            print(f"[fj_startup] chat_join_request handler support: {has_chat_join_handler}")
+            if not has_chat_join_handler:
+                print("[fj_startup] WARNING: chat_join_request handler may not be available. Event-based tracking will not work.")
             for idx, ch in enumerate(fj_settings['channels'], 1):
                 chat_id = _fj_resolve_chat_id(ch.get('channel'))
                 title = ch.get('title') or ch.get('channel') or f'Channel {idx}'
@@ -6880,22 +6929,20 @@ if __name__ == '__main__':
                     print(f"[fj_startup]   bot membership status: {bstatus}")
                 except Exception as e:
                     print(f"[fj_startup]   bot get_chat_member FAILED: {e}")
-                if is_private and has_method:
-                    try:
-                        test_req = bot.get_chat_join_request(chat_id, bot.user.id)
-                        print(f"[fj_startup]   get_chat_join_request for bot itself: {type(test_req).__name__}")
-                    except telebot.apihelper.ApiTelegramException as e:
-                        code = getattr(e, 'error_code', None)
-                        desc = (getattr(e, 'description', '') or '').lower()
-                        print(f"[fj_startup]   get_chat_join_request for bot itself: ApiException code={code} desc={desc}")
-                        if code == 400 and ('no pending join request' in desc or 'user not found' in desc or 'not found' in desc):
-                            print(f"[fj_startup]   -> This is expected (bot itself has no pending request). Permission seems OK.")
-                        else:
-                            print(f"[fj_startup]   -> WARNING: bot may lack permission to check join requests for this channel.")
-                    except Exception as e:
-                        print(f"[fj_startup]   get_chat_join_request for bot itself: unexpected error type={type(e).__name__}: {e}")
-                elif is_private and not has_method:
-                    print(f"[fj_startup]   WARNING: Cannot verify join-request permission because get_chat_join_request is unavailable.")
+                
+                # Check MongoDB for pending requests
+                try:
+                    pending_count = fj_pending_requests_col.count_documents({
+                        "channel_id": int(chat_id),
+                        "active": True
+                    })
+                    print(f"[fj_startup]   pending join requests in DB: {pending_count}")
+                except Exception as e:
+                    print(f"[fj_startup]   could not query pending requests: {e}")
+                
+                if is_private:
+                    print(f"[fj_startup]   -> Private channel. Event-based tracking via chat_join_request handler is configured.")
+                    print(f"[fj_startup]   -> Ensure bot has 'Invite Users' permission to receive join request updates.")
             print("[fj_startup] Force Join diagnostics complete.")
         else:
             print("[fj_startup] Force Join is disabled or no channels configured.")
@@ -6920,7 +6967,7 @@ if __name__ == '__main__':
                 allowed_updates=[
                     'message', 'edited_message', 'callback_query',
                     'channel_post', 'edited_channel_post',
-                    'chat_member', 'my_chat_member',
+                    'chat_member', 'my_chat_member', 'chat_join_request',
                 ],
             )
             break  # infinity_polling only returns on a clean stop
