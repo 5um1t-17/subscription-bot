@@ -1814,7 +1814,7 @@ def build_channel_list(user_id, back_to_menu=False):
 
 def show_all_channels(chat_id, user_id, back_to_menu=False):
     """Shows every channel the admin manages, so a user can pick one to join.
-    Reached directly via /buy (or the '😍 Groups/Channels' button on the main menu); the
+    Reached directly via /buy (or the '😍 Premium Groups' button on the main menu); the
     new message is tracked for animated dismissal on the next command."""
     try:
         print(f"[show_all_channels] chat={chat_id} user={user_id} back_to_menu={back_to_menu}")
@@ -1841,7 +1841,7 @@ def show_all_channels(chat_id, user_id, back_to_menu=False):
 
 def edit_all_channels(chat_id, message_id, user_id, message_obj=None, back_to_menu=False):
     """Same as show_all_channels, but edits an existing button-driven message in place
-    (used for 'Back to Channels' / 'Add Another Channel' / '😍 Groups/Channels' taps)."""
+    (used for 'Back to Channels' / 'Add Another Channel' / '😍 Premium Groups' taps)."""
     try:
         text, markup = build_channel_list(user_id, back_to_menu=back_to_menu)
         if text is None:
@@ -1869,10 +1869,10 @@ def edit_all_channels(chat_id, message_id, user_id, message_obj=None, back_to_me
 
 def build_main_menu():
     """Builds the (text, markup) for the main hub shown on a plain /start (no deep link,
-    non-admin): a landing screen with Groups/Channels, Offers, and Contact — rather than
+    non-admin): a landing screen with Premium Groups, Offers, and Contact — rather than
     dumping the full channel list on the user immediately."""
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("😍 Groups / Channels", callback_data="main_channels"))
+    markup.add(InlineKeyboardButton("😍 Premium Groups", callback_data="main_channels"))
     if offer_bundles_col.count_documents({"enabled": True}) > 0:
         markup.add(InlineKeyboardButton("🎉 Offers", callback_data="main_obundles"))
     contact_url = contact_admin_url()
@@ -1880,7 +1880,7 @@ def build_main_menu():
         markup.add(InlineKeyboardButton("📞 Contact", url=contact_url))
     text = ("╭━━━ 🪩 𝙒𝙀𝙇𝘾𝙊𝙈𝙀 ━━━╮\n\n"
             "<i>Less Goooo </i> 👇\n\n"
-            "😍 <b>Groups / Channels</b> — browse & join\n"
+            "😍 <b>Premium Groups</b> — browse & join\n"
             "🎉 <b>Offers</b> — Checkout Premium Packs in Cheap Price 🔥\n\n"
             "╰━━━━━━━━━━━━━━━━━━━━╯")
     return text, markup
@@ -1939,7 +1939,7 @@ def set_menu_image_start(message):
     markup.add(InlineKeyboardButton("🗑 Remove current image", callback_data="menuimg_remove"))
     msg = send_prompt(ADMIN_ID,
         "🖼 Send the PNG/JPG image you want shown as the main menu banner.\n\n"
-        "It will appear above the Groups/Channels & Offers menu for every user.\n\n"
+        "It will appear above the Premium Groups & Offers menu for every user.\n\n"
         "Send a photo now, or type /skip to cancel.", reply_markup=markup)
     bot.register_next_step_handler(msg, save_menu_image)
 
@@ -1978,7 +1978,7 @@ def cb_main_offers(call):
     markup = InlineKeyboardMarkup()
     if offer_bundles_col.count_documents({"enabled": True}) > 0:
         markup.add(InlineKeyboardButton("🎉 View Offers", callback_data="main_obundles"))
-    markup.add(InlineKeyboardButton("😍 Groups / Channels", callback_data="main_channels"))
+    markup.add(InlineKeyboardButton("😍 Premium Groups", callback_data="main_channels"))
     markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
     edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=call.message)
 
@@ -2060,7 +2060,7 @@ def _render_user_bundles(chat_id, message_id=None):
     for bundle in bundles:
         markup.add(InlineKeyboardButton(f"🎉 {bundle.get('title')} — ₹{bundle.get('price')}",
                                         callback_data=f"obuy_{bundle['bundle_id']}"))
-    markup.add(InlineKeyboardButton("😍 Groups / Channels", callback_data="main_channels"))
+    markup.add(InlineKeyboardButton("😍 Premium Groups", callback_data="main_channels"))
     markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
     text = "🎉 <b>Offers</b>\n\nEach offer has a fixed price and includes the channels shown below."
     if not bundles:
@@ -3746,7 +3746,7 @@ def start_handler(message):
         schedule_delete(message.chat.id, reply.message_id, COMMAND_VANISH_SECONDS)
         track_msg(user_id, reply)
     else:
-        # No deep link, not the admin -> show the main hub (Groups/Channels, Offers,
+        # No deep link, not the admin -> show the main hub (Premium Groups, Offers,
         # Contact) instead of dumping the full channel list on them immediately.
         show_main_menu(message.chat.id, user_id)
 
