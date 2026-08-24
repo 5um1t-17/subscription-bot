@@ -1571,6 +1571,7 @@ def _build_paused_plan_selection(ch_data, user_id=None):
         markup.add(InlineKeyboardButton("🔔 Notify me when it's back", callback_data=f"waitlist_{ch_data['channel_id']}"))
 
     markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="cart_browse"))
+    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
     contact_url = contact_admin_url()
     if contact_url:
         markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
@@ -1601,6 +1602,7 @@ def _build_plan_selection(ch_data, user_id=None):
         markup.add(InlineKeyboardButton(f"💳 {label} - ₹{p_price}", callback_data=f"cartadd_{ch_data['channel_id']}_{p_time}"))
 
     markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="cart_browse"))
+    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
     contact_url = contact_admin_url()
     if contact_url:
         markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
@@ -1874,15 +1876,24 @@ def build_main_menu():
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("😍 Premium Groups", callback_data="main_channels"))
     if offer_bundles_col.count_documents({"enabled": True}) > 0:
-        markup.add(InlineKeyboardButton("🎉 Offers", callback_data="main_obundles"))
+        markup.add(InlineKeyboardButton("📦 Offers", callback_data="main_obundles"))
     contact_url = contact_admin_url()
     if contact_url:
         markup.add(InlineKeyboardButton("📞 Contact", url=contact_url))
-    text = ("╭━━━ 🪩 𝙒𝙀𝙇𝘾𝙊𝙈𝙀 ━━━╮\n\n"
-            "<i>Less Goooo </i> 👇\n\n"
-            "😍 <b>Premium Groups</b> — browse & join\n"
-            "🎉 <b>Offers</b> — Checkout Premium Packs in Cheap Price 🔥\n\n"
-            "╰━━━━━━━━━━━━━━━━━━━━╯")
+    text = (f"Hey {{username}} 🔥\n\n"
+            "Lessss Gooo 👇\n\n"
+            "┌────────────────────────┐\n"
+            "│ 😍 Premium Groups      │\n"
+            "│    Browse channels     │\n"
+            "└────────────────────────┘\n"
+            "┌────────────────────────┐\n"
+            "│ 📦 Offers              │\n"
+            "│    Deals & bundles     │\n"
+            "└────────────────────────┘\n"
+            "┌────────────────────────┐\n"
+            "│ 📞 Contact             │\n"
+            "│    Help & support      │\n"
+            "└────────────────────────┘")
     return text, markup
 
 def _render_main_menu(chat_id, user_id=None, message_id=None):
@@ -2116,6 +2127,7 @@ def _send_bundle_preview_media(chat_id, bundle, channels):
             InlineKeyboardButton("✅ 𝙂𝙀𝙏 𝙊𝙁𝙁𝙀𝙍", callback_data=f"obcheckout_{bundle['bundle_id']}"),
             InlineKeyboardButton("⬅️ 𝘽𝘼𝘾𝙆", callback_data="main_obundles")
         )
+        markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
         
         if screenshots:
             # Add initial channel preview
@@ -2189,6 +2201,7 @@ def bundle_nav_handler(call):
         InlineKeyboardButton("✅ 𝙂𝙀𝙏 𝙊𝙁𝙁𝙀𝙍", callback_data=f"obcheckout_{bundle_id}"),
         InlineKeyboardButton("⬅️ 𝘽𝘼𝘾𝙆", callback_data="main_obundles")
     )
+    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
     
     try:
         # Include caption when editing media to preserve offer text
@@ -2511,7 +2524,7 @@ def cb_search_page(call):
     state = search_state.get(call.from_user.id, {})
     keyword = state.get('keyword') or ''
     if not keyword:
-        edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message)
+        edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message, back_to_menu=True)
         return
     render_search_results(call.message.chat.id, call.message.message_id, call.from_user.id, keyword, page=page, message_obj=call.message)
 
@@ -4655,7 +4668,7 @@ def cart_view_handler(call):
 def cart_browse_handler(call):
     bot.answer_callback_query(call.id)
     try:
-        edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message)
+        edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message, back_to_menu=True)
     except Exception as e:
         print(f"[cart_browse] edit_all_channels failed: {e}")
         try:
@@ -4686,7 +4699,7 @@ def cart_clear_confirm_handler(call):
     _clear_persisted_cart(call.from_user.id)
     bot.answer_callback_query(call.id, "Cart cleared.")
     try:
-        edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message)
+        edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message, back_to_menu=True)
     except Exception as e:
         print(f"[cart_clear_confirm] edit_all_channels failed: {e}")
         try:
@@ -4805,7 +4818,7 @@ def cart_checkout_handler(call):
     items = get_cart(user_id)
     bot.answer_callback_query(call.id)
     if not items:
-        edit_all_channels(call.message.chat.id, call.message.message_id, user_id)
+        edit_all_channels(call.message.chat.id, call.message.message_id, user_id, back_to_menu=True)
         return
 
     total = cart_total(items)
@@ -5208,7 +5221,7 @@ def cout_cancel_handler(call):
     bot.answer_callback_query(call.id, "Payment cancelled.")
     _cancel_pending_checkout(token, call.from_user.id)
     # Back to browsing — the QR photo message gets replaced by the channel list
-    edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message)
+    edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id, message_obj=call.message, back_to_menu=True)
 
 @bot.message_handler(commands=['cancel'])
 def cancel_command_handler(message):
