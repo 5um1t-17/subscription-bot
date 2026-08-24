@@ -1105,7 +1105,7 @@ def cb_fj_retry(call):
             bot.delete_message(chat_id, msg_id)
         except Exception:
             pass
-        show_main_menu(chat_id, user_id, username=getattr(call.from_user, 'username', None))
+        show_main_menu(chat_id, user_id, username=getattr(call.from_user, 'username', None), first_name=getattr(call.from_user, 'first_name', None))
     else:
         bot.answer_callback_query(call.id, "🔒 You haven't joined yet. Join the channel first.", show_alert=True)
 
@@ -1869,18 +1869,20 @@ def edit_all_channels(chat_id, message_id, user_id, message_obj=None, back_to_me
 
 # --- USER: MAIN MENU (shown on plain /start) ---
 
-def build_main_menu(username=None, user_id=None):
+def build_main_menu(username=None, user_id=None, first_name=None):
     """Builds the (text, markup) for the main hub shown on a plain /start (no deep link,
     non-admin): a landing screen with Premium Groups, Offers, and Contact — rather than
     dumping the full channel list on the user immediately."""
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("😍 Premium Groups", callback_data="main_channels"))
     if offer_bundles_col.count_documents({"enabled": True}) > 0:
-        markup.add(InlineKeyboardButton("📦 Offers", callback_data="main_obundles"))
+        markup.add(InlineKeyboardButton("🎉 Offers", callback_data="main_obundles"))
     contact_url = contact_admin_url()
     if contact_url:
         markup.add(InlineKeyboardButton("📞 Contact", url=contact_url))
-    if username:
+    if first_name:
+        display = f'<a href="tg://user?id={user_id}">{escape(first_name)}</a>' if user_id else escape(first_name)
+    elif username:
         display = f'<a href="https://t.me/{username}">@{username}</a>'
     elif user_id:
         display = f'<a href="tg://user?id={user_id}">User</a>'
@@ -1890,12 +1892,12 @@ def build_main_menu(username=None, user_id=None):
             "Lessss Gooo 👇\n\n")
     return text, markup
 
-def _render_main_menu(chat_id, user_id=None, message_id=None, username=None):
+def _render_main_menu(chat_id, user_id=None, message_id=None, username=None, first_name=None):
     """Sends the main hub, as a photo (with caption) if the admin has set a menu image,
     otherwise as plain text. If message_id is given, the old message is removed first —
     Telegram can't edit a text message into a photo message (or vice versa) in place, so
     switching between the two always means delete + resend."""
-    text, markup = build_main_menu(username=username, user_id=user_id)
+    text, markup = build_main_menu(username=username, user_id=user_id, first_name=first_name)
     if message_id:
         cancel_delete(chat_id, message_id)
         try:
@@ -1918,19 +1920,19 @@ def _render_main_menu(chat_id, user_id=None, message_id=None, username=None):
         track_msg(user_id, reply)
     return reply
 
-def show_main_menu(chat_id, user_id, username=None):
+def show_main_menu(chat_id, user_id, username=None, first_name=None):
     """Sends the main hub as a fresh message (used on /start)."""
     dismiss_previous(chat_id, user_id)
-    _render_main_menu(chat_id, user_id=user_id, username=username)
+    _render_main_menu(chat_id, user_id=user_id, username=username, first_name=first_name)
 
-def edit_main_menu(chat_id, message_id, message_obj=None, username=None, user_id=None):
+def edit_main_menu(chat_id, message_id, message_obj=None, username=None, user_id=None, first_name=None):
     """Rebuilds the main hub in place (used for the 'Home' back button)."""
-    _render_main_menu(chat_id, message_id=message_id, username=username, user_id=user_id)
+    _render_main_menu(chat_id, message_id=message_id, username=username, user_id=user_id, first_name=first_name)
 
 @bot.callback_query_handler(func=lambda call: call.data == "main_menu_back")
 def cb_main_menu_back(call):
     bot.answer_callback_query(call.id)
-    edit_main_menu(call.message.chat.id, call.message.message_id, message_obj=call.message, username=getattr(call.from_user, 'username', None), user_id=call.from_user.id)
+    edit_main_menu(call.message.chat.id, call.message.message_id, message_obj=call.message, username=getattr(call.from_user, 'username', None), user_id=call.from_user.id, first_name=getattr(call.from_user, 'first_name', None))
 
 # --- ADMIN: SET MAIN MENU IMAGE ---
 # get_menu_image_file_id/set_menu_image_file_id/clear_menu_image already existed and
@@ -3755,7 +3757,7 @@ def start_handler(message):
     else:
         # No deep link, not the admin -> show the main hub (Premium Groups, Offers,
         # Contact) instead of dumping the full channel list on them immediately.
-        show_main_menu(message.chat.id, user_id, username=getattr(message.from_user, 'username', None))
+        show_main_menu(message.chat.id, user_id, username=getattr(message.from_user, 'username', None), first_name=getattr(message.from_user, 'first_name', None))
 
 # --- USER: EXTRA COMMANDS (/buy, /myplans, /help) ---
 
