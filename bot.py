@@ -1881,19 +1881,7 @@ def build_main_menu():
     if contact_url:
         markup.add(InlineKeyboardButton("📞 Contact", url=contact_url))
     text = (f"Hey {{username}} 🔥\n\n"
-            "Lessss Gooo 👇\n\n"
-            "┌────────────────────────┐\n"
-            "│ 😍 Premium Groups      │\n"
-            "│    Browse channels     │\n"
-            "└────────────────────────┘\n"
-            "┌────────────────────────┐\n"
-            "│ 📦 Offers              │\n"
-            "│    Deals & bundles     │\n"
-            "└────────────────────────┘\n"
-            "┌────────────────────────┐\n"
-            "│ 📞 Contact             │\n"
-            "│    Help & support      │\n"
-            "└────────────────────────┘")
+            "Lessss Gooo 👇\n\n")
     return text, markup
 
 def _render_main_menu(chat_id, user_id=None, message_id=None):
