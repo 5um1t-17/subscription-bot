@@ -1745,12 +1745,15 @@ def build_cart_summary(user_id):
 
 RANK_BADGES = {1: "🥇", 2: "🥈", 3: "🥉"}  # top 3 by position always get a medal
 
-def get_sorted_channels(admin_id):
+def get_sorted_channels(admin_id, include_free=True):
     """Returns all of this admin's channels sorted by their manually-assigned 'order'
     field (lower = earlier). Channels without an order yet (e.g. just created) sort
     after ordered ones, in their natural DB order, until normalized by
-    _ensure_channel_order()."""
-    docs = list(channels_col.find({"admin_id": admin_id}))
+    _ensure_channel_order(). If include_free is False, free groups are excluded."""
+    query = {"admin_id": admin_id}
+    if not include_free:
+        query["is_free"] = {"$ne": True}
+    docs = list(channels_col.find(query))
     ordered = sorted((d for d in docs if 'order' in d), key=lambda d: d['order'])
     unordered = [d for d in docs if 'order' not in d]
     return ordered + unordered
@@ -1782,7 +1785,7 @@ def build_channel_list(user_id, back_to_menu=False):
     user already has items waiting. Returns (None, None) if no channels exist.
     When back_to_menu is True, an extra 'Home' button is appended (used when this
     view was reached from the main hub, so the user can step back out to it)."""
-    channels = get_sorted_channels(ADMIN_ID)
+    channels = get_sorted_channels(ADMIN_ID, include_free=False)
     print(f"[build_channel_list] user={user_id} back_to_menu={back_to_menu} channel_count={len(channels)}")
     markup = InlineKeyboardMarkup()
     for i, ch in enumerate(channels, start=1):
@@ -1874,14 +1877,21 @@ def build_main_menu(username=None, user_id=None, first_name=None):
     non-admin): a landing screen with Premium Groups, Offers, and Contact — rather than
     dumping the full channel list on the user immediately."""
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("😍 Premium Groups", callback_data="main_channels"))
-    if offer_bundles_col.count_documents({"enabled": True}) > 0:
-        markup.add(InlineKeyboardButton("🎉 Offers", callback_data="main_obundles"))
     contact_url = contact_admin_url()
+    markup.row(
+        InlineKeyboardButton("😍 Premium Grp", callback_data="main_channels"),
+        InlineKeyboardButton("🎉 Offers", callback_data="main_obundles")
+    )
     if contact_url:
-        markup.add(InlineKeyboardButton("📞 Contact", url=contact_url))
+        markup.row(
+            InlineKeyboardButton("🆓 Free Grps", callback_data="main_free_groups"),
+            InlineKeyboardButton("📞 Contact", url=contact_url)
+        )
+    else:
+        markup.row(InlineKeyboardButton("🆓 Free Grps", callback_data="main_free_groups"))
     if first_name:
-        display = f'<a href="tg://user?id={user_id}">{escape(first_name)}</a>' if user_id else escape(first_name)
+        safe_name = escape(first_name)
+        display = f'<a href="tg://user?id={user_id}">{safe_name}</a>' if user_id else safe_name
     elif username:
         display = f'<a href="https://t.me/{username}">@{username}</a>'
     elif user_id:
@@ -1933,6 +1943,162 @@ def edit_main_menu(chat_id, message_id, message_obj=None, username=None, user_id
 def cb_main_menu_back(call):
     bot.answer_callback_query(call.id)
     edit_main_menu(call.message.chat.id, call.message.message_id, message_obj=call.message, username=getattr(call.from_user, 'username', None), user_id=call.from_user.id, first_name=getattr(call.from_user, 'first_name', None))
+
+# --- USER: FREE GROUPS ---
+
+def get_free_channels(admin_id):
+    """Returns channels marked as free, sorted by order."""
+    docs = list(channels_col.find({"admin_id": admin_id, "is_free": True}))
+    ordered = sorted((d for d in docs if 'order' in d), key=lambda d: d['order'])
+    unordered = [d for d in docs if 'order' not in d]
+    return ordered + unordered
+
+def build_free_group_list(user_id):
+    """Builds (text, markup) for browsing free groups."""
+    channels = get_free_channels(ADMIN_ID)
+    markup = InlineKeyboardMarkup()
+    for i, ch in enumerate(channels, start=1):
+        markup.add(InlineKeyboardButton(channel_button_label(ch, i), callback_data=f"freebrowse_{ch['channel_id']}"))
+    if not channels:
+        return None, None
+    markup.add(InlineKeyboardButton("🆓 Free Grps", callback_data="main_free_groups"))
+    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+    text = ("🆓 <b>Free Groups</b>\n\n"
+            "Pick a free group to join below 👇\n\n"
+            "💡 <i>These groups have time-limited access. You'll be automatically removed when your time expires.</i>")
+    return text, markup
+
+def show_free_groups(chat_id, user_id):
+    """Shows the free groups list as a fresh message."""
+    try:
+        text, markup = build_free_group_list(user_id)
+        if text is None:
+            reply_markup = InlineKeyboardMarkup()
+            reply_markup.add(InlineKeyboardButton("🆓 Free Grps", callback_data="main_free_groups"))
+            reply_markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+            reply = bot.send_message(chat_id, "No free groups available right now 😕\nCheck back later.", reply_markup=reply_markup)
+            schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
+            track_msg(user_id, reply)
+            return
+        reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
+        schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
+        track_msg(user_id, reply)
+    except Exception as e:
+        print(f"[show_free_groups] error: {e}")
+        bot.send_message(chat_id, "⚠️ Couldn't load free groups. Please try again later.")
+
+def edit_free_groups(chat_id, message_id, message_obj=None):
+    """Rebuilds the free groups list in place."""
+    try:
+        user_id = None
+        if message_obj:
+            user_id = getattr(message_obj, 'from_user', None)
+            if user_id:
+                user_id = user_id.id
+        text, markup = build_free_group_list(user_id)
+        if text is None:
+            reply_markup = InlineKeyboardMarkup()
+            reply_markup.add(InlineKeyboardButton("🆓 Free Grps", callback_data="main_free_groups"))
+            reply_markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+            edit_menu(chat_id, message_id, "No free groups available right now 😕\nCheck back later.", reply_markup=reply_markup, message_obj=message_obj)
+            return
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=message_obj)
+    except Exception as e:
+        print(f"[edit_free_groups] error: {e}")
+        try:
+            bot.delete_message(chat_id, message_id)
+        except Exception:
+            pass
+        show_free_groups(chat_id, user_id or ADMIN_ID)
+
+@bot.callback_query_handler(func=lambda call: call.data == "main_free_groups")
+def cb_main_free_groups(call):
+    bot.answer_callback_query(call.id)
+    edit_free_groups(call.message.chat.id, call.message.message_id, message_obj=call.message)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('freebrowse_'))
+def browse_free_group(call):
+    bot.answer_callback_query(call.id)
+    ch_id = int(call.data.split('_')[1])
+    ch_data = channels_col.find_one({"channel_id": ch_id, "admin_id": ADMIN_ID, "is_free": True})
+    if not ch_data:
+        edit_menu(call.message.chat.id, call.message.message_id, "❌ This free group is no longer available.", reply_markup=None, message_obj=call.message)
+        return
+    edit_free_group_join(call.message.chat.id, call.message.message_id, ch_data, call.from_user.id, message_obj=call.message)
+
+def build_free_group_join(ch_data, user_id):
+    """Builds (text, markup) for joining a free group."""
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("✅ Join Now", callback_data=f"freejoin_{ch_data['channel_id']}"))
+    markup.add(InlineKeyboardButton("⬅️ Back to Free Grps", callback_data="main_free_groups"))
+    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+    expiry_minutes = ch_data.get('free_expiry_minutes') or 0
+    expiry_text = format_label(expiry_minutes) if expiry_minutes else "Lifetime"
+    desc_part = f"\n\n📝 <b>About:</b> <b><i>{escape(ch_data.get('description', ''))}</i></b>" if ch_data.get('description') else ""
+    text = (f"🆓 <b>{escape(ch_data['name'])}</b>\n\n"
+            f"⏱ Access duration: <b>{expiry_text}</b>\n"
+            f"⚠️ You'll be automatically removed when your access expires.{desc_part}\n\n"
+            f"Tap below to join 👇")
+    return text, markup
+
+def edit_free_group_join(chat_id, message_id, ch_data, user_id, message_obj=None):
+    """Shows the join screen for a free group."""
+    text, markup = build_free_group_join(ch_data, user_id)
+    edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=message_obj)
+
+def send_free_group_join(chat_id, ch_data, user_id):
+    """Sends the join screen for a free group as a fresh message."""
+    text, markup = build_free_group_join(ch_data, user_id)
+    reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
+    schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
+    if user_id:
+        track_msg(user_id, reply)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('freejoin_'))
+def free_group_join_handler(call):
+    bot.answer_callback_query(call.id)
+    ch_id = int(call.data.split('_')[1])
+    ch_data = channels_col.find_one({"channel_id": ch_id, "admin_id": ADMIN_ID, "is_free": True})
+    if not ch_data:
+        edit_menu(call.message.chat.id, call.message.message_id, "❌ This free group is no longer available.", reply_markup=None, message_obj=call.message)
+        return
+    user_id = call.from_user.id
+    now = datetime.now()
+    expiry_raw = ch_data.get('free_expiry_minutes')
+    if expiry_raw == 'lifetime':
+        expiry_ts = None
+    elif expiry_raw:
+        expiry_ts = (now + timedelta(minutes=expiry_raw)).timestamp()
+    else:
+        expiry_ts = None
+    try:
+        invite_link = bot.create_chat_invite_link(ch_id, member_limit=1, expire_date=int(expiry_ts) if expiry_ts else None)
+        link = invite_link.invite_link
+    except Exception as e:
+        print(f"[free_group_join] create invite error: {e}")
+        edit_menu(call.message.chat.id, call.message.message_id, "❌ Couldn't create invite link. Please try again later.", reply_markup=None, message_obj=call.message)
+        return
+    existing = users_col.find_one({"user_id": user_id, "channel_id": ch_id})
+    if existing:
+        users_col.update_one({"_id": existing["_id"]}, {"$set": {"expiry": expiry_ts, "lifetime": expiry_ts is None, "subscription_type": "free_group"}})
+    else:
+        users_col.insert_one({
+            "user_id": user_id,
+            "channel_id": ch_id,
+            "expiry": expiry_ts,
+            "lifetime": expiry_ts is None,
+            "subscription_type": "free_group",
+            "reminded_24h": False,
+            "reminded_1h": False,
+            "first_name": getattr(call.from_user, 'first_name', None),
+            "username": getattr(call.from_user, 'username', None),
+            "start_date": now
+        })
+    markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🔗 Join Group", url=link))
+    markup.add(InlineKeyboardButton("⬅️ Back to Free Grps", callback_data="main_free_groups"))
+    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+    edit_menu(call.message.chat.id, call.message.message_id, f"✅ Here's your join link for <b>{escape(ch_data['name'])}</b>!\n\nTap below to join:", reply_markup=markup, parse_mode="HTML", message_obj=call.message)
+
 
 # --- ADMIN: SET MAIN MENU IMAGE ---
 # get_menu_image_file_id/set_menu_image_file_id/clear_menu_image already existed and
@@ -2309,7 +2475,7 @@ def _render_bundle_channel_picker(chat_id, message_id, bundle_id=None):
     if not state: return
     selected = {int(x) for x in state.get('channel_ids', [])}
     markup = InlineKeyboardMarkup()
-    for ch in get_sorted_channels(ADMIN_ID):
+    for ch in get_sorted_channels(ADMIN_ID, include_free=False):
         mark = '✅' if ch['channel_id'] in selected else '⬜'
         markup.add(InlineKeyboardButton(f"{mark} {ch['name']}", callback_data=f"obpick_{ch['channel_id']}"))
     markup.add(InlineKeyboardButton("💾 Save Offer", callback_data="obsave"))
@@ -2418,7 +2584,7 @@ def search_channels_by_keyword(keyword):
     if not kw:
         return []
     results = []
-    for ch in get_sorted_channels(ADMIN_ID):
+    for ch in get_sorted_channels(ADMIN_ID, include_free=False):
         hay = ch.get('name') or ''
         if ch.get('description'):
             hay += ' ' + ch['description']
@@ -2454,7 +2620,7 @@ def render_search_results(chat_id, message_id, user_id, keyword, page=0, message
     page_items = results[start:end]
 
     # Real position in the full channel list, so top-3 medals still apply
-    all_channels = get_sorted_channels(ADMIN_ID)
+    all_channels = get_sorted_channels(ADMIN_ID, include_free=False)
     position_map = {ch['channel_id']: i for i, ch in enumerate(all_channels, start=1)}
 
     markup = InlineKeyboardMarkup()
@@ -3411,12 +3577,13 @@ def _show_trial_already_claimed(call, ch_id):
             "Grab a paid plan below to keep going 💳")
     try:
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
-                              reply_markup=_trial_already_claimed_markup(ch_id))
+                              reply_markup=_trial_already_claimed_markup(ch_id),
+                              parse_mode="HTML")
         schedule_delete(call.message.chat.id, call.message.message_id, MENU_VANISH_SECONDS)
     except Exception:
         edit_menu(call.message.chat.id, call.message.message_id, text,
                   reply_markup=_trial_already_claimed_markup(ch_id),
-                  message_obj=call.message)
+                  message_obj=call.message, parse_mode="HTML")
 
 def _show_trial_active_paid(call, ch_id):
     text = ("ℹ️ You're already subscribed here.\n\n"
@@ -3667,7 +3834,7 @@ def _process_trial_claim(call, raw_trial_id):
         f"⚠️ This link works only once and expires at the trial end."
     )
     try:
-        inv_msg = bot.send_message(call.message.chat.id, text, parse_mode="Markdown", vanish_delay=None)
+        inv_msg = bot.send_message(call.message.chat.id, text, parse_mode="HTML", vanish_delay=None)
     except Exception:
         try:
             inv_msg = bot.send_message(call.message.chat.id, text, vanish_delay=None)
@@ -3713,7 +3880,10 @@ def cb_buy_paid(call):
                   reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 Browse Channels", callback_data="cart_browse")),
                   message_obj=call.message)
         return
-    edit_plan_selection(call.message.chat.id, call.message.message_id, ch_data, call.from_user.id)
+    if ch_data.get('is_free'):
+        edit_free_group_join(call.message.chat.id, call.message.message_id, ch_data, call.from_user.id, message_obj=call.message)
+    else:
+        edit_plan_selection(call.message.chat.id, call.message.message_id, ch_data, call.from_user.id)
 
 @bot.message_handler(commands=['start'])
 def start_handler(message):
@@ -3727,7 +3897,10 @@ def start_handler(message):
             ch_id = int(text[1])
             ch_data = channels_col.find_one({"channel_id": ch_id})
             if ch_data:
-                send_plan_selection(message.chat.id, ch_data, user_id)
+                if ch_data.get('is_free'):
+                    send_free_group_join(message.chat.id, ch_data, user_id)
+                else:
+                    send_plan_selection(message.chat.id, ch_data, user_id)
                 return
         except Exception:
             pass
@@ -4033,7 +4206,10 @@ def browse_channel(call):
     if not ch_data:
         bot.send_message(call.message.chat.id, "❌ This channel is no longer available.")
         return
-    edit_plan_selection(call.message.chat.id, call.message.message_id, ch_data, call.from_user.id)
+    if ch_data.get('is_free'):
+        edit_free_group_join(call.message.chat.id, call.message.message_id, ch_data, call.from_user.id, message_obj=call.message)
+    else:
+        edit_plan_selection(call.message.chat.id, call.message.message_id, ch_data, call.from_user.id)
 
 # --- ADMIN: CHANNEL LIST ---
 
@@ -4192,6 +4368,13 @@ def manage_ch(call):
     markup.add(InlineKeyboardButton("🔀 Reorder Channels", callback_data="chorder_menu"))
     markup.add(InlineKeyboardButton(("▶️ Resume Channel" if ch_data.get('paused') else "⏸ Pause Channel"),
                                     callback_data=f"pausech_{ch_id}"))
+    is_free = ch_data.get('is_free')
+    free_label = "❌ Disable Free Group" if is_free else "🆓 Make Free Group"
+    markup.add(InlineKeyboardButton(free_label, callback_data=f"togglefree_{ch_id}"))
+    if is_free:
+        expiry_minutes = ch_data.get('free_expiry_minutes') or 0
+        expiry_label = f"⏱ Set Expiry ({format_label(expiry_minutes)})" if expiry_minutes else "⏱ Set Expiry"
+        markup.add(InlineKeyboardButton(expiry_label, callback_data=f"setfreeexpiry_{ch_id}"))
     markup.add(InlineKeyboardButton("🗑 Delete Channel", callback_data=f"delch_{ch_id}"))
     markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="back_channels"))
 
@@ -4200,6 +4383,9 @@ def manage_ch(call):
     position = next((i for i, c in enumerate(get_sorted_channels(ADMIN_ID), start=1) if c['channel_id'] == ch_id), None)
     position_status = f"{RANK_BADGES.get(position, '')} #{position}".strip() if position else "Unset"
     pause_status = "⏸ Paused (waitlist open)" if ch_data.get('paused') else "▶️ Active"
+    free_status = "🆓 Free Group" if is_free else "💎 Premium"
+    expiry_minutes = ch_data.get('free_expiry_minutes') or 0
+    expiry_status = f"{format_label(expiry_minutes)}" if expiry_minutes else "Not set"
     try:
         waitlist_count = waitlist_col.count_documents({"channel_id": ch_id})
     except Exception:
@@ -4211,6 +4397,8 @@ def manage_ch(call):
         f"💰 Current Plans:\n{format_plans_text(ch_data)}\n\n"
         f"🔀 Position: {position_status}\n\n"
         f"⏯ Status: {pause_status}\n"
+        f"🏷 Type: {free_status}\n"
+        f"⏱ Free Expiry: {expiry_status}\n"
         f"👥 On waitlist: {waitlist_count}\n\n"
         f"🖼 {ss_status}",
         reply_markup=markup, parse_mode="Markdown")
@@ -4254,6 +4442,77 @@ def cb_toggle_pause(call):
         send_admin_reply(
             f"▶️ *{ch_data['name']}* is back! Notified {notified} user(s) on the waitlist.",
             parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('togglefree_'))
+def cb_toggle_free(call):
+    if not _require_admin(call):
+        return
+    bot.answer_callback_query(call.id)
+    try:
+        ch_id = int(call.data.split('_', 1)[1])
+    except (TypeError, ValueError, IndexError):
+        return
+    ch_data = channels_col.find_one({"channel_id": ch_id})
+    if not ch_data:
+        send_admin_reply("❌ Channel not found.")
+        return
+    now_free = not ch_data.get('is_free')
+    try:
+        channels_col.update_one({"channel_id": ch_id}, {"$set": {"is_free": now_free}})
+    except Exception:
+        send_admin_reply("❌ Couldn't update the channel.")
+        return
+    if now_free:
+        send_admin_reply(
+            f"🆓 *{ch_data['name']}* is now a free group!\n\n"
+            f"Don't forget to set the expiry time using the button below.",
+            parse_mode="Markdown")
+    else:
+        send_admin_reply(
+            f"💎 *{ch_data['name']}* is now a premium group again.",
+            parse_mode="Markdown")
+    show_channel_list(call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('setfreeexpiry_'))
+def cb_set_free_expiry(call):
+    if not _require_admin(call):
+        return
+    bot.answer_callback_query(call.id)
+    try:
+        ch_id = int(call.data.split('_', 1)[1])
+    except (TypeError, ValueError, IndexError):
+        return
+    ch_data = channels_col.find_one({"channel_id": ch_id})
+    if not ch_data:
+        send_admin_reply("❌ Channel not found.")
+        return
+    if not ch_data.get('is_free'):
+        send_admin_reply("❌ This is not a free group. Toggle it to free first.")
+        return
+    msg = send_prompt(ADMIN_ID,
+        f"⏱ Set expiry for *{ch_data['name']}*\n\n"
+        f"Send duration as `Days:Hours:Mins`, or `lifetime` for permanent access.\n\n"
+        f"Example: `1:0:0` = 1 day, `0:2:30` = 2 hours 30 mins, `lifetime` = forever.",
+        parse_mode="Markdown")
+    bot.register_next_step_handler(msg, save_free_expiry, ch_id)
+
+def save_free_expiry(message, ch_id):
+    if message.text and message.text.strip().lower() in ('/skip', 'skip', '/cancel', 'cancel'):
+        send_admin_reply("❌ Cancelled — expiry unchanged.")
+        return
+    try:
+        duration = parse_duration_only(message.text)
+    except Exception:
+        msg = send_prompt(ADMIN_ID, "❌ Invalid duration. Use `Days:Hours:Mins` or `lifetime`. Try again:")
+        bot.register_next_step_handler(msg, save_free_expiry, ch_id)
+        return
+    try:
+        channels_col.update_one({"channel_id": ch_id}, {"$set": {"free_expiry_minutes": duration}})
+    except Exception:
+        send_admin_reply("❌ Couldn't save expiry.")
+        return
+    label = format_label(duration)
+    send_admin_reply(f"✅ Free group expiry set to *{label}*.", parse_mode="Markdown")
 
 def _notify_waitlist(ch_id, ch_name):
     """DMs every waitlisted user that a paused channel is available again. Returns the
@@ -5711,7 +5970,7 @@ def _bc_sched_time(message):
         return
     _bc_pending_text[ADMIN_ID] = message.text
     msg = send_prompt(ADMIN_ID,
-        "⏰ <b>When should this drop?</b>\n\n"
+        "⏰ *When should this drop?*\n\n"
         "Accepted formats:\n"
         "• `18:00` — today at that time (or tomorrow if already past)\n"
         "• `2026-08-20 18:00` — exact date & time\n"
