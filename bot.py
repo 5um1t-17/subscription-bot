@@ -3113,6 +3113,8 @@ def setup_commands():
         BotCommand("remove", "Remove user(s) from this group/channel"),
         BotCommand("sync", "Sync member data of this group/channel"),
         BotCommand("import", "Import member list for this group/channel"),
+        BotCommand("about", "Show user subscription info"),
+
     ]
     bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
     if ADMIN_ID:
@@ -5684,25 +5686,61 @@ def stats_handler(message):
     )
     send_command_reply(message, text, parse_mode="Markdown")
 
-@bot.message_handler(commands=['about'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['about'])
+@bot.channel_post_handler(commands=['about'])
 def about_handler(message):
-    """Admin lookup: /about <username_or_user_id>
-    Shows the user's profile and all their active/past subscriptions across the admin's channels."""
-    if not message.from_user:
-        return
-    args = message.text.split()[1:]
+    """In groups/channels: any chat admin can look up a user's subscription info.
+    In private DM: bot owner can look up any user across all channels."""
+    chat = message.chat
+    chat_type = getattr(chat, 'type', None)
+    is_chat = chat_type in ('group', 'supergroup', 'channel')
+
+    if is_chat:
+        if not _is_chat_admin_message(message):
+            _safe_reply(message, "❌ Only chat administrators can use /about.")
+            return
+        chat_id = chat.id
+    else:
+        if not message.from_user or not ADMIN_ID or message.from_user.id != ADMIN_ID:
+            send_command_reply(message, "❌ Access denied.")
+            return
+        chat_id = None
+
+    args = message.text.split()[1:] if message.text else []
     if not args:
-        send_command_reply(message, "Usage: `/about <username_or_user_id>`", parse_mode="Markdown")
+        if is_chat:
+            _safe_reply(message,
+                "💡 *Usage:* `/about <username_or_user_id>`\n\n"
+                "Examples:\n"
+                "• `/about @username`\n"
+                "• `/about 123456789`\n"
+                "• Reply to a user's message with `/about`",
+                parse_mode="Markdown"
+            )
+        else:
+            send_command_reply(message,
+                "💡 *Usage:* `/about <username_or_user_id>`\n\n"
+                "Examples:\n"
+                "• `/about @username`\n"
+                "• `/about 123456789`",
+                parse_mode="Markdown"
+            )
         return
+
     target = args[0].strip()
     target_uid = None
     if target.isdigit() or (target.startswith('-') and target[1:].isdigit()):
         target_uid = int(target)
     else:
         target_uid, _ = _resolve_username_to_id(target, candidate_ids=_admin_active_subscriber_ids())
+
     if not target_uid:
-        send_command_reply(message, f"❌ Could not resolve `{escape_markdown(target)}`. Try their numeric User ID or check the username spelling.", parse_mode="Markdown")
+        if is_chat:
+            _safe_reply(message, f"❌ Could not resolve `{escape_markdown(target)}`. Try their numeric User ID or check the username spelling.", parse_mode="Markdown")
+        else:
+            send_command_reply(message, f"❌ Could not resolve `{escape_markdown(target)}`. Try their numeric User ID or check the username spelling.", parse_mode="Markdown")
         return
+
     seen = None
     try:
         seen = seen_users_col.find_one({"user_id": target_uid}) or {}
@@ -5719,13 +5757,9 @@ def about_handler(message):
     user_text += f"• Name: {display_name}\n"
     if username:
         user_text += f"• Username: @{escape_markdown(username)}\n"
-    subs = list(users_col.find({"user_id": target_uid}))
-    if not subs:
-        user_text += "\n📭 *No subscriptions found for this user.*"
-        send_command_reply(message, user_text, parse_mode="Markdown")
-        return
-    now = datetime.now().timestamp()
+
     admin_channel_ids = _admin_channel_ids()
+    subs = list(users_col.find({"user_id": target_uid}))
     active_lines = []
     expired_lines = []
     free_trial_lines = []
@@ -5743,7 +5777,7 @@ def about_handler(message):
         if is_lifetime:
             expiry_text = "Lifetime ♾️"
             status = "Active"
-        elif expiry and expiry > now:
+        elif expiry and expiry > datetime.now().timestamp():
             expiry_dt = datetime.fromtimestamp(expiry)
             expiry_text = expiry_dt.strftime("%Y-%m-%d %H:%M")
             status = "Active"
@@ -5757,6 +5791,7 @@ def about_handler(message):
             active_lines.append(line)
         else:
             expired_lines.append(line)
+
     try:
         claims = list(free_trial_claims_col.find({"user_id": target_uid}))
     except Exception:
@@ -5773,6 +5808,7 @@ def about_handler(message):
         trial_expiry = claim.get('trial_expiry')
         expiry_text = datetime.fromtimestamp(trial_expiry.timestamp()).strftime("%Y-%m-%d %H:%M") if trial_expiry else "N/A"
         free_trial_lines.append(f"• {ch_label} — Trial — {expiry_text} [{claim_status}]")
+
     user_text += f"\n📋 *Subscriptions:* ({len(active_lines)} active, {len(expired_lines)} expired)\n"
     if active_lines:
         user_text += "\n✅ *Active:*\n" + "\n".join(active_lines) + "\n"
@@ -5782,7 +5818,11 @@ def about_handler(message):
         user_text += "\n🎁 *Free Trial Claims:*\n" + "\n".join(free_trial_lines) + "\n"
     if not active_lines and not expired_lines and not free_trial_lines:
         user_text += "\nℹ️ No matching subscriptions found across your channels.\n"
-    send_command_reply(message, user_text, parse_mode="Markdown")
+
+    if is_chat:
+        _safe_reply(message, user_text, parse_mode="Markdown")
+    else:
+        send_command_reply(message, user_text, parse_mode="Markdown")
 
 # --- ADMIN: DATABASE STORAGE (dbstats / cleanup) ---
 
