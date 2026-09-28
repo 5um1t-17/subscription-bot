@@ -73,14 +73,20 @@ FACE_EMOJIS = [
 # time one of those got randomly picked, set_message_reaction failed with REACTION_INVALID — a real,
 # silent cause of missed reactions this whole time. This list is Telegram's actual valid set only.
 REACT_EMOJIS = [
-    "👍", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱",
-    "🤬", "😢", "🎉", "🤩", "🙏", "👌", "🕊",
-    "🥱", "🥴", "😍", "🐳", "❤‍🔥", "🌚", "🌭", "💯", "🤣", "⚡",
-    "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈",
-    "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨",
-    "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿",
-    "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷‍♂",
-    "🤷", "🤷‍♀",
+
+    
+    "🔥", "⚡", "🍾", "💋", "❤‍🔥", "🤩", "🌭",  "😈",   "😘",  "🍌",
+
+  
+ #  "🥰", "👏", "😁", "🤔", "🤯", "😱","👍", "❤", 
+ #  "🤬", "😢", "🎉",  "🙏", "👌", "🕊",
+ #  "🥱", "🥴", "😍", "🐳", "🌚", "💯", "🤣",
+ #  🏆", "💔", "🤨", "😐", "🍓", "🖕", 
+ # "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨",
+ #  "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿", 
+ #  "🆒", "💘", "🙉", "🦄", "💊", "🙊", "😎", "👾", "🤷‍♂",
+ #  "🤷", "🤷‍♀",
+
 ]
 
 class _BotExceptionLogger(telebot.ExceptionHandler):
@@ -1879,16 +1885,16 @@ def build_main_menu(username=None, user_id=None, first_name=None):
     markup = InlineKeyboardMarkup()
     contact_url = contact_admin_url()
     markup.row(
-        InlineKeyboardButton("😍 Premium Grp", callback_data="main_channels"),
+        InlineKeyboardButton("😍 Premium Groups", callback_data="main_channels"),
         InlineKeyboardButton("🎉 Offers", callback_data="main_obundles")
     )
     if contact_url:
         markup.row(
-            InlineKeyboardButton("🆓 Free Grps", callback_data="main_free_groups"),
+            InlineKeyboardButton("🆓 Free Groups", callback_data="main_free_groups"),
             InlineKeyboardButton("📞 Contact", url=contact_url)
         )
     else:
-        markup.row(InlineKeyboardButton("🆓 Free Grps", callback_data="main_free_groups"))
+        markup.row(InlineKeyboardButton("🆓 Free Groups", callback_data="main_free_groups"))
     if first_name:
         safe_name = escape(first_name)
         display = f'<a href="tg://user?id={user_id}">{safe_name}</a>' if user_id else safe_name
@@ -1898,7 +1904,7 @@ def build_main_menu(username=None, user_id=None, first_name=None):
         display = f'<a href="tg://user?id={user_id}">User</a>'
     else:
         display = "there"
-    text = (f"Hey {display} 🔥\n\n"
+    text = (f"Hey <i> {display} </i> 🔥\n\n"
             "Lessss Gooo 👇\n\n")
     return text, markup
 
@@ -1961,7 +1967,7 @@ def build_free_group_list(user_id):
         markup.add(InlineKeyboardButton(channel_button_label(ch, i), callback_data=f"freebrowse_{ch['channel_id']}"))
     if not channels:
         return None, None
-    markup.add(InlineKeyboardButton("🆓 Free Grps", callback_data="main_free_groups"))
+    markup.add(InlineKeyboardButton("🆓 Free Groups", callback_data="main_free_groups"))
     markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
     text = ("🆓 <b>Free Groups</b>\n\n"
             "Pick a free group to join below 👇\n\n"
@@ -1974,7 +1980,7 @@ def show_free_groups(chat_id, user_id):
         text, markup = build_free_group_list(user_id)
         if text is None:
             reply_markup = InlineKeyboardMarkup()
-            reply_markup.add(InlineKeyboardButton("🆓 Free Grps", callback_data="main_free_groups"))
+            reply_markup.add(InlineKeyboardButton("🆓 Free Groups", callback_data="main_free_groups"))
             reply_markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
             reply = bot.send_message(chat_id, "No free groups available right now 😕\nCheck back later.", reply_markup=reply_markup)
             schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
@@ -1998,7 +2004,7 @@ def edit_free_groups(chat_id, message_id, message_obj=None):
         text, markup = build_free_group_list(user_id)
         if text is None:
             reply_markup = InlineKeyboardMarkup()
-            reply_markup.add(InlineKeyboardButton("🆓 Free Grps", callback_data="main_free_groups"))
+            reply_markup.add(InlineKeyboardButton("🆓 Free Groups", callback_data="main_free_groups"))
             reply_markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
             edit_menu(chat_id, message_id, "No free groups available right now 😕\nCheck back later.", reply_markup=reply_markup, message_obj=message_obj)
             return
@@ -2030,7 +2036,7 @@ def build_free_group_join(ch_data, user_id):
     """Builds (text, markup) for joining a free group."""
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ Join Now", callback_data=f"freejoin_{ch_data['channel_id']}"))
-    markup.add(InlineKeyboardButton("⬅️ Back to Free Grps", callback_data="main_free_groups"))
+    markup.add(InlineKeyboardButton("⬅️ Back to Free Groups", callback_data="main_free_groups"))
     markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
     expiry_minutes = ch_data.get('free_expiry_minutes') or 0
     expiry_text = format_label(expiry_minutes) if expiry_minutes else "Lifetime"
@@ -2095,7 +2101,7 @@ def free_group_join_handler(call):
             "start_date": now
         })
     markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🔗 Join Group", url=link))
-    markup.add(InlineKeyboardButton("⬅️ Back to Free Grps", callback_data="main_free_groups"))
+    markup.add(InlineKeyboardButton("⬅️ Back to Free Groups", callback_data="main_free_groups"))
     markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
     edit_menu(call.message.chat.id, call.message.message_id, f"✅ Here's your join link for <b>{escape(ch_data['name'])}</b>!\n\nTap below to join:", reply_markup=markup, parse_mode="HTML", message_obj=call.message)
 
@@ -5677,6 +5683,106 @@ def stats_handler(message):
         f"📅 This Month's Revenue: ₹{month_revenue}"
     )
     send_command_reply(message, text, parse_mode="Markdown")
+
+@bot.message_handler(commands=['about'], func=lambda m: m.from_user.id == ADMIN_ID)
+def about_handler(message):
+    """Admin lookup: /about <username_or_user_id>
+    Shows the user's profile and all their active/past subscriptions across the admin's channels."""
+    if not message.from_user:
+        return
+    args = message.text.split()[1:]
+    if not args:
+        send_command_reply(message, "Usage: `/about <username_or_user_id>`", parse_mode="Markdown")
+        return
+    target = args[0].strip()
+    target_uid = None
+    if target.isdigit() or (target.startswith('-') and target[1:].isdigit()):
+        target_uid = int(target)
+    else:
+        target_uid, _ = _resolve_username_to_id(target, candidate_ids=_admin_active_subscriber_ids())
+    if not target_uid:
+        send_command_reply(message, f"❌ Could not resolve `{escape_markdown(target)}`. Try their numeric User ID or check the username spelling.", parse_mode="Markdown")
+        return
+    seen = None
+    try:
+        seen = seen_users_col.find_one({"user_id": target_uid}) or {}
+    except Exception:
+        pass
+    first_name = seen.get('first_name') or "N/A"
+    last_name = seen.get('last_name') or ""
+    username = seen.get('username') or ""
+    display_name = escape_markdown(first_name)
+    if last_name:
+        display_name += f" {escape_markdown(last_name)}"
+    user_text = f"👤 *User Info*\n"
+    user_text += f"• ID: `{target_uid}`\n"
+    user_text += f"• Name: {display_name}\n"
+    if username:
+        user_text += f"• Username: @{escape_markdown(username)}\n"
+    subs = list(users_col.find({"user_id": target_uid}))
+    if not subs:
+        user_text += "\n📭 *No subscriptions found for this user.*"
+        send_command_reply(message, user_text, parse_mode="Markdown")
+        return
+    now = datetime.now().timestamp()
+    admin_channel_ids = _admin_channel_ids()
+    active_lines = []
+    expired_lines = []
+    free_trial_lines = []
+    for sub in subs:
+        try:
+            ch_id = int(sub.get('channel_id', 0))
+        except (TypeError, ValueError):
+            continue
+        ch = channels_col.find_one({"channel_id": ch_id})
+        ch_name = ch.get('name') or f"Channel {ch_id}" if ch else f"Channel {ch_id}"
+        ch_label = escape_markdown(ch_name)
+        sub_type = sub.get('subscription_type', 'paid')
+        expiry = sub.get('expiry')
+        is_lifetime = sub.get('lifetime', False)
+        if is_lifetime:
+            expiry_text = "Lifetime ♾️"
+            status = "Active"
+        elif expiry and expiry > now:
+            expiry_dt = datetime.fromtimestamp(expiry)
+            expiry_text = expiry_dt.strftime("%Y-%m-%d %H:%M")
+            status = "Active"
+        else:
+            expiry_text = datetime.fromtimestamp(expiry).strftime("%Y-%m-%d %H:%M") if expiry else "N/A"
+            status = "Expired"
+        line = f"• {ch_label} — {escape_markdown(sub_type.title())} — {expiry_text} [{status}]"
+        if ch_id not in admin_channel_ids:
+            continue
+        if status == "Active":
+            active_lines.append(line)
+        else:
+            expired_lines.append(line)
+    try:
+        claims = list(free_trial_claims_col.find({"user_id": target_uid}))
+    except Exception:
+        claims = []
+    for claim in claims:
+        try:
+            ch_id = int(claim.get('channel_id', 0))
+        except (TypeError, ValueError):
+            continue
+        ch = channels_col.find_one({"channel_id": ch_id})
+        ch_name = ch.get('name') or f"Channel {ch_id}" if ch else f"Channel {ch_id}"
+        ch_label = escape_markdown(ch_name)
+        claim_status = claim.get('status', 'unknown')
+        trial_expiry = claim.get('trial_expiry')
+        expiry_text = datetime.fromtimestamp(trial_expiry.timestamp()).strftime("%Y-%m-%d %H:%M") if trial_expiry else "N/A"
+        free_trial_lines.append(f"• {ch_label} — Trial — {expiry_text} [{claim_status}]")
+    user_text += f"\n📋 *Subscriptions:* ({len(active_lines)} active, {len(expired_lines)} expired)\n"
+    if active_lines:
+        user_text += "\n✅ *Active:*\n" + "\n".join(active_lines) + "\n"
+    if expired_lines:
+        user_text += "\n❌ *Expired:*\n" + "\n".join(expired_lines) + "\n"
+    if free_trial_lines:
+        user_text += "\n🎁 *Free Trial Claims:*\n" + "\n".join(free_trial_lines) + "\n"
+    if not active_lines and not expired_lines and not free_trial_lines:
+        user_text += "\nℹ️ No matching subscriptions found across your channels.\n"
+    send_command_reply(message, user_text, parse_mode="Markdown")
 
 # --- ADMIN: DATABASE STORAGE (dbstats / cleanup) ---
 
