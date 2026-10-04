@@ -6,6 +6,7 @@ import time
 import io
 import secrets
 import traceback
+import math
 from html import escape
 import telebot
 try:
@@ -60,10 +61,11 @@ def contact_admin_url():
 # Emoji pool used to give each channel button a random face — picked fresh every time
 # the channel list is rendered so the list feels lively and each entry looks distinct.
 FACE_EMOJIS = [
-    "😀", "😂", "🤣", "😎", "🤩", "😘", "🥳", "😜", "🤪", "😈",
-    "👻", "💀", "👽", "🐱",
-    "🦊", "🐷", "⚡",
-    "🍌", "🍓", "🍾", "💋", "😈", "😇", "😨", "❤", "🔥", "🥰"
+   # "🔥", "⚡", "💋", "❤‍🔥",
+   # "😀", "😂", "🤣", "😎", "🤩", "😘", "🥳", "😜", "🤪", "😈",
+   # "👻", "💀", "👽", "🐱",
+   # "🦊", "🐷",
+   # "🍌", "🍓", "🍾", "😈", "😇", "😨", "❤", "🥰"
 ]
 
 # All Telegram-supported reaction emojis (Bot API 7.x) — used to auto-react to every incoming message.
@@ -162,6 +164,21 @@ reaction_queues = {}       # chat_id -> Queue
 import threading as _threading
 _reaction_queues_lock = _threading.Lock()
 
+_last_reaction_by_chat = {}
+_reaction_emoji_lock = _threading.Lock()
+
+def _pick_next_reaction_emoji(chat_id):
+    """Picks an emoji from REACT_EMOJIS ensuring that the chosen emoji cannot be the same
+    as the one used in the immediately preceding message in this chat."""
+    with _reaction_emoji_lock:
+        prev = _last_reaction_by_chat.get(chat_id)
+        candidates = [e for e in REACT_EMOJIS if e != prev]
+        if not candidates:
+            candidates = REACT_EMOJIS
+        chosen = random.choice(candidates)
+        _last_reaction_by_chat[chat_id] = chosen
+        return chosen
+
 def _requeue_or_giveup(q, chat_id, message_id, attempt, delay, error=None):
     """Shared retry logic for both 429s and any other error. Keeps retrying (paced by
     `delay`) up to REACTION_MAX_ATTEMPTS before finally giving up and logging it clearly,
@@ -207,7 +224,7 @@ def _reaction_worker_for_chat(chat_id):
                 print(f"[auto-react] chat {chat_id}: skipped {skipped} stale queued reaction(s) after a burst")
 
         try:
-            emoji = random.choice(REACT_EMOJIS)
+            emoji = _pick_next_reaction_emoji(chat_id)
             bot.set_message_reaction(
                 chat_id,
                 message_id,
@@ -422,6 +439,7 @@ settings_col = db['settings']                  # small key/value bot settings (e
 offer_bundles_col = db['offer_bundles']        # admin-created custom bundles (fixed manual price, any set of channels)
 pending_offer_bundle_checkouts_col = db['pending_offer_bundle_checkouts']  # bundle purchases awaiting admin approval
 fj_pending_requests_col = db['fj_pending_requests']  # Force Join pending join requests (event-based tracking)
+approved_payments_col = db['approved_payments']  # archive of approved checkouts with user details & receipt screenshots
 
 def get_menu_image_file_id():
     """Returns the Telegram file_id of the admin-set main menu image, or None if not set."""
@@ -1238,6 +1256,7 @@ ADMIN_REPLY_VANISH_SECONDS = 90 # how long admin confirmation/error replies stay
 SYNC_VANISH_SECONDS = 90        # how long /sync's long member-list replies stay before auto-deleting
 QR_SHOW_SECONDS = 120           # how long the initial QR is shown before 'I Have Paid' is clicked (2 minutes)
 DEFAULT_VANISH_SECONDS = 90     # fallback for bot messages/replies that don't have a custom vanish rule
+APPROVED_VANISH_SECONDS = 300   # 5 minutes for payment approval/rejection confirmation before auto-vanishing
 # Permanent messages (never auto-vanish, delay=None passed explicitly at their call sites):
 #   - the "please wait for admin approval" message shown after a payment screenshot is sent
 #     (deleted explicitly the moment admin approves/rejects, not on a timer — see
@@ -1310,17 +1329,51 @@ bot.send_message = _vanishing_send_message
 bot.reply_to = _vanishing_reply_to
 bot.send_photo = _vanishing_send_photo
 
-def _clear_pending_review_messages(token):
+def _clear_pending_review_messages(token, current_admin_msg_id=None):
     entry = pending_review_messages.pop(token, None)
     if not entry:
         return
-    for chat_id, msg_id in ((entry.get('user_chat_id'), entry.get('user_msg_id')), (entry.get('admin_chat_id'), entry.get('admin_msg_id'))):
-        if chat_id and msg_id:
-            cancel_delete(chat_id, msg_id)
+    # Delete the user's "Receipt sent for verification" message
+    user_chat_id = entry.get('user_chat_id')
+    user_msg_id = entry.get('user_msg_id')
+    if user_chat_id and user_msg_id:
+        cancel_delete(user_chat_id, user_msg_id)
+        try:
+            bot.delete_message(user_chat_id, user_msg_id)
+        except Exception:
+            pass
+    # If there was a different admin message (e.g. initial alert vs /pending review),
+    # clean up the other message so no stale buttons remain. Do NOT delete current_admin_msg_id.
+    admin_chat_id = entry.get('admin_chat_id')
+    admin_msg_id = entry.get('admin_msg_id')
+    if admin_chat_id and admin_msg_id and current_admin_msg_id and admin_msg_id != current_admin_msg_id:
+        cancel_delete(admin_chat_id, admin_msg_id)
+        try:
+            bot.delete_message(admin_chat_id, admin_msg_id)
+        except Exception:
+            pass
+
+def _update_review_message(chat_id, message_id, text, is_photo=True, delay=APPROVED_VANISH_SECONDS):
+    """Update admin review message (photo caption or text), remove buttons, and schedule vanish after delay (5 mins)."""
+    cancel_delete(chat_id, message_id)
+    if is_photo:
+        try:
+            bot.edit_message_caption(caption=text, chat_id=chat_id, message_id=message_id, reply_markup=None, parse_mode="Markdown")
+        except Exception:
             try:
-                bot.delete_message(chat_id, msg_id)
-            except Exception:
-                pass
+                bot.edit_message_caption(caption=text, chat_id=chat_id, message_id=message_id, reply_markup=None)
+            except Exception as e:
+                print(f"[_update_review_message] photo caption edit failed: {e}")
+    else:
+        try:
+            bot.edit_message_text(text=text, chat_id=chat_id, message_id=message_id, reply_markup=None, parse_mode="Markdown")
+        except Exception:
+            try:
+                bot.edit_message_text(text=text, chat_id=chat_id, message_id=message_id, reply_markup=None)
+            except Exception as e:
+                print(f"[_update_review_message] text edit failed: {e}")
+    if delay is not None:
+        schedule_delete(chat_id, message_id, delay)
 
 
 def send_menu(chat_id, text, reply_markup=None, parse_mode=None, delay=MENU_VANISH_SECONDS):
@@ -2025,7 +2078,7 @@ def cb_main_free_groups(call):
 def browse_free_group(call):
     bot.answer_callback_query(call.id)
     ch_id = int(call.data.split('_')[1])
-    ch_data = channels_col.find_one({"channel_id": ch_id, "admin_id": ADMIN_ID, "is_free": True})
+    ch_data = channels_col.find_one({"channel_id": ch_id, "is_free": True})
     if not ch_data:
         edit_menu(call.message.chat.id, call.message.message_id, "❌ This free group is no longer available.", reply_markup=None, message_obj=call.message)
         return
@@ -2047,17 +2100,50 @@ def build_free_group_join(ch_data, user_id):
     return text, markup
 
 def edit_free_group_join(chat_id, message_id, ch_data, user_id, message_obj=None):
-    """Shows the join screen for a free group."""
+    """Shows the join screen for a free group with its screenshot banner if attached."""
     text, markup = build_free_group_join(ch_data, user_id)
-    edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=message_obj)
+    screenshot = ch_data.get('screenshot_file_id')
+    if screenshot:
+        cancel_delete(chat_id, message_id)
+        try:
+            bot.delete_message(chat_id, message_id)
+        except Exception:
+            pass
+        try:
+            msg = bot.send_photo(chat_id, screenshot, caption=text, reply_markup=markup, parse_mode="HTML")
+            schedule_delete(chat_id, msg.message_id, MENU_VANISH_SECONDS)
+            if user_id:
+                track_msg(user_id, msg)
+            return msg
+        except Exception as e:
+            print(f"[edit_free_group_join] photo send failed: {e}")
+            fallback = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
+            schedule_delete(chat_id, fallback.message_id, MENU_VANISH_SECONDS)
+            if user_id:
+                track_msg(user_id, fallback)
+            return fallback
+    else:
+        return edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=message_obj)
 
 def send_free_group_join(chat_id, ch_data, user_id):
-    """Sends the join screen for a free group as a fresh message."""
+    """Sends the join screen for a free group as a fresh message with its screenshot if attached."""
     text, markup = build_free_group_join(ch_data, user_id)
+    screenshot = ch_data.get('screenshot_file_id')
+    if screenshot:
+        try:
+            msg = bot.send_photo(chat_id, screenshot, caption=text, reply_markup=markup, parse_mode="HTML")
+            schedule_delete(chat_id, msg.message_id, COMMAND_VANISH_SECONDS)
+            if user_id:
+                track_msg(user_id, msg)
+            return msg
+        except Exception as e:
+            print(f"[send_free_group_join] photo send failed: {e}")
+            pass
     reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
     schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
     if user_id:
         track_msg(user_id, reply)
+    return reply
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('freejoin_'))
 def free_group_join_handler(call):
@@ -3104,6 +3190,7 @@ def setup_commands():
         BotCommand("import", "Import member list for a group/channel"),
         BotCommand("sync", "Tracked chats & re-sync members"),
         BotCommand("pending", "Review pending payment checkouts"),
+        BotCommand("approved_payments", "View approved payments & receipts"),
         BotCommand("reactcachestatus", "Check auto-react backlog size"),
         BotCommand("clearreactcache", "Clear the auto-react backlog"),
         BotCommand("users", "List all active subscribers & plans"),
@@ -3924,6 +4011,8 @@ def start_handler(message):
             "/removeuser — remove a subscriber\n"
             "/stats — view bot stats & revenue\n"
             "/broadcast — message everyone\n"
+            "/pending — review pending payments\n"
+            "/approved_payments — view approved payments & receipts\n"
             "/dbstats — check DB storage\n"
             "/cleanup — free up space\n"
             "/import — bulk-import members\n"
@@ -4228,8 +4317,11 @@ def show_channel_list(chat_id, message_id=None):
     markup = InlineKeyboardMarkup()
     cursor = channels_col.find({"admin_id": ADMIN_ID})
     count = 0
+    last_emoji = None
     for idx, ch in enumerate(cursor, start=1):
-        emoji = random.choice(FACE_EMOJIS)
+        candidates = [e for e in FACE_EMOJIS if e != last_emoji]
+        emoji = random.choice(candidates if candidates else FACE_EMOJIS)
+        last_emoji = emoji
         markup.add(InlineKeyboardButton(f"{emoji} {idx}. {ch['name']}", callback_data=f"manage_{ch['channel_id']}"))
         count += 1
 
@@ -5292,9 +5384,20 @@ def bundle_reject_handler(call):
         try: bot.send_message(doc['user_id'], "❌ Your offer payment could not be verified. Please contact the admin.")
         except Exception: pass
         pending_offer_bundle_checkouts_col.delete_one({'_id': ObjectId(token)})
-    _clear_pending_review_messages(token)
+    _clear_pending_review_messages(token, current_admin_msg_id=call.message.message_id)
     bot.answer_callback_query(call.id, "Rejected.")
-    edit_caption_menu(call.message.chat.id, call.message.message_id, "❌ Rejected this offer checkout.", delay=None)
+    user_name = doc.get('user_name', 'User') if doc else 'User'
+    user_username = doc.get('user_username') if doc else None
+    user_id = doc.get('user_id') if doc else ''
+    u_tag = f"@{user_username}" if user_username else (user_name if user_name else f"ID: {user_id}")
+    caption = (
+        f"❌ Rejected ({u_tag})\n\n"
+        f"👤 User: {escape_markdown(user_name)}\n"
+        f"🆔 User ID: `{user_id}`\n\n"
+        f"⏳ This message will vanish in 5 minutes."
+    )
+    _update_review_message(call.message.chat.id, call.message.message_id, caption,
+                           is_photo=bool(getattr(call.message, 'photo', None)), delay=APPROVED_VANISH_SECONDS)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('obapp_'))
 def bundle_approve_handler(call):
@@ -5330,13 +5433,47 @@ def bundle_approve_handler(call):
                              'amount': int(doc['amount']), 'bundle_id': doc['bundle_id'],
                              'purchase_type': 'bundle', 'timestamp': datetime.now()})
     counters_col.update_one({'_id': 'stats'}, {'$inc': {'total_sales': 1, 'total_revenue': int(doc['amount'])}}, upsert=True)
+
+    # Store approved payment details and screenshot in MongoDB
+    try:
+        approved_payments_col.insert_one({
+            "payment_type": "bundle",
+            "checkout_id": str(doc.get('_id', token)),
+            "bundle_id": doc.get('bundle_id'),
+            "bundle_title": doc.get('bundle_title', 'Offer'),
+            "user_id": user_id,
+            "user_name": doc.get('user_name', 'User'),
+            "user_username": doc.get('user_username'),
+            "items": doc.get('items', []),
+            "duration_minutes": duration,
+            "total": int(doc.get('amount', 0)),
+            "screenshot_file_id": doc.get('screenshot_file_id'),
+            "approved_at": datetime.now(),
+            "status": "approved",
+        })
+    except Exception as e:
+        print(f"[approved_payments] Error saving bundle approval record: {e}")
+
     pending_offer_bundle_checkouts_col.delete_one({'_id': ObjectId(token)})
-    _clear_pending_review_messages(token)
+    _clear_pending_review_messages(token, current_admin_msg_id=call.message.message_id)
     if result_lines:
         bot.send_message(user_id, "🥳 *Offer Payment Approved!*\n\n" + "\n\n".join(result_lines), parse_mode='Markdown', vanish_delay=None)
     if errors:
         bot.send_message(user_id, "⚠️ Some offer channels could not be activated:\n" + '\n'.join(errors))
-    edit_caption_menu(call.message.chat.id, call.message.message_id, f"✅ Approved offer for user {user_id}.", delay=None)
+
+    user_name = doc.get('user_name', 'User')
+    user_username = doc.get('user_username')
+    u_tag = f"@{user_username}" if user_username else (user_name if user_name else f"ID: {user_id}")
+    caption = (
+        f"✅ Approved successfully ({u_tag})\n\n"
+        f"👤 User: {escape_markdown(user_name)}\n"
+        f"🆔 User ID: `{user_id}`\n"
+        f"🎁 Offer: *{escape_markdown(doc.get('bundle_title', 'Offer'))}*\n"
+        f"💰 Total: *₹{doc.get('amount', 0)}*\n\n"
+        f"⏳ This message will vanish in 5 minutes."
+    )
+    _update_review_message(call.message.chat.id, call.message.message_id, caption,
+                           is_photo=bool(getattr(call.message, 'photo', None)), delay=APPROVED_VANISH_SECONDS)
 @bot.callback_query_handler(func=lambda call: call.data.startswith('coutpaid_'))
 def cout_paid_handler(call):
     token = call.data.split('_', 1)[1]
@@ -5520,11 +5657,19 @@ def cout_reject_handler(call):
         except Exception:
             pass
         pending_checkouts_col.delete_one({"_id": ObjectId(token)})
-    _clear_pending_review_messages(token)
-    # Admin's decision confirmation is permanent — a record of what was rejected.
-    edit_caption_menu(call.message.chat.id, call.message.message_id,
-        "❌ Rejected this checkout.",
-        delay=None)
+    _clear_pending_review_messages(token, current_admin_msg_id=call.message.message_id)
+    user_name = doc.get('user_name', 'User') if doc else 'User'
+    user_username = doc.get('user_username') if doc else None
+    user_id = doc.get('user_id') if doc else ''
+    u_tag = f"@{user_username}" if user_username else (user_name if user_name else f"ID: {user_id}")
+    caption = (
+        f"❌ Rejected ({u_tag})\n\n"
+        f"👤 User: {escape_markdown(user_name)}\n"
+        f"🆔 User ID: `{user_id}`\n\n"
+        f"⏳ This message will vanish in 5 minutes."
+    )
+    _update_review_message(call.message.chat.id, call.message.message_id, caption,
+                           is_photo=bool(getattr(call.message, 'photo', None)), delay=APPROVED_VANISH_SECONDS)
 
 # --- APPROVAL & EXPIRY ---
 
@@ -5611,6 +5756,25 @@ def cout_approve_handler(call):
         except Exception:
             pass
 
+    # Record approved payment with details and screenshot in MongoDB
+    try:
+        approved_payments_col.insert_one({
+            "payment_type": "cart",
+            "checkout_id": str(doc.get('_id', token)),
+            "user_id": u_id,
+            "user_name": doc.get('user_name', 'User'),
+            "user_username": doc.get('user_username'),
+            "items": doc.get('items', []),
+            "total": int(doc.get('grand_total') or doc.get('total') or 0),
+            "subtotal": int(doc.get('total') or 0),
+            "discount": int(doc.get('discount') or 0),
+            "screenshot_file_id": doc.get('screenshot_file_id'),
+            "approved_at": datetime.now(),
+            "status": "approved",
+        })
+    except Exception as e:
+        print(f"[approved_payments] Error saving checkout approval record: {e}")
+
     try:
         pending_checkouts_col.delete_one({"_id": ObjectId(token)})
     except Exception:
@@ -5642,15 +5806,22 @@ def cout_approve_handler(call):
         except Exception:
             pass
 
-    _clear_pending_review_messages(token)
+    _clear_pending_review_messages(token, current_admin_msg_id=call.message.message_id)
 
-    # Admin's decision confirmation is permanent — a record of who/what was approved.
-    try:
-        edit_caption_menu(call.message.chat.id, call.message.message_id,
-            f"✅ Approved checkout for user {u_id} ({len(doc['items'])} channel(s)).",
-            delay=None)
-    except Exception:
-        pass
+    user_name = doc.get('user_name', 'User')
+    user_username = doc.get('user_username')
+    u_tag = f"@{user_username}" if user_username else (user_name if user_name else f"ID: {u_id}")
+    grand_tot = doc.get('grand_total') or doc.get('total') or 0
+    caption = (
+        f"✅ Approved successfully ({u_tag})\n\n"
+        f"👤 User: {escape_markdown(user_name)}\n"
+        f"🆔 User ID: `{u_id}`\n"
+        f"💰 Total: *₹{grand_tot}*\n"
+        f"📦 Channels: {len(doc.get('items', []))} channel(s)\n\n"
+        f"⏳ This message will vanish in 5 minutes."
+    )
+    _update_review_message(call.message.chat.id, call.message.message_id, caption,
+                           is_photo=bool(getattr(call.message, 'photo', None)), delay=APPROVED_VANISH_SECONDS)
 
 @bot.message_handler(commands=['stats'], func=lambda m: m.from_user.id == ADMIN_ID)
 def stats_handler(message):
@@ -5846,7 +6017,7 @@ def dbstats_handler(message):
             "Per-collection:",
         ]
         for name in ["channels", "users", "payments", "seen_users", "counters", "pending_checkouts",
-                     "offer_bundles", "pending_offer_bundle_checkouts"]:
+                     "offer_bundles", "pending_offer_bundle_checkouts", "approved_payments"]:
             try:
                 cstats = db.command("collStats", name)
                 csize = cstats.get('size', 0) / (1024 * 1024)
@@ -6067,6 +6238,220 @@ def pending_checkouts_handler(message):
                 bot.send_message(ADMIN_ID, f"❌ Failed to show pending checkout {token}: {e}")
             except Exception:
                 pass
+
+# --- ADMIN: APPROVED PAYMENTS HISTORY ---
+
+def show_approved_payments_list(chat_id, message_id=None, message=None, page=0, per_page=6, message_obj=None):
+    """Render paginated list of approved payments for the admin."""
+    try:
+        total = approved_payments_col.count_documents({})
+    except Exception as e:
+        print(f"[approved_payments] Count error: {e}")
+        total = 0
+
+    if total == 0:
+        text = (
+            "╭━━━ 💳 *APPROVED PAYMENTS* ━━━╮\n\n"
+            "ℹ️ No approved payments found yet.\n\n"
+            "Once payments are approved, their user details & receipt screenshots will appear here.\n\n"
+            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
+        )
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("❌ Close", callback_data="appv_close"))
+        if message_id:
+            edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown", message_obj=message_obj)
+        elif message:
+            send_command_reply(message, text, reply_markup=markup, parse_mode="Markdown")
+        else:
+            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+        return
+
+    total_pages = max(1, math.ceil(total / per_page))
+    page = max(0, min(page, total_pages - 1))
+
+    try:
+        docs = list(approved_payments_col.find({}).sort("approved_at", -1).skip(page * per_page).limit(per_page))
+    except Exception as e:
+        print(f"[approved_payments] Query error: {e}")
+        docs = []
+
+    lines = [
+        "╭━━━ 💳 *APPROVED PAYMENTS* ━━━╮\n",
+        f"📊 *Total Approved:* {total}",
+        f"📄 *Page:* {page + 1}/{total_pages}\n",
+        "_Tap on any payment below to view the user details & screenshot receipt:_\n",
+        "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
+    ]
+    text = "\n".join(lines)
+
+    markup = InlineKeyboardMarkup()
+    for doc in docs:
+        pid = str(doc['_id'])
+        uname = doc.get('user_username')
+        name = doc.get('user_name') or 'User'
+        u_display = f"@{uname}" if uname else name
+        if len(u_display) > 16:
+            u_display = u_display[:14] + "…"
+        amount = doc.get('total', 0)
+        approved_at = doc.get('approved_at')
+        date_str = approved_at.strftime("%d/%m %H:%M") if isinstance(approved_at, datetime) else ""
+        btn_text = f"👤 {u_display} — ₹{amount} ({date_str})"
+        markup.add(InlineKeyboardButton(btn_text, callback_data=f"appv_v_{pid}_{page}"))
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"appv_p_{page - 1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"appv_p_{page + 1}"))
+    if nav:
+        markup.row(*nav)
+
+    markup.row(
+        InlineKeyboardButton("🔄 Refresh", callback_data=f"appv_p_{page}"),
+        InlineKeyboardButton("❌ Close", callback_data="appv_close")
+    )
+
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown", message_obj=message_obj)
+    elif message:
+        send_command_reply(message, text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
+@bot.message_handler(commands=['approved_payments', 'approvedpayments'], func=lambda m: m.from_user.id == ADMIN_ID)
+def approved_payments_command(message):
+    """Admin command /approved_payments to browse approved checkouts & receipts."""
+    record_seen_user(message.from_user)
+    show_approved_payments_list(message.chat.id, message=message, page=0)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('appv_p_'))
+def cb_approved_payments_page(call):
+    if not _require_admin(call):
+        return
+    page = int(call.data.split('_')[2])
+    bot.answer_callback_query(call.id)
+    show_approved_payments_list(call.message.chat.id, message_id=call.message.message_id, page=page, message_obj=call.message)
+
+@bot.callback_query_handler(func=lambda call: call.data == "appv_close")
+def cb_approved_payments_close(call):
+    if not _require_admin(call):
+        return
+    bot.answer_callback_query(call.id, "Closed.")
+    cancel_delete(call.message.chat.id, call.message.message_id)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('appv_v_'))
+def cb_approved_payments_view(call):
+    if not _require_admin(call):
+        return
+    parts = call.data.split('_')
+    pid = parts[2]
+    page = int(parts[3]) if len(parts) > 3 else 0
+
+    try:
+        doc = approved_payments_col.find_one({"_id": ObjectId(pid)})
+    except Exception:
+        doc = None
+
+    if not doc:
+        bot.answer_callback_query(call.id, "Payment record not found.")
+        show_approved_payments_list(call.message.chat.id, message_id=call.message.message_id, page=page, message_obj=call.message)
+        return
+
+    bot.answer_callback_query(call.id)
+
+    user_id = doc.get('user_id', 0)
+    user_name = doc.get('user_name', 'Unknown')
+    user_username = doc.get('user_username')
+    username_str = f"@{escape_markdown(user_username)}" if user_username else "No username"
+    payment_type = doc.get('payment_type', 'cart')
+    total = doc.get('total', 0)
+    approved_at = doc.get('approved_at')
+    date_str = approved_at.strftime("%Y-%m-%d %I:%M %p") if isinstance(approved_at, datetime) else "Unknown"
+
+    lines = []
+    if payment_type == 'bundle':
+        bundle_title = doc.get('bundle_title', 'Offer')
+        dur = doc.get('duration_minutes', '')
+        dur_str = "Lifetime" if dur == 'lifetime' else format_label(dur)
+        lines.append(f"🎁 *Offer:* {escape_markdown(bundle_title)} ({dur_str})")
+        for item in doc.get('items', []):
+            lines.append(f"  • {escape_markdown(item.get('name', 'Channel'))}")
+    else:
+        for item in doc.get('items', []):
+            name = item.get('name', 'Channel')
+            t = item.get('t', '')
+            price = item.get('price', 0)
+            lines.append(f"• {escape_markdown(name)} — {format_label(t)} — ₹{price}")
+        discount = doc.get('discount', 0)
+        if discount:
+            lines.append(f"🏷 *Bundle Discount:* -₹{discount}")
+
+    items_text = "\n".join(lines) if lines else "• (No item records)"
+
+    caption = (
+        "🧾 *Approved Payment Details*\n\n"
+        f"👤 *User:* {escape_markdown(user_name)} ({username_str})\n"
+        f"🆔 *User ID:* `{user_id}`\n"
+        f"💰 *Total Amount:* ₹{total}\n"
+        f"📅 *Approved At:* {date_str}\n\n"
+        f"📦 *Purchased Channels / Plans:*\n"
+        f"{items_text}"
+    )
+
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("🔙 Back to List", callback_data=f"appv_back_{page}"),
+        InlineKeyboardButton("🗑 Delete Record", callback_data=f"appv_del_{pid}_{page}")
+    )
+    markup.add(InlineKeyboardButton("❌ Close", callback_data="appv_close"))
+
+    ss_file_id = doc.get('screenshot_file_id')
+    if ss_file_id:
+        cancel_delete(call.message.chat.id, call.message.message_id)
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        # Trim caption if over 1024 char photo caption limit
+        photo_caption = caption
+        if len(photo_caption) > 1000:
+            photo_caption = photo_caption[:995] + "\n..."
+        try:
+            msg = bot.send_photo(call.message.chat.id, ss_file_id, caption=photo_caption, reply_markup=markup, parse_mode="Markdown")
+            schedule_delete(call.message.chat.id, msg.message_id, MENU_VANISH_SECONDS)
+        except Exception as e:
+            print(f"[approved_payments] send_photo failed: {e}")
+            msg = bot.send_message(call.message.chat.id, caption, reply_markup=markup, parse_mode="Markdown")
+            schedule_delete(call.message.chat.id, msg.message_id, MENU_VANISH_SECONDS)
+    else:
+        text_content = "ℹ️ *(No screenshot attached)*\n\n" + caption
+        edit_menu(call.message.chat.id, call.message.message_id, text_content, reply_markup=markup, parse_mode="Markdown", message_obj=call.message)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('appv_back_'))
+def cb_approved_payments_back(call):
+    if not _require_admin(call):
+        return
+    page = int(call.data.split('_')[2])
+    bot.answer_callback_query(call.id)
+    show_approved_payments_list(call.message.chat.id, message_id=call.message.message_id, page=page, message_obj=call.message)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('appv_del_'))
+def cb_approved_payments_del(call):
+    if not _require_admin(call):
+        return
+    parts = call.data.split('_')
+    pid = parts[2]
+    page = int(parts[3]) if len(parts) > 3 else 0
+    try:
+        approved_payments_col.delete_one({"_id": ObjectId(pid)})
+        bot.answer_callback_query(call.id, "✅ Record deleted.")
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"Error: {e}")
+    show_approved_payments_list(call.message.chat.id, message_id=call.message.message_id, page=page, message_obj=call.message)
 
 _bc_pending_text = {}  # ADMIN_ID -> text typed before asking for the schedule time
 
