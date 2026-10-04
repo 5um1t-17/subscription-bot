@@ -880,7 +880,7 @@ def send_force_join_menu(chat_id, message_id=None):
         markup.add(InlineKeyboardButton("➖ Remove Channel", callback_data="fj_removechannel_menu"))
     markup.add(InlineKeyboardButton("🖼 Set Banner Image", callback_data="fj_setbanner"))
     if s.get('image_file_id'):
-        markup.add(InlineKeyboardButton("🗑 Remove Banner", callback_data="fj_rmbanner"))
+        markup.add(InlineKeyboardButton("🗑 𝗥𝗲𝗺𝗼𝘃𝗲 𝗕𝗮𝗻𝗻𝗲𝗿", callback_data="fj_rmbanner"))
     markup.add(InlineKeyboardButton("🔎 Verify Channels", callback_data="fj_verify"))
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
@@ -990,7 +990,7 @@ def cb_fj_removechannel_menu(call):
     for i, ch in enumerate(channels, 1):
         title = ch.get('title') or ch.get('channel') or f"Channel {i}"
         markup.add(InlineKeyboardButton(f"🗑 {title}", callback_data=f"fj_rmch_{i}"))
-    markup.add(InlineKeyboardButton("🔙 Back", callback_data="fj_back"))
+    markup.add(InlineKeyboardButton("🔙 𝗕𝗮𝗰𝗸", callback_data="fj_back"))
     edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data == "fj_back")
@@ -1626,13 +1626,13 @@ def _build_paused_plan_selection(ch_data, user_id=None):
     if on_waitlist:
         markup.add(InlineKeyboardButton("✅ You're on the waitlist", callback_data=f"waitlist_{ch_data['channel_id']}"))
     else:
-        markup.add(InlineKeyboardButton("🔔 Notify me when it's back", callback_data=f"waitlist_{ch_data['channel_id']}"))
+        markup.add(InlineKeyboardButton("🔔 𝙉𝙤𝙩𝙞𝙛𝙮 𝙢𝙚 𝙬𝙝𝙚𝙣 𝙞𝙩'𝙨 𝙗𝙖𝙘𝙠", callback_data=f"waitlist_{ch_data['channel_id']}"))
 
-    markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="cart_browse"))
-    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("⬅️ 𝗕𝗮𝗰𝗸 𝘁𝗼 𝗖𝗵𝗮𝗻𝗻𝗲𝗹𝘀", callback_data="cart_browse"))
+    markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
     contact_url = contact_admin_url()
     if contact_url:
-        markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+        markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
     desc_part = f"\n\n📝 <b>About:</b> <b><i>{escape(ch_data['description'])}</i></b>" if ch_data.get('description') else ""
     text = f"⏸ <b>{escape(ch_data['name'])}</b> is locked 🔒\n\nNo new sign-ups right now.\nJoin the waitlist and we'll hit you up the second it's back ⚡"
     return text, markup
@@ -1659,11 +1659,11 @@ def _build_plan_selection(ch_data, user_id=None):
         label = format_label(p_time)
         markup.add(InlineKeyboardButton(f"💳 {label} - ₹{p_price}", callback_data=f"cartadd_{ch_data['channel_id']}_{p_time}"))
 
-    markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="cart_browse"))
-    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("⬅️ 𝗕𝗮𝗰𝗸 𝘁𝗼 𝗖𝗵𝗮𝗻𝗻𝗲𝗹𝘀", callback_data="cart_browse"))
+    markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
     contact_url = contact_admin_url()
     if contact_url:
-        markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+        markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
     desc_part = f"\n\n📝 <b>About:</b> <b><i>{escape(ch_data['description'])}</i></b>" if ch_data.get('description') else ""
     text = f"Yoo 👀\n\nAb yaha tak agaya hai to plan bhi lele dalle 😁\n\nYou're joining: <b>{escape(ch_data['name'])}</b> 👇{desc_part}\n\nPick your vibe below:"
     return text, markup
@@ -1777,10 +1777,10 @@ def build_cart_summary(user_id):
     if not items:
         text = "🛒 Your cart is empty.\n\nBrowse channels below and add something 🔥"
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("😍 Browse Channels", callback_data="cart_browse"))
+        markup.add(InlineKeyboardButton("😍 𝗕𝗿𝗼𝘄𝘀𝗲 𝗖𝗵𝗮𝗻𝗻𝗲𝗹𝘀", callback_data="cart_browse"))
         contact_url = contact_admin_url()
         if contact_url:
-            markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+            markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
         return text, markup
 
     lines = ["🛒 <b>Your Cart</b> 🛒\n"]
@@ -1793,12 +1793,12 @@ def build_cart_summary(user_id):
     text = "\n".join(lines)
 
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("➕ Add Another Channel", callback_data="cart_browse"))
-    markup.add(InlineKeyboardButton(f"✅ Checkout & Pay ₹{grand_total}", callback_data="cart_checkout"))
-    markup.add(InlineKeyboardButton("🗑 Clear Cart", callback_data="cart_clear_ask"))
+    markup.add(InlineKeyboardButton("➕ 𝘼𝙙𝙙 𝘼𝙣𝙤𝙩𝙝𝙚𝙧 𝘾𝙝𝙖𝙣𝙣𝙚𝙡", callback_data="cart_browse"))
+    markup.add(InlineKeyboardButton(f"✅ 𝘾𝙝𝙚𝙘𝙠𝙤𝙪𝙩 & 𝙋𝙖𝙮 ₹{grand_total}", callback_data="cart_checkout"))
+    markup.add(InlineKeyboardButton("🗑 𝗖𝗹𝗲𝗮𝗿 𝗖𝗮𝗿𝘁", callback_data="cart_clear_ask"))
     contact_url = contact_admin_url()
     if contact_url:
-        markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+        markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
     return text, markup
 
 RANK_BADGES = {1: "🥇", 2: "🥈", 3: "🥉"}  # top 3 by position always get a medal
@@ -1852,22 +1852,22 @@ def build_channel_list(user_id, back_to_menu=False):
     if not channels:
         return None, None
 
-    markup.add(InlineKeyboardButton("🔍 Search Channels", callback_data="search_prompt"))
+    markup.add(InlineKeyboardButton("🔍 𝗦𝗲𝗮𝗿𝗰𝗵 𝗖𝗵𝗮𝗻𝗻𝗲𝗹𝘀", callback_data="search_prompt"))
 
     items = get_cart(user_id)
     if items:
         total = cart_total(items)
         discount, grand_total = bundle_discount(items)
         if discount:
-            markup.add(InlineKeyboardButton(f"🛒 View Cart ({len(items)}) — ₹{grand_total}", callback_data="cart_view"))
+            markup.add(InlineKeyboardButton(f"🛒 𝙑𝙞𝙚𝙬 𝘾𝙖𝙧𝙩 ({len(items)}) — ₹{grand_total}", callback_data="cart_view"))
         else:
-            markup.add(InlineKeyboardButton(f"🛒 View Cart ({len(items)}) — ₹{total}", callback_data="cart_view"))
+            markup.add(InlineKeyboardButton(f"🛒 𝙑𝙞𝙚𝙬 𝘾𝙖𝙧𝙩 ({len(items)}) — ₹{total}", callback_data="cart_view"))
 
     contact_url = contact_admin_url()
     if contact_url:
-        markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+        markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
     if back_to_menu:
-        markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+        markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
         text = (f"👋 <b>Welcome Dallo !</b> \n\nShaana banne ki Koshish mat karna 😂😂\n\nPick a channel/group you'd like to join below 👇\n\n"
             f"💡 <b><i>Stack multiple channels in your cart and pay once — easy money 🫶🏻</i></b>")
     else:
@@ -1887,9 +1887,9 @@ def show_all_channels(chat_id, user_id, back_to_menu=False):
             contact_url = contact_admin_url()
             reply_markup = InlineKeyboardMarkup()
             if contact_url:
-                reply_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+                reply_markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
             if back_to_menu:
-                reply_markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+                reply_markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
             reply = bot.send_message(chat_id, "Nothing here right now 😕\nCheck back later or contact the admin.",
                               reply_markup=reply_markup)
             schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
@@ -1911,9 +1911,9 @@ def edit_all_channels(chat_id, message_id, user_id, message_obj=None, back_to_me
             contact_url = contact_admin_url()
             reply_markup = InlineKeyboardMarkup()
             if contact_url:
-                reply_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+                reply_markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
             if back_to_menu:
-                reply_markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+                reply_markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
             edit_menu(chat_id, message_id, "Nothing here right now 😕\nCheck back later or contact the admin.",
                       reply_markup=reply_markup,
                       message_obj=message_obj)
@@ -1926,7 +1926,7 @@ def edit_all_channels(chat_id, message_id, user_id, message_obj=None, back_to_me
         except Exception:
             pass
         bot.send_message(chat_id, "⚠️ Couldn't load channels. Tap below to try again.",
-                         reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 Browse Channels", callback_data="cart_browse")))
+                         reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 𝗕𝗿𝗼𝘄𝘀𝗲 𝗖𝗵𝗮𝗻𝗻𝗲𝗹𝘀", callback_data="cart_browse")))
 
 # --- USER: MAIN MENU (shown on plain /start) ---
 
@@ -1937,16 +1937,16 @@ def build_main_menu(username=None, user_id=None, first_name=None):
     markup = InlineKeyboardMarkup()
     contact_url = contact_admin_url()
     markup.row(
-        InlineKeyboardButton("😍 Premium Groups", callback_data="main_channels"),
-        InlineKeyboardButton("🎉 Offers", callback_data="main_obundles")
+        InlineKeyboardButton("😍 𝙋𝙧𝙚𝙢𝙞𝙪𝙢 𝙂𝙧𝙤𝙪𝙥𝙨", callback_data="main_channels"),
+        InlineKeyboardButton("🎉 𝗢𝗳𝗳𝗲𝗿𝘀", callback_data="main_obundles")
     )
     if contact_url:
         markup.row(
-            InlineKeyboardButton("🆓 Free Groups", callback_data="main_free_groups"),
-            InlineKeyboardButton("📞 Contact", url=contact_url)
+            InlineKeyboardButton("🆓 𝙁𝙧𝙚𝙚 𝙂𝙧𝙤𝙪𝙥𝙨", callback_data="main_free_groups"),
+            InlineKeyboardButton("📞 𝗖𝗼𝗻𝘁𝗮𝗰𝘁", url=contact_url)
         )
     else:
-        markup.row(InlineKeyboardButton("🆓 Free Groups", callback_data="main_free_groups"))
+        markup.row(InlineKeyboardButton("🆓 𝙁𝙧𝙚𝙚 𝙂𝙧𝙤𝙪𝙥𝙨", callback_data="main_free_groups"))
     if first_name:
         safe_name = escape(first_name)
         display = f'<a href="tg://user?id={user_id}">{safe_name}</a>' if user_id else safe_name
@@ -1957,7 +1957,7 @@ def build_main_menu(username=None, user_id=None, first_name=None):
     else:
         display = "there"
     text = (f"Hey <i> {display} </i> 🔥\n\n"
-            "Lessss Gooo 👇\n\n")
+            "Came looking for something? 👀\n\n")
     return text, markup
 
 def _render_main_menu(chat_id, user_id=None, message_id=None, username=None, first_name=None):
@@ -2019,8 +2019,8 @@ def build_free_group_list(user_id):
         markup.add(InlineKeyboardButton(channel_button_label(ch, i), callback_data=f"freebrowse_{ch['channel_id']}"))
     if not channels:
         return None, None
-    markup.add(InlineKeyboardButton("🆓 Free Groups", callback_data="main_free_groups"))
-    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("🆓 𝙁𝙧𝙚𝙚 𝙂𝙧𝙤𝙪𝙥𝙨", callback_data="main_free_groups"))
+    markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
     text = ("🆓 <b>Free Groups</b>\n\n"
             "Pick a free group to join below 👇\n\n"
             "💡 <i>These groups have time-limited access. You'll be automatically removed when your time expires.</i>")
@@ -2032,8 +2032,8 @@ def show_free_groups(chat_id, user_id):
         text, markup = build_free_group_list(user_id)
         if text is None:
             reply_markup = InlineKeyboardMarkup()
-            reply_markup.add(InlineKeyboardButton("🆓 Free Groups", callback_data="main_free_groups"))
-            reply_markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+            reply_markup.add(InlineKeyboardButton("🆓 𝙁𝙧𝙚𝙚 𝙂𝙧𝙤𝙪𝙥𝙨", callback_data="main_free_groups"))
+            reply_markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
             reply = bot.send_message(chat_id, "No free groups available right now 😕\nCheck back later.", reply_markup=reply_markup)
             schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
             track_msg(user_id, reply)
@@ -2056,8 +2056,8 @@ def edit_free_groups(chat_id, message_id, message_obj=None):
         text, markup = build_free_group_list(user_id)
         if text is None:
             reply_markup = InlineKeyboardMarkup()
-            reply_markup.add(InlineKeyboardButton("🆓 Free Groups", callback_data="main_free_groups"))
-            reply_markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+            reply_markup.add(InlineKeyboardButton("🆓 𝙁𝙧𝙚𝙚 𝙂𝙧𝙤𝙪𝙥𝙨", callback_data="main_free_groups"))
+            reply_markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
             edit_menu(chat_id, message_id, "No free groups available right now 😕\nCheck back later.", reply_markup=reply_markup, message_obj=message_obj)
             return
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=message_obj)
@@ -2088,8 +2088,8 @@ def build_free_group_join(ch_data, user_id):
     """Builds (text, markup) for joining a free group."""
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ Join Now", callback_data=f"freejoin_{ch_data['channel_id']}"))
-    markup.add(InlineKeyboardButton("⬅️ Back to Free Groups", callback_data="main_free_groups"))
-    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("⬅️ 𝗕𝗮𝗰𝗸 𝘁𝗼 𝗙𝗿𝗲𝗲 𝗚𝗿𝗼𝘂𝗽𝘀", callback_data="main_free_groups"))
+    markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
     expiry_minutes = ch_data.get('free_expiry_minutes') or 0
     expiry_text = format_label(expiry_minutes) if expiry_minutes else "Lifetime"
     desc_part = f"\n\n📝 <b>About:</b> <b><i>{escape(ch_data.get('description', ''))}</i></b>" if ch_data.get('description') else ""
@@ -2186,8 +2186,8 @@ def free_group_join_handler(call):
             "start_date": now
         })
     markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🔗 Join Group", url=link))
-    markup.add(InlineKeyboardButton("⬅️ Back to Free Groups", callback_data="main_free_groups"))
-    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("⬅️ 𝗕𝗮𝗰𝗸 𝘁𝗼 𝗙𝗿𝗲𝗲 𝗚𝗿𝗼𝘂𝗽𝘀", callback_data="main_free_groups"))
+    markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
     edit_menu(call.message.chat.id, call.message.message_id, f"✅ Here's your join link for <b>{escape(ch_data['name'])}</b>!\n\nTap below to join:", reply_markup=markup, parse_mode="HTML", message_obj=call.message)
 
 
@@ -2243,7 +2243,7 @@ def cb_main_offers(call):
     if offer_bundles_col.count_documents({"enabled": True}) > 0:
         markup.add(InlineKeyboardButton("🎉 View Offers", callback_data="main_obundles"))
     markup.add(InlineKeyboardButton("😍 Premium Groups", callback_data="main_channels"))
-    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
     edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=call.message)
 
 # --- CUSTOM OFFER BUNDLES ---
@@ -2325,7 +2325,7 @@ def _render_user_bundles(chat_id, message_id=None):
         markup.add(InlineKeyboardButton(f"🎉 {bundle.get('title')} — ₹{bundle.get('price')}",
                                         callback_data=f"obuy_{bundle['bundle_id']}"))
     markup.add(InlineKeyboardButton("😍 Premium Groups", callback_data="main_channels"))
-    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
     text = "🎉 <b>Offers</b>\n\nEach offer has a fixed price and includes the channels shown below."
     if not bundles:
         text = "No offers available right now."
@@ -2380,7 +2380,7 @@ def _send_bundle_preview_media(chat_id, bundle, channels):
             InlineKeyboardButton("✅ 𝙂𝙀𝙏 𝙊𝙁𝙁𝙀𝙍", callback_data=f"obcheckout_{bundle['bundle_id']}"),
             InlineKeyboardButton("⬅️ 𝘽𝘼𝘾𝙆", callback_data="main_obundles")
         )
-        markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+        markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
         
         if screenshots:
             # Add initial channel preview
@@ -2454,7 +2454,7 @@ def bundle_nav_handler(call):
         InlineKeyboardButton("✅ 𝙂𝙀𝙏 𝙊𝙁𝙁𝙀𝙍", callback_data=f"obcheckout_{bundle_id}"),
         InlineKeyboardButton("⬅️ 𝘽𝘼𝘾𝙆", callback_data="main_obundles")
     )
-    markup.add(InlineKeyboardButton("Home", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
     
     try:
         # Include caption when editing media to preserve offer text
@@ -3662,7 +3662,7 @@ def _trial_already_claimed_markup(ch_id):
     markup.add(InlineKeyboardButton("💳 Buy Paid Plan", callback_data=f"buypaid_{ch_id}"))
     contact_url = contact_admin_url()
     if contact_url:
-        markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+        markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
     return markup
 
 def _show_trial_already_claimed(call, ch_id):
@@ -3971,7 +3971,7 @@ def cb_buy_paid(call):
     if not ch_data:
         edit_menu(call.message.chat.id, call.message.message_id,
                   "❌ This channel is no longer available.",
-                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 Browse Channels", callback_data="cart_browse")),
+                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 𝗕𝗿𝗼𝘄𝘀𝗲 𝗖𝗵𝗮𝗻𝗻𝗲𝗹𝘀", callback_data="cart_browse")),
                   message_obj=call.message)
         return
     if ch_data.get('is_free'):
@@ -4095,7 +4095,7 @@ def cb_renew(call):
     if not ch_data:
         edit_menu(call.message.chat.id, call.message.message_id,
                   "❌ This channel is no longer available.",
-                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 Browse Channels", callback_data="cart_browse")),
+                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 𝗕𝗿𝗼𝘄𝘀𝗲 𝗖𝗵𝗮𝗻𝗻𝗲𝗹𝘀", callback_data="cart_browse")),
                   message_obj=call.message)
         return
     edit_plan_selection(call.message.chat.id, call.message.message_id, ch_data, call.from_user.id)
@@ -4279,7 +4279,7 @@ def help_handler(message):
     contact_url = contact_admin_url()
     markup = InlineKeyboardMarkup()
     if contact_url:
-        markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+        markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
     send_command_reply(message,
         "╭━━━ ℹ️ 𝙃𝙊𝙒 𝙄𝙏 𝙒𝙊𝙍𝙆𝙎 ━━━╮\n\n"
         "1. Use /buy to see available channels\n"
@@ -4318,9 +4318,10 @@ def show_channel_list(chat_id, message_id=None):
     cursor = channels_col.find({"admin_id": ADMIN_ID})
     count = 0
     last_emoji = None
+    emoji_pool = [e for e in FACE_EMOJIS if str(e).strip()] if FACE_EMOJIS else ["✨", "💎", "⭐", "🔥"]
     for idx, ch in enumerate(cursor, start=1):
-        candidates = [e for e in FACE_EMOJIS if e != last_emoji]
-        emoji = random.choice(candidates if candidates else FACE_EMOJIS)
+        candidates = [e for e in emoji_pool if e != last_emoji]
+        emoji = random.choice(candidates if candidates else emoji_pool)
         last_emoji = emoji
         markup.add(InlineKeyboardButton(f"{emoji} {idx}. {ch['name']}", callback_data=f"manage_{ch['channel_id']}"))
         count += 1
@@ -4475,7 +4476,7 @@ def manage_ch(call):
         expiry_label = f"⏱ Set Expiry ({format_label(expiry_minutes)})" if expiry_minutes else "⏱ Set Expiry"
         markup.add(InlineKeyboardButton(expiry_label, callback_data=f"setfreeexpiry_{ch_id}"))
     markup.add(InlineKeyboardButton("🗑 Delete Channel", callback_data=f"delch_{ch_id}"))
-    markup.add(InlineKeyboardButton("⬅️ Back to Channels", callback_data="back_channels"))
+    markup.add(InlineKeyboardButton("⬅️ 𝗕𝗮𝗰𝗸 𝘁𝗼 𝗖𝗵𝗮𝗻𝗻𝗲𝗹𝘀", callback_data="back_channels"))
 
     ss_status = "✅ Screenshot set" if ch_data.get('screenshot_file_id') else "❌ No screenshot yet"
     desc_status = ch_data.get('description', 'None set')
@@ -4989,7 +4990,7 @@ def cart_add_handler(call):
     bot.answer_callback_query(call.id, "Added to cart! 🛒")
     if not ch_data:
         edit_menu(call.message.chat.id, call.message.message_id, "❌ That plan is no longer available.",
-                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 Browse Channels", callback_data="cart_browse")),
+                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 𝗕𝗿𝗼𝘄𝘀𝗲 𝗖𝗵𝗮𝗻𝗻𝗲𝗹𝘀", callback_data="cart_browse")),
                   message_obj=call.message)
         return
     # Option selected -> the plan-picker message instantly becomes the cart summary (no lingering message)
@@ -5035,7 +5036,7 @@ def cart_browse_handler(call):
 def cart_clear_ask_handler(call):
     bot.answer_callback_query(call.id)
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ Yes, Clear Cart", callback_data="cart_clear_confirm"))
+    markup.add(InlineKeyboardButton("✅ 𝗬𝗲𝘀, 𝗖𝗹𝗲𝗮𝗿 𝗖𝗮𝗿𝘁", callback_data="cart_clear_confirm"))
     markup.add(InlineKeyboardButton("❌ Cancel", callback_data="cart_view"))
     try:
         edit_menu(call.message.chat.id, call.message.message_id, "⚠️ Clear your entire cart?", reply_markup=markup, message_obj=call.message)
@@ -5194,11 +5195,11 @@ def cart_checkout_handler(call):
                f"\n\n💰 <b>Total to pay: ₹{grand_total}</b>\nUPI ID: <code>{UPI_ID}</code>\n\n"
                "<b><i>Complete the payment, then tap 'I Have Paid' and send your receipt screenshot 👇</i></b>")
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ I Have Paid", callback_data=f"coutpaid_{token}"))
-    markup.add(InlineKeyboardButton("❌ Cancel Payment", callback_data=f"coutcancel_{token}"))
+    markup.add(InlineKeyboardButton("✅ 𝙄 𝙃𝙖𝙫𝙚 𝙋𝙖𝙞𝙙", callback_data=f"coutpaid_{token}"))
+    markup.add(InlineKeyboardButton("❌ 𝗖𝗮𝗻𝗰𝗲𝗹 𝗣𝗮𝘆𝗺𝗲𝗻𝘁", callback_data=f"coutcancel_{token}"))
     contact_url = contact_admin_url()
     if contact_url:
-        markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+        markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
     try:
         qr_file = _make_payment_qr(UPI_ID, grand_total)
         msg = bot.send_photo(call.message.chat.id, InputFile(qr_file, 'payment_qr.png'),
@@ -5209,7 +5210,7 @@ def cart_checkout_handler(call):
         _persist_cart(user_id)
         edit_menu(call.message.chat.id, call.message.message_id,
                   "❌ Couldn't show the payment QR right now. Please try again.",
-                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 Browse Channels", callback_data="cart_browse")),
+                  reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("😍 𝗕𝗿𝗼𝘄𝘀𝗲 𝗖𝗵𝗮𝗻𝗻𝗲𝗹𝘀", callback_data="cart_browse")),
                   message_obj=call.message)
         return
 
@@ -5240,7 +5241,7 @@ def _send_bundle_preview(chat_id, message_id, bundle, channels):
     
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ Proceed to Payment", callback_data=f"obpay_{bundle['bundle_id']}"))
-    markup.add(InlineKeyboardButton("⬅️ Back to Offers", callback_data="main_obundles"))
+    markup.add(InlineKeyboardButton("⬅️ 𝗕𝗮𝗰𝗸 𝘁𝗼 𝗢𝗳𝗳𝗲𝗿𝘀", callback_data="main_obundles"))
     
     try:
         if screenshot_file_ids:
@@ -5316,8 +5317,8 @@ def _proceed_bundle_payment(chat_id, message_id, bundle):
                f"💰 <b>Fixed price: ₹{int(bundle['price'])}</b>\nUPI ID: <code>{UPI_ID}</code>\n\n"
                "Complete the payment, tap 'I Have Paid', then send the receipt screenshot.")
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ I Have Paid", callback_data=f"obpaid_{token}"))
-    markup.add(InlineKeyboardButton("❌ Cancel Payment", callback_data=f"obcancel_{token}"))
+    markup.add(InlineKeyboardButton("✅ 𝙄 𝙃𝙖𝙫𝙚 𝙋𝙖𝙞𝙙", callback_data=f"obpaid_{token}"))
+    markup.add(InlineKeyboardButton("❌ 𝗖𝗮𝗻𝗰𝗲𝗹 𝗣𝗮𝘆𝗺𝗲𝗻𝘁", callback_data=f"obcancel_{token}"))
     try:
         qr_file = _make_payment_qr(UPI_ID, int(bundle['price']))
         msg = bot.send_photo(chat_id, InputFile(qr_file, 'offer_payment_qr.png'),
@@ -5366,8 +5367,8 @@ def receive_bundle_screenshot(message, token):
                f"Offer: *{escape_markdown(doc.get('bundle_title', 'Offer'))}*\n"
                f"Fixed total: *₹{doc.get('amount', 0)}*")
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ Approve Offer", callback_data=f"obapp_{token}"))
-    markup.add(InlineKeyboardButton("❌ Reject", callback_data=f"obrej_{token}"))
+    markup.add(InlineKeyboardButton("✅ 𝘼𝙥𝙥𝙧𝙤𝙫𝙚 𝙊𝙛𝙛𝙚𝙧", callback_data=f"obapp_{token}"))
+    markup.add(InlineKeyboardButton("❌ 𝗥𝗲𝗷𝗲𝗰𝘁", callback_data=f"obrej_{token}"))
     try:
         admin_msg = bot.send_photo(ADMIN_ID, doc['screenshot_file_id'], caption=caption, reply_markup=markup, parse_mode='Markdown', vanish_delay=None)
     except Exception:
@@ -5534,8 +5535,8 @@ def receive_cart_screenshot(message, token):
         pass
 
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ Approve All", callback_data=f"coutapp_{token}"))
-    markup.add(InlineKeyboardButton("❌ Reject", callback_data=f"coutrej_{token}"))
+    markup.add(InlineKeyboardButton("✅ 𝘼𝙥𝙥𝙧𝙤𝙫𝙚 𝘼𝙡𝙡", callback_data=f"coutapp_{token}"))
+    markup.add(InlineKeyboardButton("❌ 𝗥𝗲𝗷𝗲𝗰𝘁", callback_data=f"coutrej_{token}"))
 
     username_tag = f"@{escape_markdown(user.username)}" if user.username else "No username"
     lines = [f"• {escape_markdown(i['name'])} — {format_label(i['t'])} — ₹{i['price']}" for i in doc['items']]
@@ -5566,7 +5567,7 @@ def receive_cart_screenshot(message, token):
     contact_url = contact_admin_url()
     u_markup = InlineKeyboardMarkup()
     if contact_url:
-        u_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+        u_markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
     conf_msg = bot.send_message(message.chat.id, "✅ Receipt sent for verification!\n\nSit tight — admin will approve it in 5-10 mins ⏳", reply_markup=u_markup, vanish_delay=None)
     pending_review_messages[token] = {
         'user_chat_id': message.chat.id,
@@ -6219,8 +6220,8 @@ def pending_checkouts_handler(message):
         )
 
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("✅ Approve", callback_data=f"coutapp_{token}"))
-        markup.add(InlineKeyboardButton("❌ Reject", callback_data=f"coutrej_{token}"))
+        markup.add(InlineKeyboardButton("✅ 𝘼𝙥𝙥𝙧𝙤𝙫𝙚", callback_data=f"coutapp_{token}"))
+        markup.add(InlineKeyboardButton("❌ 𝗥𝗲𝗷𝗲𝗰𝘁", callback_data=f"coutrej_{token}"))
 
         try:
             if screenshot_file_id:
@@ -6241,8 +6242,74 @@ def pending_checkouts_handler(message):
 
 # --- ADMIN: APPROVED PAYMENTS HISTORY ---
 
+def backfill_legacy_approved_payments():
+    """Backfills legacy payment records from payments_col into approved_payments_col
+    so existing approved sales are visible in /approved_payments."""
+    try:
+        legacy_payments = list(payments_col.find({"minutes": {"$ne": "bundle_discount"}}))
+        if not legacy_payments:
+            return
+
+        migrated_count = 0
+        for p in legacy_payments:
+            pay_id = str(p['_id'])
+            if approved_payments_col.find_one({"legacy_payment_id": pay_id}):
+                continue
+
+            uid = p.get('user_id')
+            user_doc = seen_users_col.find_one({"user_id": uid}) if uid else None
+            user_name = user_doc.get('first_name', 'User') if user_doc else 'User'
+            user_username = user_doc.get('username') if user_doc else None
+
+            ch_id = p.get('channel_id')
+            ch_doc = channels_col.find_one({"channel_id": ch_id}) if ch_id else None
+            ch_name = ch_doc.get('name') if ch_doc else (f"Channel {ch_id}" if ch_id else "Bundle")
+
+            item = {
+                "channel_id": ch_id,
+                "name": ch_name,
+                "t": p.get('minutes', ''),
+                "price": p.get('amount', 0),
+            }
+
+            p_type = p.get('purchase_type', 'bundle' if p.get('bundle_id') else 'cart')
+            approved_doc = {
+                "legacy_payment_id": pay_id,
+                "payment_type": p_type,
+                "user_id": uid,
+                "user_name": user_name,
+                "user_username": user_username,
+                "items": [item],
+                "total": p.get('amount', 0),
+                "subtotal": p.get('amount', 0),
+                "discount": 0,
+                "screenshot_file_id": None,
+                "approved_at": p.get('timestamp') or datetime.now(),
+                "status": "approved",
+                "is_legacy": True,
+            }
+            if p.get('bundle_id'):
+                approved_doc["bundle_id"] = p.get('bundle_id')
+                bundle = offer_bundles_col.find_one({"bundle_id": p.get('bundle_id')}) if p.get('bundle_id') else None
+                approved_doc["bundle_title"] = bundle.get('title', 'Offer') if bundle else 'Offer'
+
+            approved_payments_col.insert_one(approved_doc)
+            migrated_count += 1
+
+        if migrated_count > 0:
+            print(f"[approved_payments] Backfilled {migrated_count} legacy payment records from payments_col.")
+    except Exception as e:
+        print(f"[approved_payments] Backfill error: {e}")
+
 def show_approved_payments_list(chat_id, message_id=None, message=None, page=0, per_page=6, message_obj=None):
     """Render paginated list of approved payments for the admin."""
+    # Ensure legacy payments from payments_col are backfilled if approved_payments_col is empty
+    try:
+        if approved_payments_col.count_documents({}) == 0 and payments_col.count_documents({}) > 0:
+            backfill_legacy_approved_payments()
+    except Exception:
+        pass
+
     try:
         total = approved_payments_col.count_documents({})
     except Exception as e:
@@ -6257,7 +6324,7 @@ def show_approved_payments_list(chat_id, message_id=None, message=None, page=0, 
             "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
         )
         markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton("❌ Close", callback_data="appv_close"))
+        markup.add(InlineKeyboardButton("❌ 𝗖𝗹𝗼𝘀𝗲", callback_data="appv_close"))
         if message_id:
             edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown", message_obj=message_obj)
         elif message:
@@ -6308,7 +6375,7 @@ def show_approved_payments_list(chat_id, message_id=None, message=None, page=0, 
 
     markup.row(
         InlineKeyboardButton("🔄 Refresh", callback_data=f"appv_p_{page}"),
-        InlineKeyboardButton("❌ Close", callback_data="appv_close")
+        InlineKeyboardButton("❌ 𝗖𝗹𝗼𝘀𝗲", callback_data="appv_close")
     )
 
     if message_id:
@@ -6404,10 +6471,10 @@ def cb_approved_payments_view(call):
 
     markup = InlineKeyboardMarkup()
     markup.row(
-        InlineKeyboardButton("🔙 Back to List", callback_data=f"appv_back_{page}"),
-        InlineKeyboardButton("🗑 Delete Record", callback_data=f"appv_del_{pid}_{page}")
+        InlineKeyboardButton("🔙 𝗕𝗮𝗰𝗸 𝘁𝗼 𝗟𝗶𝘀𝘁", callback_data=f"appv_back_{page}"),
+        InlineKeyboardButton("🗑 𝗗𝗲𝗹𝗲𝘁𝗲 𝗥𝗲𝗰𝗼𝗿𝗱", callback_data=f"appv_del_{pid}_{page}")
     )
-    markup.add(InlineKeyboardButton("❌ Close", callback_data="appv_close"))
+    markup.add(InlineKeyboardButton("❌ 𝗖𝗹𝗼𝘀𝗲", callback_data="appv_close"))
 
     ss_file_id = doc.get('screenshot_file_id')
     if ss_file_id:
@@ -7426,7 +7493,7 @@ def send_abandoned_cart_nudges():
                     "Tap below to review your cart and complete your purchase."
                 )
                 markup = InlineKeyboardMarkup().add(
-                    InlineKeyboardButton("🛒 View Cart", callback_data="cart_view")
+                    InlineKeyboardButton("🛒 𝙑𝙞𝙚𝙬 𝘾𝙖𝙧𝙩", callback_data="cart_view")
                 )
                 try:
                     bot.send_message(doc['user_id'], text, reply_markup=markup, vanish_delay=None)
@@ -7770,6 +7837,7 @@ if __name__ == '__main__':
     setup_indexes()
     bootstrap_counters()
     backfill_expired_subs()
+    backfill_legacy_approved_payments()
     resume_pending_reactions()
     scheduler = BackgroundScheduler()
     scheduler.add_job(kick_expired_users, 'interval', minutes=1)
