@@ -1595,6 +1595,28 @@ def parse_duration_only(token):
         raise ValueError("Duration must be greater than 0")
     return str(total_minutes)
 
+
+def _parse_group_add_duration(raw):
+    raw = raw.strip()
+    if not raw:
+        raise ValueError("Duration is required. Use `.` for lifetime or `30 days`.")
+    if raw.lower() in ('.', 'lifetime', 'life', 'forever'):
+        return 'lifetime', None
+    m = re.match(r'^(\d+)\s*days?$', raw, re.IGNORECASE)
+    if m:
+        days = int(m.group(1))
+        return str(days * 1440), days
+    m = re.match(r'^(\d+)\s*hours?$', raw, re.IGNORECASE)
+    if m:
+        hours = int(m.group(1))
+        return str(hours * 60), hours
+    try:
+        val = parse_duration_only(raw)
+        return val, None
+    except ValueError:
+        raise ValueError("Invalid duration. Use `.` for lifetime, `30 days`, `7 days`, or `Days:Hours:Mins`.")
+
+
 def get_ordered_plan_items(ch_data):
     """Returns (plan_key, price) pairs in the admin's chosen display order (plan_order
     field). Any plan not yet in plan_order (e.g. just added) is appended at the end in
@@ -7401,6 +7423,128 @@ def group_remove_handler(message):
         return
 
     _safe_reply(message, "❌ Invalid argument. Use `/remove @username`, `/remove <user_id>`, `/remove all`, or reply to a message.", parse_mode="Markdown")
+
+
+@bot.message_handler(commands=['add'], func=lambda m: m.chat.type in ('group', 'supergroup', 'channel'))
+@bot.channel_post_handler(commands=['add'], func=lambda m: m.chat.type in ('group', 'supergroup', 'channel'))
+def group_add_handler(message):
+    """Group/channel admins can manually add a user to this chat's subscription."""
+    if message.chat.type not in ('group', 'supergroup', 'channel'):
+        _safe_reply(message, "❌ /add only works in groups or channels.")
+        return
+
+    if not _is_chat_admin_message(message):
+        _safe_reply(message, "❌ Only chat administrators can use /add.")
+        return
+
+    if ADMIN_ID and message.from_user.id == ADMIN_ID:
+        return
+
+    chat_id = message.chat.id
+
+    try:
+        bot_member = bot.get_chat_member(chat_id, bot.user.id)
+        bstatus = getattr(bot_member, 'status', None)
+        if bstatus not in ('creator', 'administrator'):
+            _safe_reply(message, "❌ The bot must be an admin in this group/channel to add users.")
+            return
+    except Exception:
+        _safe_reply(message, "❌ Could not verify bot admin status. Make sure the bot is admin.")
+        return
+
+    raw_text = message.text or getattr(message, 'caption', None) or ''
+    args = raw_text.split()[1:] if raw_text else []
+    if not args:
+        _safe_reply(message,
+            "Usage: `/add @username 30 days` or `/add @username .` or `/add <user_id> 7 days`\n\n"
+            "Examples:\n"
+            "`/add @john 30 days`\n"
+            "`/add @jane .` (lifetime)\n"
+            "`/add 123456789 7 days`",
+            parse_mode="Markdown"
+        )
+        return
+
+    target = args[0].strip()
+    duration_raw = args[1].strip() if len(args) > 1 else '.'
+
+    target_uid = None
+    if target.isdigit() or (target.startswith('-') and target[1:].isdigit()):
+        target_uid = int(target)
+    else:
+        target_uid, _ = _resolve_username_to_id(target)
+
+    if not target_uid:
+        _safe_reply(message, f"Could not resolve `{target}` to a user.", parse_mode="Markdown")
+        return
+
+    try:
+        duration_key, days = _parse_group_add_duration(duration_raw)
+    except ValueError as e:
+        _safe_reply(message, f"Invalid duration: {e}", parse_mode="Markdown")
+        return
+
+    if duration_key == 'lifetime':
+        expiry_ts = None
+        is_lifetime = True
+        duration_label = "Lifetime"
+    else:
+        total_minutes = int(duration_key)
+        expiry_ts = (datetime.now() + timedelta(minutes=total_minutes)).timestamp()
+        is_lifetime = False
+        days, rem = divmod(total_minutes, 1440)
+        hours, mins = divmod(rem, 60)
+        parts = []
+        if days:
+            parts.append(f"{days} day(s)")
+        if hours:
+            parts.append(f"{hours} hour(s)")
+        if mins:
+            parts.append(f"{mins} minute(s)")
+        duration_label = ", ".join(parts) if parts else "0 minutes"
+
+    ch_data = channels_col.find_one({"channel_id": chat_id})
+    ch_name = ch_data.get('name') if ch_data else (message.chat.title or str(chat_id))
+
+    user_info = None
+    try:
+        user_info = bot.get_chat(target_uid)
+    except Exception:
+        pass
+    username = getattr(user_info, 'username', None)
+    first_name = getattr(user_info, 'first_name', None) or str(target_uid)
+
+    existing = users_col.find_one({"user_id": target_uid, "channel_id": chat_id})
+    sub_data = {
+        "expiry": expiry_ts,
+        "lifetime": is_lifetime,
+        "subscription_type": "admin_added",
+        "username": username,
+        "first_name": first_name,
+        "start_date": datetime.now()
+    }
+    if existing:
+        users_col.update_one({"_id": existing["_id"]}, {"$set": sub_data})
+    else:
+        sub_data.update({
+            "user_id": target_uid,
+            "channel_id": chat_id,
+            "reminded_24h": False,
+            "reminded_1h": False,
+        })
+        users_col.insert_one(sub_data)
+
+    try:
+        contact_url = contact_admin_url()
+        markup = InlineKeyboardMarkup()
+        user_msg = f"✅ You have been subscribed to *{ch_name}* for {duration_label}."
+        if contact_url:
+            markup.add(InlineKeyboardButton("Contact Admin", url=contact_url))
+        bot.send_message(target_uid, user_msg, reply_markup=markup, parse_mode="Markdown")
+    except Exception:
+        pass
+
+    _safe_reply(message, f"Added user `{target_uid}` to *{ch_name}* for {duration_label}.", parse_mode="Markdown")
 
 
 @bot.chat_member_handler(func=lambda update: True)
