@@ -18,13 +18,13 @@ try:
 except ImportError:
     qrcode = None
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputFile, InputMediaPhoto
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputFile, InputMediaPhoto, InputMediaVideo
 from telebot.handler_backends import BaseMiddleware, CancelUpdate
 from pymongo import MongoClient
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 from bson import ObjectId
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
 from threading import Thread, Timer
@@ -1596,27 +1596,6 @@ def parse_duration_only(token):
     return str(total_minutes)
 
 
-def _parse_group_add_duration(raw):
-    raw = raw.strip()
-    if not raw:
-        raise ValueError("Duration is required. Use `.` for lifetime or `30 days`.")
-    if raw.lower() in ('.', 'lifetime', 'life', 'forever'):
-        return 'lifetime', None
-    m = re.match(r'^(\d+)\s*days?$', raw, re.IGNORECASE)
-    if m:
-        days = int(m.group(1))
-        return str(days * 1440), days
-    m = re.match(r'^(\d+)\s*hours?$', raw, re.IGNORECASE)
-    if m:
-        hours = int(m.group(1))
-        return str(hours * 60), hours
-    try:
-        val = parse_duration_only(raw)
-        return val, None
-    except ValueError:
-        raise ValueError("Invalid duration. Use `.` for lifetime, `30 days`, `7 days`, or `Days:Hours:Mins`.")
-
-
 def get_ordered_plan_items(ch_data):
     """Returns (plan_key, price) pairs in the admin's chosen display order (plan_order
     field). Any plan not yet in plan_order (e.g. just added) is appended at the end in
@@ -1690,27 +1669,71 @@ def _build_plan_selection(ch_data, user_id=None):
     text = f"Yoo 👀\n\nAb yaha tak agaya hai to plan bhi lele dalle 😁\n\nYou're joining: <b>{escape(ch_data['name'])}</b> 👇{desc_part}\n\nPick your vibe below:"
     return text, markup
 
+
+def _channel_preview_media(ch_data):
+    """Return normalized photo/video preview entries, including legacy screenshots."""
+    entries = ch_data.get('preview_media')
+    normalized = []
+    if isinstance(entries, list):
+        for item in entries:
+            if not isinstance(item, dict) or not item.get('file_id'):
+                continue
+            kind = item.get('type')
+            if kind not in ('photo', 'video'):
+                continue
+            normalized.append({'type': kind, 'file_id': item['file_id']})
+    if normalized:
+        return normalized
+    legacy_file_id = ch_data.get('screenshot_file_id')
+    return [{'type': 'photo', 'file_id': legacy_file_id}] if legacy_file_id else []
+
+
+def _send_channel_preview(chat_id, ch_data, text, reply_markup, user_id=None, delay=MENU_VANISH_SECONDS):
+    """Send saved preview media with its plan/join screen; albums get a separate button card."""
+    media_items = _channel_preview_media(ch_data)
+    if len(media_items) == 1:
+        item = media_items[0]
+        if item['type'] == 'video':
+            msg = bot.send_video(chat_id, item['file_id'], caption=text, reply_markup=reply_markup, parse_mode='HTML')
+        else:
+            msg = bot.send_photo(chat_id, item['file_id'], caption=text, reply_markup=reply_markup, parse_mode='HTML', vanish_delay=None)
+        schedule_delete(chat_id, msg.message_id, delay)
+        if user_id:
+            track_msg(user_id, msg)
+        return msg
+
+    if len(media_items) > 1:
+        media_group = []
+        for index, item in enumerate(media_items):
+            caption = f"🎬 <b>{escape(ch_data.get('name') or 'Preview')}</b>" if index == 0 else None
+            media_cls = InputMediaVideo if item['type'] == 'video' else InputMediaPhoto
+            media_group.append(media_cls(item['file_id'], caption=caption, parse_mode='HTML' if caption else None))
+        try:
+            album_messages = bot.send_media_group(chat_id, media_group)
+            for album_message in album_messages:
+                schedule_delete(chat_id, album_message.message_id, delay)
+        except Exception as e:
+            print(f"[channel_preview] album send failed for {chat_id}: {e}")
+
+    msg = bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode='HTML', vanish_delay=None)
+    schedule_delete(chat_id, msg.message_id, delay)
+    if user_id:
+        track_msg(user_id, msg)
+    return msg
+
 def send_plan_selection(chat_id, ch_data, user_id=None):
     """Used for a /start deep-link entry: sends a brand new message.
-    If the channel has a screenshot, it is shown as a photo with the plans as caption."""
+    Saved photos/videos are shown above the plan buttons."""
     text, markup = _build_plan_selection(ch_data, user_id)
-    screenshot = ch_data.get('screenshot_file_id')
-    if screenshot:
-        try:
-            bot.send_photo(chat_id, screenshot, caption=text, reply_markup=markup, parse_mode="HTML")
-            return
-        except Exception:
-            pass  # fallback to text if photo fails
-    bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
+    return _send_channel_preview(chat_id, ch_data, text, markup, user_id=user_id, delay=COMMAND_VANISH_SECONDS)
 
 def edit_plan_selection(chat_id, message_id, ch_data, user_id=None):
     """Used when a user taps a channel button.
-    If the channel has a screenshot, the current text message is replaced by a photo message
-    (delete + send new photo) so the user sees the channel banner above the pricing.
+    If the channel has preview media, the current text message is replaced by that media
+    and the plan buttons.
     Without a screenshot the message is edited in-place as before."""
     text, markup = _build_plan_selection(ch_data, user_id)
-    screenshot = ch_data.get('screenshot_file_id')
-    if screenshot:
+    if _channel_preview_media(ch_data):
         # Delete the existing text message and send a fresh photo message
         cancel_delete(chat_id, message_id)
         try:
@@ -1718,12 +1741,13 @@ def edit_plan_selection(chat_id, message_id, ch_data, user_id=None):
         except Exception:
             pass
         try:
-            msg = bot.send_photo(chat_id, screenshot, caption=text, reply_markup=markup, parse_mode="HTML")
-            schedule_delete(chat_id, msg.message_id, MENU_VANISH_SECONDS)
+            return _send_channel_preview(chat_id, ch_data, text, markup, user_id=user_id)
         except Exception:
-            # Screenshot broken — fallback to plain text
+            # Preview media broken — fallback to plain text
             fallback = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
             schedule_delete(chat_id, fallback.message_id, MENU_VANISH_SECONDS)
+            if user_id:
+                track_msg(user_id, fallback)
     else:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML")
 
@@ -2124,21 +2148,16 @@ def build_free_group_join(ch_data, user_id):
 def edit_free_group_join(chat_id, message_id, ch_data, user_id, message_obj=None):
     """Shows the join screen for a free group with its screenshot banner if attached."""
     text, markup = build_free_group_join(ch_data, user_id)
-    screenshot = ch_data.get('screenshot_file_id')
-    if screenshot:
+    if _channel_preview_media(ch_data):
         cancel_delete(chat_id, message_id)
         try:
             bot.delete_message(chat_id, message_id)
         except Exception:
             pass
         try:
-            msg = bot.send_photo(chat_id, screenshot, caption=text, reply_markup=markup, parse_mode="HTML")
-            schedule_delete(chat_id, msg.message_id, MENU_VANISH_SECONDS)
-            if user_id:
-                track_msg(user_id, msg)
-            return msg
+            return _send_channel_preview(chat_id, ch_data, text, markup, user_id=user_id)
         except Exception as e:
-            print(f"[edit_free_group_join] photo send failed: {e}")
+            print(f"[edit_free_group_join] preview media send failed: {e}")
             fallback = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
             schedule_delete(chat_id, fallback.message_id, MENU_VANISH_SECONDS)
             if user_id:
@@ -2150,22 +2169,7 @@ def edit_free_group_join(chat_id, message_id, ch_data, user_id, message_obj=None
 def send_free_group_join(chat_id, ch_data, user_id):
     """Sends the join screen for a free group as a fresh message with its screenshot if attached."""
     text, markup = build_free_group_join(ch_data, user_id)
-    screenshot = ch_data.get('screenshot_file_id')
-    if screenshot:
-        try:
-            msg = bot.send_photo(chat_id, screenshot, caption=text, reply_markup=markup, parse_mode="HTML")
-            schedule_delete(chat_id, msg.message_id, COMMAND_VANISH_SECONDS)
-            if user_id:
-                track_msg(user_id, msg)
-            return msg
-        except Exception as e:
-            print(f"[send_free_group_join] photo send failed: {e}")
-            pass
-    reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
-    schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
-    if user_id:
-        track_msg(user_id, reply)
-    return reply
+    return _send_channel_preview(chat_id, ch_data, text, markup, user_id=user_id, delay=COMMAND_VANISH_SECONDS)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('freejoin_'))
 def free_group_join_handler(call):
@@ -2203,6 +2207,7 @@ def free_group_join_handler(call):
             "subscription_type": "free_group",
             "reminded_24h": False,
             "reminded_1h": False,
+            "reminded_7d": False,
             "first_name": getattr(call.from_user, 'first_name', None),
             "username": getattr(call.from_user, 'username', None),
             "start_date": now
@@ -2231,6 +2236,8 @@ def set_menu_image_start(message):
 
 @bot.callback_query_handler(func=lambda call: call.data == "menuimg_remove")
 def cb_menuimg_remove(call):
+    if not _require_admin(call):
+        return
     bot.answer_callback_query(call.id, "Menu image removed.")
     clear_menu_image()
     send_admin_reply("✅ Main menu image removed. The menu will show as plain text again.")
@@ -2359,7 +2366,10 @@ def _render_user_bundles(chat_id, message_id=None):
 def _send_bundle_preview_media(chat_id, bundle, channels):
     """Send bundle preview with numbered channels and attractive UI."""
     try:
-        screenshots = [ch.get('screenshot_file_id') for ch in channels if ch.get('screenshot_file_id')]
+        screenshots = [
+            {'type': item['type'], 'file_id': item['file_id'], 'channel': ch}
+            for ch in channels for item in _channel_preview_media(ch)
+        ]
         
         # Build numbered channel list with clean formatting
         channel_lines = []
@@ -2406,11 +2416,12 @@ def _send_bundle_preview_media(chat_id, bundle, channels):
         
         if screenshots:
             # Add initial channel preview
-            first_channel = channels[0] if channels else None
+            first_channel = screenshots[0]['channel'] if screenshots else None
             first_channel_name = escape(first_channel.get('name', 'Channel 1')) if first_channel else 'Channel 1'
             initial_text = text + f"\n\n👆 <b>Now viewing: 1. {first_channel_name}</b>"
-            
-            msg = bot.send_photo(chat_id, screenshots[0], caption=initial_text, reply_markup=markup, parse_mode="HTML")
+            first_item = screenshots[0]
+            send_method = bot.send_video if first_item['type'] == 'video' else bot.send_photo
+            msg = send_method(chat_id, first_item['file_id'], caption=initial_text, reply_markup=markup, parse_mode="HTML")
             _bundle_nav_state[chat_id] = {
                 'screenshots': screenshots,
                 'current_index': 0,
@@ -2459,7 +2470,7 @@ def bundle_nav_handler(call):
     
     # Get channel name for current screenshot
     channels = state.get('channels', [])
-    current_channel = channels[new_index] if new_index < len(channels) else None
+    current_channel = screenshots[new_index]['channel']
     channel_name = escape(current_channel.get('name', f'Channel {new_index + 1}')) if current_channel else f'Channel {new_index + 1}'
     
     # Build caption with channel preview
@@ -2480,8 +2491,10 @@ def bundle_nav_handler(call):
     
     try:
         # Include caption when editing media to preserve offer text
-        media = InputMediaPhoto(
-            screenshots[new_index],
+        item = screenshots[new_index]
+        media_cls = InputMediaVideo if item['type'] == 'video' else InputMediaPhoto
+        media = media_cls(
+            item['file_id'],
             caption=base_text + preview_text,
             parse_mode="HTML"
         )
@@ -2859,8 +2872,14 @@ def remove_user_from_chat(chat_id, user_id):
             member = bot.get_chat_member(chat_id, user_id)
             if member.status in ('creator', 'administrator'):
                 return False, "That user is a chat admin/owner and cannot be removed by the bot."
-            if member.status in ('left', 'kicked'):
+            if member.status == 'left':
                 return True, "User was already not in the chat."
+            if member.status == 'kicked':
+                try:
+                    bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
+                    return True, "User was already banned; the ban was lifted."
+                except Exception as e:
+                    return False, f"User is banned, but the bot could not lift the ban: {e}"
             break  # membership known, user is present -> proceed to ban
         except telebot.apihelper.ApiTelegramException as e:
             if e.error_code == 429:
@@ -3215,7 +3234,7 @@ def setup_commands():
         BotCommand("help", "Help & contact admin"),
     ]
     admin_commands =  user_commands + [
-        BotCommand("add", "Add a new channel"),
+        BotCommand("add", "Add group/channel by forwarding a message"),
         BotCommand("channels", "Manage channels (edit/delete)"),
         BotCommand("bundles", "Manage offers (custom fixed-price offers)"),
         BotCommand("setmenuimage", "Set/remove the main menu image"),
@@ -3255,6 +3274,88 @@ def setup_commands():
         pass
 
 # --- START / ENTRY POINT ---
+
+def _admin_menu_markup():
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("➕ Add Group/Channel", callback_data="admin_add"),
+        InlineKeyboardButton("📚 Manage Channels", callback_data="admin_channels"),
+    )
+    markup.row(
+        InlineKeyboardButton("🎁 Offers", callback_data="admin_bundles"),
+        InlineKeyboardButton("👥 Subscribers", callback_data="admin_subscribers"),
+    )
+    markup.row(
+        InlineKeyboardButton("⏳ Pending Payments", callback_data="admin_pending"),
+        InlineKeyboardButton("💳 Approved Payments", callback_data="admin_approved"),
+    )
+    markup.row(
+        InlineKeyboardButton("📊 Dashboard", callback_data="admin_dashboard"),
+        InlineKeyboardButton("📣 Broadcast", callback_data="admin_broadcast"),
+    )
+    markup.row(
+        InlineKeyboardButton("🔒 Force Join", callback_data="admin_forcejoin"),
+        InlineKeyboardButton("🧹 Cleanup", callback_data="admin_cleanup"),
+    )
+    markup.row(
+        InlineKeyboardButton("🗄 Database", callback_data="admin_dbstats"),
+        InlineKeyboardButton("🖼 Menu Image", callback_data="admin_menuimage"),
+    )
+    return markup
+
+
+def show_admin_menu(chat_id, message_id=None):
+    text = "👑 <b>Admin Panel</b>\n\nChoose an action:"
+    markup = _admin_menu_markup()
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", delay=None)
+        return
+    dismiss_previous(chat_id, ADMIN_ID)
+    reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML", vanish_delay=None)
+    track_msg(ADMIN_ID, reply)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
+def admin_menu_action(call):
+    if not _require_admin(call):
+        return
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+    action = call.data
+
+    if action == 'admin_add':
+        msg = send_prompt(
+            ADMIN_ID,
+            "Forward a message from the group or channel you want to add. "
+            "I’ll show its chat ID before you enter the plans. The bot must be an admin there.",
+        )
+        bot.register_next_step_handler(msg, get_plans)
+    elif action == 'admin_channels':
+        show_channel_list(chat_id)
+    elif action == 'admin_bundles':
+        _render_bundle_list(chat_id)
+    elif action == 'admin_subscribers':
+        show_active_users(chat_id, user_id=ADMIN_ID)
+    elif action == 'admin_pending':
+        pending_checkouts_handler(call.message)
+    elif action == 'admin_approved':
+        show_approved_payments_list(chat_id)
+    elif action == 'admin_stats':
+        stats_handler(call.message)
+    elif action == 'admin_dashboard':
+        show_admin_dashboard(chat_id, call.message.message_id)
+    elif action == 'admin_broadcast':
+        _show_broadcast_menu(chat_id)
+    elif action == 'admin_forcejoin':
+        send_force_join_menu(chat_id)
+    elif action == 'admin_cleanup':
+        show_cleanup_menu(chat_id, user_id=ADMIN_ID)
+    elif action == 'admin_dbstats':
+        dbstats_handler(call.message)
+    elif action == 'admin_menuimage':
+        set_menu_image_start(call.message)
+    elif action == 'admin_home':
+        show_admin_menu(chat_id, call.message.message_id)
 
 # =====================================================================
 # FREE TRIAL PLANS (admin-managed, logically separate from paid plans)
@@ -3688,6 +3789,7 @@ def _grant_trial_subscription(user_id, trial, claim, ch_id):
             "lifetime": False,
             "reminded_24h": False,
             "reminded_1h": False,
+            "reminded_7d": False,
             "subscription_type": "free_trial",
             "trial_plan_id": trial['trial_id'],
             "trial_claim_id": str(claim['_id']),
@@ -4040,28 +4142,10 @@ def start_handler(message):
 
     # Admin Panel Greeting
     if user_id == ADMIN_ID:
-        dismiss_previous(message.chat.id, user_id)
-        reply = bot.send_message(message.chat.id,
-            "╭━━━ 👑 𝘼𝘿𝙈𝙄𝙉 𝙋𝘼𝙉𝙀𝙇 ━━━╮\n\n"
-            "You're in control here 👇\n\n"
-            "/add — add a new channel & prices\n"
-            "/channels — manage existing channels\n"
-            "/bundles — create & manage offers\n"
-            "/removeuser — remove a subscriber\n"
-            "/stats — view bot stats & revenue\n"
-            "/broadcast — message everyone\n"
-            "/pending — review pending payments\n"
-            "/approved_payments — view approved payments & receipts\n"
-            "/dbstats — check DB storage\n"
-            "/cleanup — free up space\n"
-            "/import — bulk-import members\n"
-            "/setmenuimage — set main menu image\n"
-            "/removemenuimage — remove menu image\n"
-            "/forcejoin — force join settings\n"
-            "/buy — preview buyer flow\n\n"
-            "╰━━━━━━━━━━━━━━━━━━━━╯", parse_mode="Markdown")
-        schedule_delete(message.chat.id, reply.message_id, COMMAND_VANISH_SECONDS)
-        track_msg(user_id, reply)
+        if message.chat.type == 'private':
+            show_admin_menu(message.chat.id)
+        else:
+            _safe_reply(message, "Open a private chat with me to use the admin panel.")
     else:
         # No deep link, not the admin -> show the main hub (Premium Groups, Offers,
         # Contact) instead of dumping the full channel list on them immediately.
@@ -4354,6 +4438,8 @@ def list_channels(message):
 
 def show_channel_list(chat_id, message_id=None):
     markup = InlineKeyboardMarkup()
+    # Keep channel ordering easy to find from the /channels screen.
+    markup.add(InlineKeyboardButton("🔀 Reorder Channels", callback_data="chorder_menu"))
     cursor = channels_col.find({"admin_id": ADMIN_ID})
     count = 0
     last_emoji = None
@@ -4366,9 +4452,6 @@ def show_channel_list(chat_id, message_id=None):
         count += 1
 
     markup.add(InlineKeyboardButton("➕ Add New Channel", callback_data="add_new"))
-    if count > 1:
-        markup.add(InlineKeyboardButton("🔀 Reorder Channels", callback_data="chorder_menu"))
-
     text = "No channels found. Add one below 👇" if count == 0 else "Your Managed Channels:"
     if message_id:
         # Reached by tapping a button (e.g. Back, or after deleting a channel) -> auto-vanish
@@ -4382,35 +4465,102 @@ def show_channel_list(chat_id, message_id=None):
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_channels")
 def cb_back_channels(call):
+    if not _require_admin(call):
+        return
+
+
+def show_admin_dashboard(chat_id, message_id=None):
+    now_ts = time.time()
+    active = users_col.count_documents({'$or': [{'lifetime': True}, {'expiry': {'$gt': now_ts}}]})
+    expiring_24h = users_col.count_documents({
+        'expiry': {'$gt': now_ts, '$lte': now_ts + 24 * 3600}, 'lifetime': {'$ne': True}
+    })
+    channel_count = channels_col.count_documents({'admin_id': ADMIN_ID})
+    pending_count = (pending_checkouts_col.count_documents({}) +
+                     pending_offer_bundle_checkouts_col.count_documents({}))
+    counters = counters_col.find_one({'_id': 'stats'}) or {}
+    month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    month_revenue = sum(int(p.get('amount', 0) or 0) for p in payments_col.find({'timestamp': {'$gte': month_start}}))
+    text = (
+        "👑 <b>Admin Dashboard</b>\n\n"
+        f"📚 Channels: <b>{channel_count}</b>\n"
+        f"👥 Active subscriptions: <b>{active}</b>\n"
+        f"⏰ Expiring in 24 hours: <b>{expiring_24h}</b>\n"
+        f"⏳ Pending payments: <b>{pending_count}</b>\n"
+        f"🧾 Total sales: <b>{int(counters.get('total_sales', 0) or 0)}</b>\n"
+        f"💰 Lifetime revenue: <b>₹{int(counters.get('total_revenue', 0) or 0)}</b>\n"
+        f"📅 This month's revenue: <b>₹{month_revenue}</b>\n\n"
+        "Expiry reminders are sent 7 days, 24 hours, and 1 hour before access ends."
+    )
+    markup = InlineKeyboardMarkup()
+    markup.row(
+        InlineKeyboardButton("👥 Subscribers", callback_data="admin_subscribers"),
+        InlineKeyboardButton("⏳ Pending Payments", callback_data="admin_pending"),
+    )
+    markup.add(InlineKeyboardButton("🏠 Admin Panel", callback_data="admin_home"))
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode='HTML', delay=None)
+    else:
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode='HTML', vanish_delay=None)
     bot.answer_callback_query(call.id)
     show_channel_list(call.message.chat.id, call.message.message_id)
 
 # --- ADMIN: ADD NEW CHANNEL ---
 
-@bot.message_handler(commands=['add'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['add'], func=lambda m: m.chat.type == 'private' and m.from_user and m.from_user.id == ADMIN_ID)
 def add_channel_start(message):
     # Awaiting a forward -> prompt never auto-vanishes
-    msg = send_prompt(ADMIN_ID, "Make sure the bot is Admin in your channel, then FORWARD any message from that channel here.")
+    msg = send_prompt(
+        ADMIN_ID,
+        "Forward a message from the group or channel you want to add. "
+        "I’ll show its chat ID before you enter the plans. The bot must be an admin there.",
+    )
     bot.register_next_step_handler(msg, get_plans)
 
 @bot.callback_query_handler(func=lambda call: call.data == "add_new")
 def cb_add_new(call):
+    if not _require_admin(call):
+        return
     bot.answer_callback_query(call.id)
     # Reached via button, but this is now a prompt awaiting a forward -> never auto-vanish
-    msg = send_prompt(ADMIN_ID, "FORWARD any message from your channel here.")
+    msg = send_prompt(
+        ADMIN_ID,
+        "Forward a message from the group or channel you want to add. "
+        "I’ll show its chat ID before you enter the plans. The bot must be an admin there.",
+    )
     bot.register_next_step_handler(msg, get_plans)
 
+def _forwarded_source_chat(message):
+    """Return the source group/channel when Telegram includes it in the forward metadata."""
+    chat = getattr(message, 'forward_from_chat', None)
+    if chat and getattr(chat, 'id', None):
+        return chat
+
+    origin = getattr(message, 'forward_origin', None)
+    if origin:
+        chat = getattr(origin, 'chat', None) or getattr(origin, 'sender_chat', None)
+        if chat and getattr(chat, 'id', None):
+            return chat
+    return None
+
+
 def get_plans(message):
-    if message.forward_from_chat:
-        ch_id = message.forward_from_chat.id
-        ch_name = message.forward_from_chat.title
+    source_chat = _forwarded_source_chat(message)
+    if source_chat:
+        ch_id = int(source_chat.id)
+        ch_name = getattr(source_chat, 'title', None) or getattr(source_chat, 'username', None) or str(ch_id)
         msg = send_prompt(ADMIN_ID,
-            f"Channel Detected: *{ch_name}*\n\nEnter plans in format (Days:Hours:Mins:Price):\n`D:H:M:Price, D:H:M:Price` \n\n"
+            f"Chat detected: *{escape_markdown(ch_name)}*\n"
+            f"Chat ID: `{ch_id}`\n\n"
+            "Enter plans in format (Days:Hours:Mins:Price):\n`D:H:M:Price, D:H:M:Price` \n\n"
             "Example:\n`1:0:0:99, 0:2:30:49`\n(1 Day for ₹99, and 2 hours 30 mins for ₹49)\n\n"
             "For a permanent plan, use `lifetime:Price` instead, e.g. `lifetime:999`", parse_mode="Markdown")
         bot.register_next_step_handler(msg, finalize_channel, ch_id, ch_name)
     else:
-        send_admin_reply("❌ Error: Message was not forwarded. Use /add to try again.")
+        send_admin_reply(
+            "❌ I couldn't read a source chat ID from that forward. Forward a post from a channel, "
+            "or a group message whose forward details include the source chat. Try Add Group/Channel again."
+        )
 
 def finalize_channel(message, ch_id, ch_name):
     try:
@@ -4427,47 +4577,227 @@ def finalize_channel(message, ch_id, ch_name):
         next_order = (existing_max[0].get('order', 0) + 1) if existing_max else 1
         channels_col.update_one({"channel_id": ch_id}, {"$set": {"name": ch_name, "plans": plans_dict, "admin_id": ADMIN_ID, "order": next_order}}, upsert=True)
         bot_username = bot.get_me().username
-        send_admin_reply(f"✅ Plans saved!\n\nInvite Link:\n`https://t.me/{bot_username}?start={ch_id}`", parse_mode="Markdown")
+        send_admin_reply(
+            f"✅ Plans saved for *{escape_markdown(ch_name)}*!\n"
+            f"Chat ID: `{ch_id}`\n\n"
+            f"Invite Link:\n`https://t.me/{bot_username}?start={ch_id}`",
+            parse_mode="Markdown",
+        )
 
-        # Now ask for a channel screenshot/banner
+        # Now ask for an optional photo/video preview
         msg = send_prompt(ADMIN_ID,
-            "📸 *Optional:* Send a screenshot or banner image of your channel so users can preview it before buying.\n\n"
-            "This image will be shown above the pricing when a user taps on this channel.\n\n"
-            "Send a photo now, or type /skip to finish without one.", parse_mode="Markdown")
+            "🖼 *Optional preview:* Send a photo, an MP4 video, or an album of photos/videos.\n\n"
+            "Users will see this media before the channel plans. Send /skip to continue without a preview.", parse_mode="Markdown")
         bot.register_next_step_handler(msg, save_channel_screenshot, ch_id, True)
     except Exception:
         send_admin_reply("❌ Invalid format. Please use `Days:Hours:Mins:Price` or `lifetime:Price`, comma-separated. Use /add to retry.")
 
-def save_channel_screenshot(message, ch_id, is_initial=False):
-    """Saves (or removes) the channel screenshot after finalize or editss flow."""
-    if message.text and message.text.strip().lower() in ('/skip', 'skip'):
-        # Admin chose to skip — clear any existing screenshot
-        channels_col.update_one({"channel_id": ch_id}, {"$unset": {"screenshot_file_id": ""}})
-        if is_initial:
-            msg = send_prompt(ADMIN_ID,
-                "📝 *Optional:* Send a short description or 'about' caption for your channel.\n\n"
-                "This text will be shown to users when browsing this channel's plans.\n\n"
-                "Send the text now, or type /skip to finish without one.", parse_mode="Markdown")
-            bot.register_next_step_handler(msg, save_channel_description, ch_id)
-        else:
-            send_admin_reply("✅ Screenshot removed.")
+_preview_uploads = {}
+_preview_drafts = {}
+_preview_editor_album_ids = {}
+PREVIEW_ALBUM_COLLECT_SECONDS = 1.5
+
+
+def _preview_upload_entry(message):
+    if message.photo:
+        return {'type': 'photo', 'file_id': message.photo[-1].file_id}
+    if message.video:
+        return {'type': 'video', 'file_id': message.video.file_id}
+    document = getattr(message, 'document', None)
+    if document and getattr(document, 'mime_type', '') == 'video/mp4':
+        return {'type': 'video', 'file_id': document.file_id}
+    return None
+
+
+def _prompt_channel_description(ch_id):
+    msg = send_prompt(ADMIN_ID,
+        "📝 *Optional:* Send a short description or 'about' caption for your channel.\n\n"
+        "This text will be shown to users when browsing this channel's plans.\n\n"
+        "Send the text now, or type /skip to finish without one.", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, save_channel_description, ch_id)
+
+
+def _finish_channel_preview_upload(ch_id, media_items, is_initial):
+    _preview_drafts[ch_id] = {'items': list(media_items), 'is_initial': is_initial}
+    _render_preview_editor(ch_id, ADMIN_ID, is_draft=True)
+
+
+def _flush_preview_upload(ch_id, expected_group_id=None):
+    state = _preview_uploads.get(ch_id)
+    if not state or (expected_group_id is not None and state['group_id'] != expected_group_id):
         return
-    if not message.photo:
-        # Not a photo and not a skip command — re-prompt
+    _preview_uploads.pop(ch_id, None)
+    _finish_channel_preview_upload(ch_id, state['items'], state['is_initial'])
+
+
+def save_channel_screenshot(message, ch_id, is_initial=False):
+    """Save preview photos/videos; Telegram album parts are collected briefly."""
+    text = (message.text or '').strip().lower() if message.text else ''
+    if text in ('/skip', 'skip'):
+        state = _preview_uploads.pop(ch_id, None)
+        if state and state.get('timer'):
+            state['timer'].cancel()
+        channels_col.update_one({"channel_id": ch_id}, {"$unset": {"screenshot_file_id": "", "preview_media": ""}})
+        if is_initial:
+            _prompt_channel_description(ch_id)
+        else:
+            send_admin_reply("✅ Preview media removed.")
+        return
+
+    entry = _preview_upload_entry(message)
+    if not entry:
         msg = send_prompt(ADMIN_ID,
-            "❌ That doesn’t look like a photo.\n\nPlease send an image of the channel, or type /skip to finish without one.")
+            "❌ Send a photo, an MP4 video, or a Telegram album of photos/videos. Type /skip to remove the current preview or finish without one.")
         bot.register_next_step_handler(msg, save_channel_screenshot, ch_id, is_initial)
         return
-    file_id = message.photo[-1].file_id  # highest resolution
-    channels_col.update_one({"channel_id": ch_id}, {"$set": {"screenshot_file_id": file_id}})
-    if is_initial:
-        msg = send_prompt(ADMIN_ID,
-            "📝 *Optional:* Send a short description or 'about' caption for your channel.\n\n"
-            "This text will be shown to users when browsing this channel's plans.\n\n"
-            "Send the text now, or type /skip to finish without one.", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, save_channel_description, ch_id)
+
+    group_id = getattr(message, 'media_group_id', None)
+    if group_id:
+        state = _preview_uploads.get(ch_id)
+        if state and state['group_id'] != group_id:
+            old_state = _preview_uploads.pop(ch_id)
+            old_state['timer'].cancel()
+            _finish_channel_preview_upload(ch_id, old_state['items'], old_state['is_initial'])
+            state = None
+        if not state:
+            state = {'group_id': group_id, 'items': [], 'is_initial': is_initial, 'timer': None}
+            _preview_uploads[ch_id] = state
+        state['items'].append(entry)
+        if state['timer']:
+            state['timer'].cancel()
+        timer = Timer(PREVIEW_ALBUM_COLLECT_SECONDS, _flush_preview_upload, args=(ch_id, group_id))
+        timer.daemon = True
+        state['timer'] = timer
+        timer.start()
+        bot.register_next_step_handler(message, save_channel_screenshot, ch_id, is_initial)
+        return
+
+    pending = _preview_uploads.pop(ch_id, None)
+    if pending:
+        pending['timer'].cancel()
+        _finish_channel_preview_upload(ch_id, pending['items'], pending['is_initial'])
+    _finish_channel_preview_upload(ch_id, [entry], is_initial)
+
+
+def _clear_preview_editor_album(ch_id):
+    for message_id in _preview_editor_album_ids.pop(ch_id, []):
+        try:
+            bot.delete_message(ADMIN_ID, message_id)
+        except Exception:
+            pass
+
+
+def _render_preview_editor(ch_id, chat_id, is_draft=True, message_id=None):
+    draft = _preview_drafts.get(ch_id) if is_draft else None
+    ch_data = channels_col.find_one({'channel_id': ch_id}) or {}
+    items = draft['items'] if draft is not None else _channel_preview_media(ch_data)
+    _clear_preview_editor_album(ch_id)
+    album_ids = []
+    try:
+        if len(items) == 1:
+            item = items[0]
+            method = bot.send_video if item['type'] == 'video' else bot.send_photo
+            preview_msg = method(chat_id, item['file_id'], caption=f"Preview: {escape(ch_data.get('name', str(ch_id)))}")
+            album_ids.append(preview_msg.message_id)
+        elif len(items) > 1:
+            media = []
+            for item in items:
+                media_cls = InputMediaVideo if item['type'] == 'video' else InputMediaPhoto
+                media.append(media_cls(item['file_id']))
+            album_ids.extend(m.message_id for m in bot.send_media_group(chat_id, media))
+    except Exception as e:
+        print(f"[preview_editor] preview send failed for {ch_id}: {e}")
+        send_admin_reply("⚠️ Couldn't display one or more preview items. You can still edit or remove them below.")
+    _preview_editor_album_ids[ch_id] = album_ids
+
+    markup = InlineKeyboardMarkup(row_width=3)
+    if items:
+        for idx, item in enumerate(items):
+            controls = []
+            if idx > 0:
+                controls.append(InlineKeyboardButton("⬆️", callback_data=f"pvup_{ch_id}_{idx}"))
+            controls.append(InlineKeyboardButton(f"🗑 {idx + 1} ({item['type']})", callback_data=f"pvremove_{ch_id}_{idx}"))
+            if idx < len(items) - 1:
+                controls.append(InlineKeyboardButton("⬇️", callback_data=f"pvdown_{ch_id}_{idx}"))
+            markup.row(*controls)
+    markup.row(
+        InlineKeyboardButton("💾 Save Preview", callback_data=f"pvsave_{ch_id}"),
+        InlineKeyboardButton("Cancel", callback_data=f"pvcancel_{ch_id}"),
+    )
+    mode = "Draft preview" if draft is not None else "Saved preview"
+    text = (f"🖼 <b>{mode}: {escape(ch_data.get('name', str(ch_id)))}</b>\n"
+            f"{len(items)} item(s). Use ⬆️/⬇️ to reorder or tap an item to remove it.\n"
+            "Review the media above, then save the preview.")
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", delay=None)
     else:
-        send_admin_reply("✅ Screenshot saved! Users will now see the channel preview above pricing.")
+        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML", vanish_delay=None)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('pvmanage_', 'pvsave_', 'pvcancel_', 'pvup_', 'pvdown_', 'pvremove_')))
+def preview_editor_action(call):
+    if not _require_admin(call):
+        return
+    action, *parts = call.data.split('_')
+    try:
+        ch_id = int(parts[0])
+    except (ValueError, IndexError):
+        bot.answer_callback_query(call.id, "Invalid preview action.")
+        return
+    if action == 'pvmanage':
+        ch_data = channels_col.find_one({'channel_id': ch_id})
+        if not ch_data:
+            bot.answer_callback_query(call.id, "Channel not found.")
+            return
+        _preview_drafts[ch_id] = {'items': _channel_preview_media(ch_data), 'is_initial': False}
+        bot.answer_callback_query(call.id)
+        _render_preview_editor(ch_id, call.message.chat.id, is_draft=True, message_id=call.message.message_id)
+        return
+    draft = _preview_drafts.get(ch_id)
+    if not draft:
+        bot.answer_callback_query(call.id, "Preview edit expired. Open Manage Preview again.")
+        return
+    if action == 'pvcancel':
+        _preview_drafts.pop(ch_id, None)
+        _clear_preview_editor_album(ch_id)
+        bot.answer_callback_query(call.id, "Preview changes discarded.")
+        if draft.get('is_initial'):
+            _prompt_channel_description(ch_id)
+        else:
+            show_channel_list(call.message.chat.id, call.message.message_id)
+        return
+    if action == 'pvsave':
+        items = draft['items']
+        if items:
+            first_photo = next((item['file_id'] for item in items if item['type'] == 'photo'), None)
+            channels_col.update_one({'channel_id': ch_id}, {'$set': {
+                'preview_media': items, 'screenshot_file_id': first_photo,
+            }})
+        else:
+            channels_col.update_one({'channel_id': ch_id}, {'$unset': {'preview_media': '', 'screenshot_file_id': ''}})
+        _preview_drafts.pop(ch_id, None)
+        _clear_preview_editor_album(ch_id)
+        bot.answer_callback_query(call.id, "Preview saved.")
+        if draft.get('is_initial'):
+            _prompt_channel_description(ch_id)
+        else:
+            show_channel_list(call.message.chat.id, call.message.message_id)
+        return
+    try:
+        idx = int(parts[1])
+        items = draft['items']
+        if idx < 0 or idx >= len(items):
+            raise ValueError
+        if action == 'pvremove':
+            items.pop(idx)
+        else:
+            swap = idx - 1 if action == 'pvup' else idx + 1
+            if 0 <= swap < len(items):
+                items[idx], items[swap] = items[swap], items[idx]
+        bot.answer_callback_query(call.id)
+        _render_preview_editor(ch_id, call.message.chat.id, is_draft=True, message_id=call.message.message_id)
+    except (ValueError, IndexError):
+        bot.answer_callback_query(call.id, "That preview item is no longer available.")
 
 def save_channel_description(message, ch_id):
     if message.text and message.text.strip().lower() in ('/skip', 'skip'):
@@ -4503,7 +4833,8 @@ def manage_ch(call):
     markup.add(InlineKeyboardButton("✏️ Edit Plans", callback_data=f"editplans_{ch_id}"))
     markup.add(InlineKeyboardButton("🎁 Free Trials", callback_data=f"trials_{ch_id}"))
     markup.add(InlineKeyboardButton("📝 Edit About/Description", callback_data=f"editdesc_{ch_id}"))
-    markup.add(InlineKeyboardButton("📸 Update Screenshot", callback_data=f"editss_{ch_id}"))
+    markup.add(InlineKeyboardButton("🖼 Manage Preview", callback_data=f"pvmanage_{ch_id}"))
+    markup.add(InlineKeyboardButton("➕ Replace Preview Media", callback_data=f"editss_{ch_id}"))
     markup.add(InlineKeyboardButton("🔀 Reorder Channels", callback_data="chorder_menu"))
     markup.add(InlineKeyboardButton(("▶️ Resume Channel" if ch_data.get('paused') else "⏸ Pause Channel"),
                                     callback_data=f"pausech_{ch_id}"))
@@ -4517,7 +4848,8 @@ def manage_ch(call):
     markup.add(InlineKeyboardButton("🗑 Delete Channel", callback_data=f"delch_{ch_id}"))
     markup.add(InlineKeyboardButton("⬅️ 𝗕𝗮𝗰𝗸 𝘁𝗼 𝗖𝗵𝗮𝗻𝗻𝗲𝗹𝘀", callback_data="back_channels"))
 
-    ss_status = "✅ Screenshot set" if ch_data.get('screenshot_file_id') else "❌ No screenshot yet"
+    preview_count = len(_channel_preview_media(ch_data))
+    ss_status = f"✅ Preview set ({preview_count} item(s))" if preview_count else "❌ No preview yet"
     desc_status = ch_data.get('description', 'None set')
     position = next((i for i, c in enumerate(get_sorted_channels(ADMIN_ID), start=1) if c['channel_id'] == ch_id), None)
     position_status = f"{RANK_BADGES.get(position, '')} #{position}".strip() if position else "Unset"
@@ -4752,10 +5084,10 @@ def edit_screenshot_prompt(call):
     bot.answer_callback_query(call.id)
     ch_data = channels_col.find_one({"channel_id": ch_id})
     ch_name = ch_data['name'] if ch_data else str(ch_id)
-    has_existing = bool(ch_data and ch_data.get('screenshot_file_id'))
-    hint = " (or type /skip to *remove* the current one)" if has_existing else " (or type /skip to finish without one)"
+    has_existing = bool(ch_data and _channel_preview_media(ch_data))
+    hint = " (or type /skip to *remove* the current preview)" if has_existing else " (or type /skip to finish without one)"
     msg = send_prompt(ADMIN_ID,
-        f"📸 Send a new screenshot / banner image for *{ch_name}*{hint}.",
+        f"🖼 Send a photo, MP4 video, or album of photos/videos for *{ch_name}*. This uploads a replacement draft for review.{hint}",
         parse_mode="Markdown")
     bot.register_next_step_handler(msg, save_channel_screenshot, ch_id)
 
@@ -4827,6 +5159,8 @@ def save_channel_description_edit(message, ch_id):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('delch_'))
 def confirm_delete_channel(call):
+    if not _require_admin(call):
+        return
     ch_id = int(call.data.split('_')[1])
     ch_data = channels_col.find_one({"channel_id": ch_id})
     bot.answer_callback_query(call.id)
@@ -4841,6 +5175,8 @@ def confirm_delete_channel(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('delchconfirm_'))
 def delete_channel(call):
+    if not _require_admin(call):
+        return
     ch_id = int(call.data.split('_')[1])
     channels_col.delete_one({"channel_id": ch_id})
     bot.answer_callback_query(call.id, "Channel deleted.")
@@ -4944,6 +5280,8 @@ def edit_single_plan(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('editprice_'))
 def edit_price_prompt(call):
+    if not _require_admin(call):
+        return
     _, ch_id, t = call.data.split('_')
     bot.answer_callback_query(call.id)
     # Awaiting a text reply -> never auto-vanish, even though reached via button tap
@@ -4951,12 +5289,40 @@ def edit_price_prompt(call):
     bot.register_next_step_handler(msg, save_new_price, int(ch_id), t)
 
 def save_new_price(message, ch_id, t):
-    new_price = message.text.strip()
-    if not new_price.isdigit():
+    new_price = (message.text or '').strip()
+    if not new_price.isdigit() or int(new_price) <= 0:
         send_admin_reply("❌ Invalid price. Please enter numbers only. Use /channels to try again.")
         return
-    channels_col.update_one({"channel_id": ch_id}, {"$set": {f"plans.{t}": new_price}})
-    send_admin_reply(f"✅ Price updated to ₹{new_price} for the {format_label(t)} plan.")
+    token = secrets.token_urlsafe(6)
+    _pending_price_changes[token] = {'channel_id': ch_id, 'plan': t, 'price': int(new_price)}
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("✅ Confirm price", callback_data=f"priceconfirm_{token}"))
+    markup.add(InlineKeyboardButton("Cancel", callback_data=f"pricecancel_{token}"))
+    send_admin_reply(
+        f"Confirm price change\n\nPlan: {format_label(t)}\nNew price: ₹{int(new_price)}\n\nApply this change?",
+        reply_markup=markup)
+
+
+_pending_price_changes = {}
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('priceconfirm_', 'pricecancel_')))
+def confirm_price_change(call):
+    if not _require_admin(call):
+        return
+    action, token = call.data.split('_', 1)
+    pending = _pending_price_changes.pop(token, None)
+    if not pending:
+        bot.answer_callback_query(call.id, "This price change expired.")
+        return
+    if action == 'priceconfirm':
+        ch_id, plan, price = pending['channel_id'], pending['plan'], pending['price']
+        channels_col.update_one({'channel_id': ch_id}, {'$set': {f'plans.{plan}': price}})
+        result = f"✅ Price updated to ₹{price} for the {format_label(plan)} plan."
+    else:
+        result = "✅ Price change canceled. The current price is unchanged."
+    bot.answer_callback_query(call.id)
+    edit_menu(call.message.chat.id, call.message.message_id, result)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('editdur_'))
 def edit_duration_prompt(call):
@@ -4989,8 +5355,33 @@ def save_new_duration(message, ch_id, old_t):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('delplan_'))
 def delete_plan(call):
+    if not _require_admin(call):
+        return
     _, ch_id, t = call.data.split('_')
     ch_id = int(ch_id)
+    ch_data = channels_col.find_one({'channel_id': ch_id})
+    if not ch_data or t not in (ch_data.get('plans') or {}):
+        bot.answer_callback_query(call.id, "Plan not found.")
+        return
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("✅ Delete Plan", callback_data=f"delplanconfirm_{ch_id}_{t}"))
+    markup.add(InlineKeyboardButton("Cancel", callback_data=f"editplan_{ch_id}_{t}"))
+    bot.answer_callback_query(call.id)
+    edit_menu(call.message.chat.id, call.message.message_id,
+              f"Delete {format_label(t)} — ₹{ch_data['plans'][t]}? This cannot be undone.",
+              reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('delplanconfirm_'))
+def delete_plan_confirmed(call):
+    if not _require_admin(call):
+        return
+    _, ch_id, t = call.data.split('_')
+    ch_id = int(ch_id)
+    ch_data = channels_col.find_one({'channel_id': ch_id})
+    if not ch_data or t not in (ch_data.get('plans') or {}):
+        bot.answer_callback_query(call.id, "Plan not found.")
+        return
     channels_col.update_one({"channel_id": ch_id}, {"$unset": {f"plans.{t}": ""}})
     channels_col.update_one({"channel_id": ch_id}, {"$pull": {"plan_order": t}})
     bot.answer_callback_query(call.id, "Plan deleted.")
@@ -5265,14 +5656,15 @@ def bundle_checkout_handler(call):
     _proceed_bundle_payment(call.message.chat.id, call.message.message_id, bundle)
 
 def _send_bundle_preview(chat_id, message_id, bundle, channels):
-    """Send a preview of the bundle with screenshots and descriptions before payment."""
-    screenshot_file_ids = []
+    """Send bundle channel preview media and descriptions before payment."""
+    preview_items = []
     description_parts = []
     
     for ch in channels:
-        screenshot = ch.get('screenshot_file_id')
-        if screenshot:
-            screenshot_file_ids.append(screenshot)
+        media = _channel_preview_media(ch)
+        if media:
+            for item in media:
+                preview_items.append((ch, item))
         else:
             desc = ch.get('description')
             if desc:
@@ -5283,20 +5675,27 @@ def _send_bundle_preview(chat_id, message_id, bundle, channels):
     markup.add(InlineKeyboardButton("⬅️ 𝗕𝗮𝗰𝗸 𝘁𝗼 𝗢𝗳𝗳𝗲𝗿𝘀", callback_data="main_obundles"))
     
     try:
-        if screenshot_file_ids:
-            # Send screenshots as media group (album)
-            media_group = []
-            for idx, file_id in enumerate(screenshot_file_ids):
-                if idx == 0:
-                    # First image gets the bundle info as caption
-                    caption = (f"🎉 <b>{escape(bundle.get('title', 'Offer Preview'))}</b>\n\n"
-                               f"<b>Included channels:</b> {len(channels)}\n\n"
-                               "Swipe to see all channels 👇")
-                    media_group.append(InputMediaPhoto(file_id, caption=caption, parse_mode="HTML"))
-                else:
-                    media_group.append(InputMediaPhoto(file_id))
-            
-            bot.send_media_group(chat_id, media_group)
+        if preview_items:
+            # Telegram albums accept at most ten items; split larger previews into albums.
+            for start in range(0, len(preview_items), 10):
+                batch = preview_items[start:start + 10]
+                if len(batch) == 1:
+                    ch, item = batch[0]
+                    caption = f"🎉 <b>{escape(bundle.get('title', 'Offer Preview'))}</b>\n\n<b>{escape(ch.get('name', 'Channel'))}</b>"
+                    send_method = bot.send_video if item['type'] == 'video' else bot.send_photo
+                    media_msg = send_method(chat_id, item['file_id'], caption=caption, parse_mode='HTML')
+                    schedule_delete(chat_id, media_msg.message_id, MENU_VANISH_SECONDS)
+                    continue
+                media_group = []
+                for idx, (ch, item) in enumerate(batch):
+                    caption = None
+                    if start == 0 and idx == 0:
+                        caption = (f"🎉 <b>{escape(bundle.get('title', 'Offer Preview'))}</b>\n\n"
+                                   f"<b>Included channels:</b> {len(channels)}\n\nSwipe to see previews 👇")
+                    media_cls = InputMediaVideo if item['type'] == 'video' else InputMediaPhoto
+                    media_group.append(media_cls(item['file_id'], caption=caption, parse_mode='HTML' if caption else None))
+                for media_msg in bot.send_media_group(chat_id, media_group):
+                    schedule_delete(chat_id, media_msg.message_id, MENU_VANISH_SECONDS)
             
             # Send descriptions for channels without screenshots
             if description_parts:
@@ -5418,6 +5817,8 @@ def receive_bundle_screenshot(message, token):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('obrej_'))
 def bundle_reject_handler(call):
+    if not _require_admin(call):
+        return
     token = call.data.split('_', 1)[1]
     doc = pending_offer_bundle_checkouts_col.find_one({'_id': ObjectId(token)})
     if doc:
@@ -5441,6 +5842,8 @@ def bundle_reject_handler(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('obapp_'))
 def bundle_approve_handler(call):
+    if not _require_admin(call):
+        return
     token = call.data.split('_', 1)[1]
     doc = pending_offer_bundle_checkouts_col.find_one({'_id': ObjectId(token)})
     if not doc:
@@ -5459,13 +5862,13 @@ def bundle_approve_handler(call):
                 link = bot.create_chat_invite_link(ch_id, member_limit=1)
                 users_col.update_one({'user_id': user_id, 'channel_id': ch_id}, {'$set': {
                     'expiry': None, 'lifetime': True, 'subscription_type': 'bundle',
-                    'bundle_id': doc['bundle_id'], 'reminded_24h': True, 'reminded_1h': True}}, upsert=True)
+                    'bundle_id': doc['bundle_id'], 'reminded_24h': True, 'reminded_1h': True, 'reminded_7d': True}}, upsert=True)
                 result_lines.append(f"• {escape_markdown(name)} — Lifetime\nJoin Link: {link.invite_link}")
             else:
                 expiry = datetime.now() + timedelta(minutes=int(duration)); link = bot.create_chat_invite_link(ch_id, member_limit=1, expire_date=int(expiry.timestamp()))
                 users_col.update_one({'user_id': user_id, 'channel_id': ch_id}, {'$set': {
                     'expiry': expiry.timestamp(), 'lifetime': False, 'subscription_type': 'bundle',
-                    'bundle_id': doc['bundle_id'], 'reminded_24h': False, 'reminded_1h': False}}, upsert=True)
+                    'bundle_id': doc['bundle_id'], 'reminded_24h': False, 'reminded_1h': False, 'reminded_7d': False}}, upsert=True)
                 result_lines.append(f"• {escape_markdown(name)} — {format_label(duration)}\nJoin Link: {link.invite_link}")
         except Exception as e:
             errors.append(f"• {escape_markdown(name)}: {e}")
@@ -5685,6 +6088,8 @@ def cancel_command_handler(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('coutrej_'))
 def cout_reject_handler(call):
+    if not _require_admin(call):
+        return
     token = call.data.split('_', 1)[1]
     bot.answer_callback_query(call.id, "Rejected.")
     try:
@@ -5715,6 +6120,8 @@ def cout_reject_handler(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('coutapp_'))
 def cout_approve_handler(call):
+    if not _require_admin(call):
+        return
     token = call.data.split('_', 1)[1]
     try:
         doc = pending_checkouts_col.find_one({"_id": ObjectId(token)})
@@ -5749,7 +6156,7 @@ def cout_approve_handler(call):
                 link = bot.create_chat_invite_link(ch_id, member_limit=1)  # single-use invite; expires on first join
                 users_col.update_one(
                     {"user_id": u_id, "channel_id": ch_id},
-                    {"$set": {"expiry": None, "lifetime": True, "reminded_24h": True, "reminded_1h": True}},
+                    {"$set": {"expiry": None, "lifetime": True, "reminded_24h": True, "reminded_1h": True, "reminded_7d": True}},
                     upsert=True
                 )
                 result_lines.append(f"• {escape_markdown(name)} — Lifetime ♾️\nJoin Link: {link.invite_link}")
@@ -5760,7 +6167,7 @@ def cout_approve_handler(call):
                 link = bot.create_chat_invite_link(ch_id, member_limit=1, expire_date=expiry_ts)
                 users_col.update_one(
                     {"user_id": u_id, "channel_id": ch_id},
-                    {"$set": {"expiry": expiry_datetime.timestamp(), "lifetime": False, "reminded_24h": False, "reminded_1h": False}},
+                    {"$set": {"expiry": expiry_datetime.timestamp(), "lifetime": False, "reminded_24h": False, "reminded_1h": False, "reminded_7d": False}},
                     upsert=True
                 )
                 result_lines.append(f"• {escape_markdown(name)} — {format_label(t)}\nJoin Link: {link.invite_link}")
@@ -6179,11 +6586,15 @@ def show_cleanup_menu(chat_id, message_id=None, user_id=None):
 
 @bot.callback_query_handler(func=lambda call: call.data == "cleanup_refresh")
 def cb_cleanup_refresh(call):
+    if not _require_admin(call):
+        return
     bot.answer_callback_query(call.id)
     show_cleanup_menu(call.message.chat.id, call.message.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "cleanuppay_ask")
 def cb_cleanup_payments_ask(call):
+    if not _require_admin(call):
+        return
     bot.answer_callback_query(call.id)
     cutoff = datetime.now() - timedelta(days=CLEANUP_PAYMENTS_DAYS)
     count = payments_col.count_documents({"timestamp": {"$lt": cutoff}})
@@ -6197,6 +6608,8 @@ def cb_cleanup_payments_ask(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "cleanuppay_confirm")
 def cb_cleanup_payments_confirm(call):
+    if not _require_admin(call):
+        return
     bot.answer_callback_query(call.id, "Deleting...")
     cutoff = datetime.now() - timedelta(days=CLEANUP_PAYMENTS_DAYS)
     result = payments_col.delete_many({"timestamp": {"$lt": cutoff}})
@@ -6206,6 +6619,8 @@ def cb_cleanup_payments_confirm(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "cleanupseen_ask")
 def cb_cleanup_seenusers_ask(call):
+    if not _require_admin(call):
+        return
     bot.answer_callback_query(call.id)
     cutoff = datetime.now() - timedelta(days=CLEANUP_SEENUSERS_DAYS)
     count = seen_users_col.count_documents({"last_seen": {"$lt": cutoff}})
@@ -6219,6 +6634,8 @@ def cb_cleanup_seenusers_ask(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "cleanupseen_confirm")
 def cb_cleanup_seenusers_confirm(call):
+    if not _require_admin(call):
+        return
     bot.answer_callback_query(call.id, "Deleting...")
     cutoff = datetime.now() - timedelta(days=CLEANUP_SEENUSERS_DAYS)
     result = seen_users_col.delete_many({"last_seen": {"$lt": cutoff}})
@@ -6560,6 +6977,8 @@ def cb_approved_payments_del(call):
     show_approved_payments_list(call.message.chat.id, message_id=call.message.message_id, page=page, message_obj=call.message)
 
 _bc_pending_text = {}  # ADMIN_ID -> text typed before asking for the schedule time
+_pending_broadcast_actions = {}
+BROADCAST_TIMEZONE = timezone(timedelta(hours=5, minutes=30))  # India Standard Time (UTC+05:30)
 
 def _show_broadcast_menu(chat_id, message_id=None):
     """Admin menu for /broadcast: send now, schedule later, or list scheduled ones."""
@@ -6606,10 +7025,10 @@ def _bc_sched_time(message):
         return
     _bc_pending_text[ADMIN_ID] = message.text
     msg = send_prompt(ADMIN_ID,
-        "⏰ *When should this drop?*\n\n"
+        "⏰ *When should this drop? (IST, UTC+05:30)*\n\n"
         "Accepted formats:\n"
         "• `18:00` — today at that time (or tomorrow if already past)\n"
-        "• `2026-08-20 18:00` — exact date & time\n"
+        "• `YYYY-MM-DD HH:MM` — exact date & time\n"
         "• `30` — minutes from now\n\n"
         "Send the time now:", parse_mode="Markdown")
     bot.register_next_step_handler(msg, _bc_sched_save)
@@ -6619,7 +7038,7 @@ def _bc_parse_time(raw):
     raw = (raw or '').strip()
     if not raw:
         return None
-    now = datetime.now()
+    now = datetime.now(BROADCAST_TIMEZONE)
     # plain minutes from now: "30"
     if raw.isdigit():
         return int(time.time()) + int(raw) * 60
@@ -6645,7 +7064,7 @@ def _bc_parse_time(raw):
     if m:
         try:
             when = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
-                            int(m.group(4)), int(m.group(5)))
+                            int(m.group(4)), int(m.group(5)), tzinfo=BROADCAST_TIMEZONE)
         except ValueError:
             return None
         return int(when.timestamp())
@@ -6661,28 +7080,56 @@ def _bc_sched_save(message):
         return
     when_ts = _bc_parse_time(message.text)
     if when_ts is None:
-        send_admin_reply("❌ Couldn't parse that time.\n\nFormats: `18:00`, `2026-08-20 18:00`, or `30` (minutes). Use /broadcast to try again.", parse_mode="Markdown")
+        send_admin_reply("❌ Couldn't parse that time.\n\nFormats: `18:00`, `YYYY-MM-DD HH:MM`, or `30` (minutes). Use /broadcast to try again.", parse_mode="Markdown")
         return
     if when_ts <= int(time.time()):
         send_admin_reply("❌ That time is in the past — pick a future time. Use /broadcast to try again.")
         return
+    token = secrets.token_urlsafe(6)
+    _pending_broadcast_actions[token] = {'kind': 'schedule', 'text': text, 'when_ts': int(when_ts)}
+    when_dt = datetime.fromtimestamp(when_ts, BROADCAST_TIMEZONE)
+    preview = text if len(text) <= 100 else text[:97] + "..."
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("✅ Confirm Schedule", callback_data=f"bcconfirm_{token}"))
+    markup.add(InlineKeyboardButton("Cancel", callback_data=f"bccancel_{token}"))
+    send_admin_reply(
+        f"Confirm scheduled broadcast for {when_dt.strftime('%Y-%m-%d %H:%M')} IST?\n\n"
+        f"Message preview:\n{escape_markdown(preview)}",
+        parse_mode="Markdown", reply_markup=markup)
+
+
+def _save_scheduled_broadcast(text, when_ts):
     try:
         res = scheduled_broadcasts_col.insert_one({
-            "text": text,
-            "when_ts": int(when_ts),
-            "created_at": datetime.now(),
-            "status": "pending",
+            'text': text, 'when_ts': int(when_ts), 'created_at': datetime.now(), 'status': 'pending'
         })
     except Exception as e:
         send_admin_reply(f"❌ Couldn't save the scheduled broadcast: {e}")
         return
-    when_dt = datetime.fromtimestamp(when_ts)
-    preview = text if len(text) <= 100 else text[:97] + "..."
-    markup = InlineKeyboardMarkup().add(InlineKeyboardButton("❌ Cancel Broadcast", callback_data=f"bcdel_{res.inserted_id}"))
-    send_admin_reply(
-        f"✅ *Broadcast scheduled* for {when_dt.strftime('%Y-%m-%d %H:%M')}.\n\n"
-        f"Preview:\n{escape_markdown(preview)}",
-        parse_mode="Markdown", reply_markup=markup)
+    when_dt = datetime.fromtimestamp(when_ts, BROADCAST_TIMEZONE)
+    preview = text if len(text) <= 100 else text[:97] + '...'
+    markup = InlineKeyboardMarkup().add(InlineKeyboardButton('❌ Cancel Broadcast', callback_data=f"bcdel_{res.inserted_id}"))
+    send_admin_reply(f"✅ *Broadcast scheduled* for {when_dt.strftime('%Y-%m-%d %H:%M')}.\n\nPreview:\n{escape_markdown(preview)}",
+                     parse_mode='Markdown', reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('bcconfirm_', 'bccancel_')))
+def confirm_broadcast_action(call):
+    if not _require_admin(call):
+        return
+    action, token = call.data.split('_', 1)
+    pending = _pending_broadcast_actions.pop(token, None)
+    if not pending:
+        bot.answer_callback_query(call.id, 'This confirmation expired.')
+        return
+    bot.answer_callback_query(call.id)
+    if action == 'bccancel':
+        edit_menu(call.message.chat.id, call.message.message_id, '✅ Broadcast canceled. Nothing was sent or scheduled.')
+        return
+    if pending['kind'] == 'schedule':
+        _save_scheduled_broadcast(pending['text'], pending['when_ts'])
+    else:
+        _send_broadcast_now(pending['text'])
 
 @bot.callback_query_handler(func=lambda call: call.data == "bclist")
 def cb_bc_list(call):
@@ -6729,7 +7176,7 @@ def show_scheduled_broadcasts(chat_id, message_id=None):
     if pending:
         lines = ["⏰ *Scheduled Broadcasts*\n"]
         for d in pending:
-            when_dt = datetime.fromtimestamp(d['when_ts'])
+            when_dt = datetime.fromtimestamp(d['when_ts'], BROADCAST_TIMEZONE)
             preview = (d.get('text') or '').replace('\n', ' ')[:45]
             lines.append(f"• {when_dt.strftime('%m-%d %H:%M')} — _{escape_markdown(preview)}_")
             markup.add(InlineKeyboardButton(f"❌ Cancel — {when_dt.strftime('%m-%d %H:%M')}", callback_data=f"bcdel_{d['_id']}"))
@@ -6740,7 +7187,7 @@ def show_scheduled_broadcasts(chat_id, message_id=None):
     if recent:
         text += "\n\n_Recently sent:_"
         for d in recent:
-            when_dt = datetime.fromtimestamp(d.get('when_ts') or 0)
+            when_dt = datetime.fromtimestamp(d.get('when_ts') or 0, BROADCAST_TIMEZONE)
             preview = (d.get('text') or '').replace('\n', ' ')[:40]
             text += f"\n• {when_dt.strftime('%m-%d %H:%M')} — {escape_markdown(preview)}"
 
@@ -6785,7 +7232,7 @@ def run_scheduled_broadcasts():
                 failed += 1
                 if len(errors) < 5:
                     errors.append(f"{uid}: {e}")
-        when_dt = datetime.fromtimestamp(doc.get('when_ts') or now_ts)
+        when_dt = datetime.fromtimestamp(doc.get('when_ts') or now_ts, BROADCAST_TIMEZONE)
         result = f"✅ Scheduled broadcast ({when_dt.strftime('%Y-%m-%d %H:%M')}) sent to {sent} users. Failed: {failed}."
         if errors:
             result += "\n\nFailure details (first 5):\n" + "\n".join(errors)
@@ -6804,6 +7251,22 @@ def do_broadcast(message):
         send_admin_reply("⚠️ No users have interacted with the bot yet — broadcast not sent to anyone.")
         return
 
+    token = secrets.token_urlsafe(6)
+    _pending_broadcast_actions[token] = {'kind': 'now', 'text': message.text}
+    preview = message.text if len(message.text) <= 350 else message.text[:347] + '...'
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton(f"✅ Send to {len(user_ids)} users", callback_data=f"bcconfirm_{token}"))
+    markup.add(InlineKeyboardButton("Cancel", callback_data=f"bccancel_{token}"))
+    send_admin_reply(
+        f"Confirm broadcast to {len(user_ids)} users?\n\nPreview:\n{escape_markdown(preview)}",
+        parse_mode='Markdown', reply_markup=markup)
+
+
+def _send_broadcast_now(text):
+    user_ids = seen_users_col.distinct("user_id")
+    if not user_ids:
+        send_admin_reply("⚠️ No users have interacted with the bot yet — broadcast not sent to anyone.")
+        return
     sent, failed = 0, 0
     errors = []
     for uid in user_ids:
@@ -6811,7 +7274,7 @@ def do_broadcast(message):
             # vanish_delay=None: a broadcast is content the recipient should keep, not a
             # transient bot menu/prompt — without this it silently inherits the global
             # 90s auto-delete default from the send_message wrapper.
-            bot.send_message(uid, message.text, vanish_delay=None)
+            bot.send_message(uid, text, vanish_delay=None)
             sent += 1
         except Exception as e:
             failed += 1
@@ -7052,6 +7515,8 @@ def cb_noop(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rmuserpage_'))
 def cb_rmuser_page(call):
+    if not _require_admin(call):
+        return
     page = int(call.data.split('_')[1])
     bot.answer_callback_query(call.id)
     show_active_users(call.message.chat.id, user_id=call.from_user.id, message=None, page=page)
@@ -7063,6 +7528,8 @@ def cb_rmuser_page(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rmuserlist_'))
 def cb_rmuser_list(call):
+    if not _require_admin(call):
+        return
     user_id = int(call.data.split('_')[1])
     bot.answer_callback_query(call.id)
     show_user_channels(call.message.chat.id, user_id, message=None, page=0)
@@ -7176,6 +7643,8 @@ def show_user_channels(chat_id, user_id, message=None, page=0, per_page=20):
 
 @bot.callback_query_handler(func=lambda call: call.data == "rmuserback")
 def cb_rmuser_back(call):
+    if not _require_admin(call):
+        return
     bot.answer_callback_query(call.id)
     show_active_users(call.message.chat.id, user_id=call.from_user.id, message=None, page=0)
     try:
@@ -7186,6 +7655,8 @@ def cb_rmuser_back(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rmuserch_'))
 def cb_rmuser_ch_confirm(call):
+    if not _require_admin(call):
+        return
     parts = call.data.split('_')
     user_id = int(parts[1])
     channel_id = parts[2]
@@ -7235,6 +7706,8 @@ def cb_rmuser_ch_confirm(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rmuserchconfirm_'))
 def cb_rmuser_ch_do(call):
+    if not _require_admin(call):
+        return
     parts = call.data.split('_')
     user_id = int(parts[1])
     channel_id = parts[2]
@@ -7261,6 +7734,8 @@ def cb_rmuser_ch_do(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rmuserchcancel_'))
 def cb_rmuser_ch_cancel(call):
+    if not _require_admin(call):
+        return
     user_id = int(call.data.split('_')[1])
     bot.answer_callback_query(call.id)
     show_user_channels(call.message.chat.id, user_id, message=None, page=0)
@@ -7272,6 +7747,8 @@ def cb_rmuser_ch_cancel(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rmuserchpage_'))
 def cb_rmuser_ch_page(call):
+    if not _require_admin(call):
+        return
     parts = call.data.split('_')
     # rmuserchpage_{user_id}_{page}
     user_id = int(parts[1])
@@ -7423,150 +7900,6 @@ def group_remove_handler(message):
         return
 
     _safe_reply(message, "❌ Invalid argument. Use `/remove @username`, `/remove <user_id>`, `/remove all`, or reply to a message.", parse_mode="Markdown")
-
-
-@bot.message_handler(commands=['add'], func=lambda m: m.chat.type in ('group', 'supergroup', 'channel'))
-@bot.channel_post_handler(commands=['add'], func=lambda m: m.chat.type in ('group', 'supergroup', 'channel'))
-def group_add_handler(message):
-    """Group/channel admins can manually add a user to this chat's subscription."""
-    if message.chat.type not in ('group', 'supergroup', 'channel'):
-        _safe_reply(message, "❌ /add only works in groups or channels.")
-        return
-
-    if not _is_chat_admin_message(message):
-        _safe_reply(message, "❌ Only chat administrators can use /add.")
-        return
-
-    if ADMIN_ID and message.from_user.id == ADMIN_ID:
-        return
-
-    chat_id = message.chat.id
-
-    try:
-        bot_member = bot.get_chat_member(chat_id, bot.user.id)
-        bstatus = getattr(bot_member, 'status', None)
-        if bstatus not in ('creator', 'administrator'):
-            _safe_reply(message, "❌ The bot must be an admin in this group/channel to add users.")
-            return
-    except Exception:
-        _safe_reply(message, "❌ Could not verify bot admin status. Make sure the bot is admin.")
-        return
-
-    raw_text = message.text or getattr(message, 'caption', None) or ''
-    args = raw_text.split()[1:] if raw_text else []
-    if not args:
-        _safe_reply(message,
-            "Usage: `/add @username 30 days` or `/add @username .` or `/add <user_id> 7 days`\n\n"
-            "Examples:\n"
-            "`/add @john 30 days`\n"
-            "`/add @jane .` (lifetime)\n"
-            "`/add 123456789 7 days`",
-            parse_mode="Markdown"
-        )
-        return
-
-    target = args[0].strip()
-    duration_raw = args[1].strip() if len(args) > 1 else '.'
-
-    target_uid = None
-    if target.isdigit() or (target.startswith('-') and target[1:].isdigit()):
-        target_uid = int(target)
-    else:
-        target_uid, _ = _resolve_username_to_id(target)
-
-    if not target_uid:
-        _safe_reply(message, f"Could not resolve `{target}` to a user.", parse_mode="Markdown")
-        return
-
-    try:
-        duration_key, days = _parse_group_add_duration(duration_raw)
-    except ValueError as e:
-        _safe_reply(message, f"Invalid duration: {e}", parse_mode="Markdown")
-        return
-
-    if duration_key == 'lifetime':
-        expiry_ts = None
-        is_lifetime = True
-        duration_label = "Lifetime"
-    else:
-        total_minutes = int(duration_key)
-        expiry_ts = (datetime.now() + timedelta(minutes=total_minutes)).timestamp()
-        is_lifetime = False
-        days, rem = divmod(total_minutes, 1440)
-        hours, mins = divmod(rem, 60)
-        parts = []
-        if days:
-            parts.append(f"{days} day(s)")
-        if hours:
-            parts.append(f"{hours} hour(s)")
-        if mins:
-            parts.append(f"{mins} minute(s)")
-        duration_label = ", ".join(parts) if parts else "0 minutes"
-
-    ch_data = channels_col.find_one({"channel_id": chat_id})
-    ch_name = ch_data.get('name') if ch_data else (message.chat.title or str(chat_id))
-
-    user_info = None
-    try:
-        user_info = bot.get_chat(target_uid)
-    except Exception:
-        pass
-    username = getattr(user_info, 'username', None)
-    first_name = getattr(user_info, 'first_name', None) or str(target_uid)
-
-    existing = users_col.find_one({"user_id": target_uid, "channel_id": chat_id})
-    sub_data = {
-        "expiry": expiry_ts,
-        "lifetime": is_lifetime,
-        "subscription_type": "admin_added",
-        "username": username,
-        "first_name": first_name,
-        "start_date": datetime.now()
-    }
-    if existing:
-        users_col.update_one({"_id": existing["_id"]}, {"$set": sub_data})
-    else:
-        sub_data.update({
-            "user_id": target_uid,
-            "channel_id": chat_id,
-            "reminded_24h": False,
-            "reminded_1h": False,
-        })
-        users_col.insert_one(sub_data)
-
-    added = False
-    if message.chat.type in ('group', 'supergroup'):
-        try:
-            bot.add_chat_member(chat_id, target_uid)
-            added = True
-        except Exception:
-            pass
-
-    contact_url = contact_admin_url()
-    if added:
-        try:
-            markup = InlineKeyboardMarkup()
-            user_msg = f"✅ You have been subscribed to *{ch_name}* for {duration_label}."
-            if contact_url:
-                markup.add(InlineKeyboardButton("Contact Admin", url=contact_url))
-            bot.send_message(target_uid, user_msg, reply_markup=markup, parse_mode="Markdown")
-        except Exception:
-            pass
-        _safe_reply(message, f"Added user `{target_uid}` to *{ch_name}* for {duration_label}.", parse_mode="Markdown")
-    else:
-        if message.chat.type == 'channel':
-            reason = "Direct add is not supported in channels."
-        else:
-            reason = "Could not add the user directly. They may have privacy settings preventing this."
-        try:
-            markup = InlineKeyboardMarkup()
-            user_msg = f"✅ You have been subscribed to *{ch_name}* for {duration_label}."
-            if contact_url:
-                markup.add(InlineKeyboardButton("Contact Admin", url=contact_url))
-            bot.send_message(target_uid, user_msg, reply_markup=markup, parse_mode="Markdown")
-        except Exception:
-            pass
-        _safe_reply(message, f"Added user `{target_uid}` to *{ch_name}* for {duration_label}.\n⚠️ {reason}", parse_mode="Markdown")
 
 
 @bot.chat_member_handler(func=lambda update: True)
@@ -8023,12 +8356,15 @@ def send_expiry_reminders():
         ch_name = ch['name'] if ch else "your channel"
         rejoin_url = f"https://t.me/{bot_username}?start={user['channel_id']}" if bot_username else f"https://t.me/{bot_username}"
         markup = InlineKeyboardMarkup().add(InlineKeyboardButton("🔄 Renew Now", url=rejoin_url))
-        if user.get('subscription_type') == 'free_trial':
-            body = (f"⏰ *Reminder:* your free trial to *{ch_name}* expires in {format_time_left(remaining)}.\n\n"
-                    f"Upgrade to a paid plan so you don't lose access!")
+        if flag_field == 'reminded_7d':
+            lead = "Your access ends in about a week. Renew early to keep your place."
+        elif user.get('subscription_type') == 'free_trial':
+            lead = "Upgrade to a paid plan so you don't lose access!"
         else:
-            body = (f"⏰ *Reminder:* your subscription to *{ch_name}* expires in {format_time_left(remaining)}.\n\n"
-                    f"Renew now so you don't lose access!")
+            lead = "Renew now so you don't lose access!"
+        access_label = "free trial" if user.get('subscription_type') == 'free_trial' else "subscription"
+        body = (f"⏰ *Reminder:* your {access_label} to *{ch_name}* expires in {format_time_left(remaining)}.\n\n"
+                f"{lead}")
         try:
             bot.send_message(
                 user['user_id'],
@@ -8042,6 +8378,14 @@ def send_expiry_reminders():
             users_col.update_one({"_id": user['_id']}, {"$set": {flag_field: True}})
         except Exception:
             pass
+
+    # 7-day window: send once between six and seven days before expiry.
+    for user in users_col.find({
+        "expiry": {"$lte": now + 7 * 24 * 3600, "$gt": now + 6 * 24 * 3600},
+        "reminded_7d": {"$ne": True},
+        "lifetime": {"$ne": True}
+    }):
+        _notify(user, user['expiry'] - now, "reminded_7d")
 
     # 24-hour window: expiry is within the next 24h but more than 1h away, and not yet reminded
     # (lifetime subscribers have expiry=None and are excluded entirely)
@@ -8185,7 +8529,7 @@ def bootstrap_counters():
     """One-time migration: if counters_col doesn't exist yet, seed it from whatever
     payment history already exists, so /stats totals don't reset to zero after this update."""
     if counters_col.count_documents({"_id": "stats"}) == 0:
-        existing_sales = payments_col.count_documents({})
+        existing_sales = payments_col.count_documents({"minutes": {"$ne": "bundle_discount"}})
         existing_revenue = sum(p.get('amount', 0) for p in payments_col.find({}))
         counters_col.insert_one({"_id": "stats", "total_sales": existing_sales, "total_revenue": existing_revenue})
         print(f"Bootstrapped counters from existing history: {existing_sales} sales, ₹{existing_revenue} revenue.")
