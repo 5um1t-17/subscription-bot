@@ -4626,24 +4626,26 @@ def show_admin_dashboard(chat_id, message_id=None):
 
 @bot.message_handler(commands=['add'], func=lambda m: m.chat.type == 'private' and m.from_user and m.from_user.id == ADMIN_ID)
 def add_channel_start(message):
-    # Awaiting a forward -> prompt never auto-vanishes
-    msg = send_prompt(
-        ADMIN_ID,
-        "Forward a message from the group or channel you want to add. "
-        "I’ll show its chat ID before you enter the plans. The bot must be an admin there.",
-    )
-    bot.register_next_step_handler(msg, get_plans)
+    _prompt_add_channel(ADMIN_ID)
 
 @bot.callback_query_handler(func=lambda call: call.data == "add_new")
 def cb_add_new(call):
     if not _require_admin(call):
         return
     bot.answer_callback_query(call.id)
-    # Reached via button, but this is now a prompt awaiting a forward -> never auto-vanish
-    msg = send_prompt(
-        ADMIN_ID,
-        "Forward a message from the group or channel you want to add. "
-        "I’ll show its chat ID before you enter the plans. The bot must be an admin there.",
+    # This prompt accepts a forward, a numeric chat ID, or a public @username.
+    msg = _prompt_add_channel(ADMIN_ID)
+
+
+def _prompt_add_channel(chat_id):
+    return bot.send_message(
+        chat_id,
+        "Add a group or channel in either way:\n"
+        "• Forward a message from it\n"
+        "• Send its chat ID (usually starts with -100) or public @username\n\n"
+        "The bot can be added as an admin afterward. If it cannot access a numeric ID yet, "
+        "the ID will be used as the temporary channel name. Send /cancel to stop.",
+        vanish_delay=None,
     )
     bot.register_next_step_handler(msg, get_plans)
 
@@ -4662,22 +4664,66 @@ def _forwarded_source_chat(message):
 
 
 def get_plans(message):
+    raw_input = (getattr(message, 'text', None) or '').strip()
+    if raw_input.lower() in ('/cancel', 'cancel'):
+        send_admin_reply("✅ Adding the group/channel was cancelled.")
+        return
+
     source_chat = _forwarded_source_chat(message)
     if source_chat:
         ch_id = int(source_chat.id)
         ch_name = getattr(source_chat, 'title', None) or getattr(source_chat, 'username', None) or str(ch_id)
-        msg = send_prompt(ADMIN_ID,
-            f"Chat detected: *{escape_markdown(ch_name)}*\n"
-            f"Chat ID: `{ch_id}`\n\n"
-            "Enter plans in format (Days:Hours:Mins:Price):\n`D:H:M:Price, D:H:M:Price` \n\n"
-            "Example:\n`1:0:0:99, 0:2:30:49`\n(1 Day for ₹99, and 2 hours 30 mins for ₹49)\n\n"
-            "For a permanent plan, use `lifetime:Price` instead, e.g. `lifetime:999`", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, finalize_channel, ch_id, ch_name)
     else:
-        send_admin_reply(
-            "❌ I couldn't read a source chat ID from that forward. Forward a post from a channel, "
-            "or a group message whose forward details include the source chat. Try Add Group/Channel again."
-        )
+        if not raw_input:
+            msg = send_prompt(ADMIN_ID,
+                "❌ Send a forwarded message, a chat ID such as `-1001234567890`, or a public `@username`.",
+                parse_mode="Markdown")
+            bot.register_next_step_handler(msg, get_plans)
+            return
+        identifier = raw_input.split()[0]
+        if identifier.startswith('@'):
+            lookup_id = identifier
+        else:
+            try:
+                lookup_id = int(identifier)
+            except ValueError:
+                msg = send_prompt(ADMIN_ID,
+                    "❌ I couldn't read that. Send a forwarded message, a numeric chat ID, or a public `@username`.",
+                    parse_mode="Markdown")
+                bot.register_next_step_handler(msg, get_plans)
+                return
+
+        try:
+            source_chat = bot.get_chat(lookup_id)
+            chat_type = getattr(source_chat, 'type', None)
+            if chat_type not in ('group', 'supergroup', 'channel'):
+                raise ValueError("That ID is not a group or channel.")
+            ch_id = int(source_chat.id)
+            ch_name = (getattr(source_chat, 'title', None) or
+                       getattr(source_chat, 'username', None) or str(ch_id))
+        except ValueError as e:
+            msg = send_prompt(ADMIN_ID, f"❌ {e} Send a group/channel ID or public @username, or /cancel.")
+            bot.register_next_step_handler(msg, get_plans)
+            return
+        except Exception as e:
+            if isinstance(lookup_id, int) and lookup_id < 0:
+                ch_id = lookup_id
+                ch_name = str(ch_id)
+                print(f"[add_channel] Could not resolve {ch_id} yet; saving with ID as name: {e}")
+            else:
+                msg = send_prompt(ADMIN_ID,
+                    "❌ I couldn't access that @username. Check it and try again, or send the numeric chat ID."
+                )
+                bot.register_next_step_handler(msg, get_plans)
+                return
+
+    msg = send_prompt(ADMIN_ID,
+        f"Chat detected: *{escape_markdown(ch_name)}*\n"
+        f"Chat ID: `{ch_id}`\n\n"
+        "Enter plans in format (Days:Hours:Mins:Price):\n`D:H:M:Price, D:H:M:Price` \n\n"
+        "Example:\n`1:0:0:99, 0:2:30:49`\n(1 Day for ₹99, and 2 hours 30 mins for ₹49)\n\n"
+        "For a permanent plan, use `lifetime:Price` instead, e.g. `lifetime:999`", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, finalize_channel, ch_id, ch_name)
 
 def finalize_channel(message, ch_id, ch_name):
     try:
