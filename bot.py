@@ -2031,6 +2031,43 @@ def build_cart_summary(user_id):
     return text, markup
 
 RANK_BADGES = {1: "🥇", 2: "🥈", 3: "🥉"}  # top 3 by position always get a medal
+CHANNEL_NEW_TAG = "⁽ᴺᴱᵂ⁾˖✧"
+CHANNEL_FREE_TAG = "⁽ᶠᴿᴱᴱ⁾˖✧"
+SMALL_TAG_CHARS = str.maketrans({
+    "A": "ᴬ", "B": "ᴮ", "C": "ᶜ", "D": "ᴰ", "E": "ᴱ", "F": "ᶠ",
+    "G": "ᴳ", "H": "ᴴ", "I": "ᴵ", "J": "ᴶ", "K": "ᴷ", "L": "ᴸ",
+    "M": "ᴹ", "N": "ᴺ", "O": "ᴼ", "P": "ᴾ", "Q": "Q", "R": "ᴿ",
+    "S": "ˢ", "T": "ᵀ", "U": "ᵁ", "V": "ⱽ", "W": "ᵂ", "X": "ˣ",
+    "Y": "ʸ", "Z": "ᶻ", "0": "⁰", "1": "¹", "2": "²", "3": "³",
+    "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+})
+
+def format_small_tag(tag):
+    text = " ".join(str(tag).strip().upper().split())
+    return f"⁽{text.translate(SMALL_TAG_CHARS)}⁾˖✧" if text else ""
+
+def latest_added_channel_id(admin_id=ADMIN_ID):
+    """Return the most recently created channel for this admin, if available."""
+    latest = channels_col.find_one(
+        {"admin_id": admin_id, "created_at": {"$exists": True}},
+        sort=[("created_at", -1)],
+    )
+    return latest.get('channel_id') if latest else None
+
+def channel_status_tags(ch, newest_channel_id=None):
+    """Small status tags shared by user and admin channel lists."""
+    tags = []
+    if newest_channel_id is None:
+        newest_channel_id = latest_added_channel_id(ch.get('admin_id', ADMIN_ID))
+    if ch.get('channel_id') == newest_channel_id:
+        tags.append(CHANNEL_NEW_TAG)
+    if ch.get('is_free'):
+        tags.append(CHANNEL_FREE_TAG)
+    for custom_tag in ch.get('custom_tags', []):
+        formatted = format_small_tag(custom_tag)
+        if formatted:
+            tags.append(formatted)
+    return " ".join(tags)
 
 def get_sorted_channels(admin_id, include_free=True):
     """Returns all of this admin's channels sorted by their manually-assigned 'order'
@@ -2056,16 +2093,16 @@ def _ensure_channel_order(admin_id):
             ch['order'] = i
     return channels
 
-def channel_button_label(ch, position):
+def channel_button_label(ch, position, newest_channel_id=None):
     """Clean minimal style: top-3 by position get a medal + name, everything else gets
     a plain running number + name. Paused channels get a ⏸ prefix."""
     name = ch['name']
     if ch.get('paused'):
         name = f"⏸ {name}"
     badge = RANK_BADGES.get(position)
-    if badge:
-        return f"{badge} {name}"
-    return f"{position}. {name}"
+    position_label = f"{badge} {name}" if badge else f"{position}. {name}"
+    tags = channel_status_tags(ch, newest_channel_id)
+    return f"{position_label} {tags}" if tags else position_label
 
 def build_channel_list(user_id, back_to_menu=False):
     """Builds the (text, markup) for browsing all channels, with a cart button if the
@@ -2073,10 +2110,11 @@ def build_channel_list(user_id, back_to_menu=False):
     When back_to_menu is True, an extra 'Home' button is appended (used when this
     view was reached from the main hub, so the user can step back out to it)."""
     channels = get_sorted_channels(ADMIN_ID, include_free=False)
+    newest_channel_id = latest_added_channel_id(ADMIN_ID)
     print(f"[build_channel_list] user={user_id} back_to_menu={back_to_menu} channel_count={len(channels)}")
     markup = InlineKeyboardMarkup()
     for i, ch in enumerate(channels, start=1):
-        markup.add(InlineKeyboardButton(channel_button_label(ch, i), callback_data=f"browse_{ch['channel_id']}"))
+        markup.add(InlineKeyboardButton(channel_button_label(ch, i, newest_channel_id), callback_data=f"browse_{ch['channel_id']}"))
 
     if not channels:
         return None, None
@@ -2267,9 +2305,10 @@ def get_free_channels(admin_id):
 def build_free_group_list(user_id):
     """Builds (text, markup) for browsing free groups."""
     channels = get_free_channels(ADMIN_ID)
+    newest_channel_id = latest_added_channel_id(ADMIN_ID)
     markup = InlineKeyboardMarkup()
     for i, ch in enumerate(channels, start=1):
-        markup.add(InlineKeyboardButton(channel_button_label(ch, i), callback_data=f"freebrowse_{ch['channel_id']}"))
+        markup.add(InlineKeyboardButton(channel_button_label(ch, i, newest_channel_id), callback_data=f"freebrowse_{ch['channel_id']}"))
     if not channels:
         return None, None
     markup.add(InlineKeyboardButton("🆓 𝙁𝙧𝙚𝙚 𝙂𝙧𝙤𝙪𝙥𝙨", callback_data="main_free_groups"))
@@ -2993,11 +3032,12 @@ def render_search_results(chat_id, message_id, user_id, keyword, page=0, message
     # Real position in the full channel list, so top-3 medals still apply
     all_channels = get_sorted_channels(ADMIN_ID, include_free=False)
     position_map = {ch['channel_id']: i for i, ch in enumerate(all_channels, start=1)}
+    newest_channel_id = latest_added_channel_id(ADMIN_ID)
 
     markup = InlineKeyboardMarkup()
     for i, ch in enumerate(page_items, start=start + 1):
         real_pos = position_map.get(ch['channel_id'])
-        label = channel_button_label(ch, real_pos) if real_pos else ch['name']
+        label = channel_button_label(ch, real_pos, newest_channel_id) if real_pos else ch['name']
         markup.add(InlineKeyboardButton(f"{i}. {label}", callback_data=f"browse_{ch['channel_id']}"))
 
     nav = []
@@ -4714,6 +4754,7 @@ def show_channel_list(chat_id, message_id=None):
     markup.add(InlineKeyboardButton("🔀 Reorder Channels", callback_data="chorder_menu"))
     # Use the same persisted ordering as the reorder screen and user browse list.
     channels = get_sorted_channels(ADMIN_ID)
+    newest_channel_id = latest_added_channel_id(ADMIN_ID)
     count = 0
     last_emoji = None
     emoji_pool = [e for e in FACE_EMOJIS if str(e).strip()] if FACE_EMOJIS else ["✨", "💎", "⭐", "🔥"]
@@ -4721,7 +4762,11 @@ def show_channel_list(chat_id, message_id=None):
         candidates = [e for e in emoji_pool if e != last_emoji]
         emoji = random.choice(candidates if candidates else emoji_pool)
         last_emoji = emoji
-        markup.add(InlineKeyboardButton(f"{emoji} {idx}. {ch['name']}", callback_data=f"manage_{ch['channel_id']}"))
+        tags = channel_status_tags(ch, newest_channel_id)
+        label = f"{emoji} {idx}. {ch['name']}"
+        if tags:
+            label += f" {tags}"
+        markup.add(InlineKeyboardButton(label, callback_data=f"manage_{ch['channel_id']}"))
         count += 1
 
     markup.add(InlineKeyboardButton("➕ Add New Channel", callback_data="add_new"))
@@ -4899,7 +4944,14 @@ def finalize_channel(message, ch_id, ch_name):
         existing_max = channels_col.find({"admin_id": ADMIN_ID}).sort("order", -1).limit(1)
         existing_max = list(existing_max)
         next_order = (existing_max[0].get('order', 0) + 1) if existing_max else 1
-        channels_col.update_one({"channel_id": ch_id}, {"$set": {"name": ch_name, "plans": plans_dict, "admin_id": ADMIN_ID, "order": next_order}}, upsert=True)
+        channels_col.update_one(
+            {"channel_id": ch_id},
+            {
+                "$set": {"name": ch_name, "plans": plans_dict, "admin_id": ADMIN_ID, "order": next_order},
+                "$setOnInsert": {"created_at": datetime.now()},
+            },
+            upsert=True,
+        )
         bot_username = bot.get_me().username
         send_admin_reply(
             f"✅ Plans saved for *{escape_markdown(ch_name)}*!\n"
@@ -4919,7 +4971,11 @@ def finalize_channel(message, ch_id, ch_name):
 _preview_uploads = {}
 _preview_drafts = {}
 _preview_editor_album_ids = {}
-PREVIEW_ALBUM_COLLECT_SECONDS = 1.5
+# Telegram delivers each album item as a separate update. Keep the collector
+# open long enough for slower polling hosts (for example Render) to receive all
+# parts before opening the preview editor, otherwise one album can split into
+# multiple single-item drafts.
+PREVIEW_ALBUM_COLLECT_SECONDS = 4.0
 
 
 def _preview_upload_entry(message):
@@ -5154,6 +5210,9 @@ def manage_ch(call):
 
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✏️ Rename Channel", callback_data=f"renamech_{ch_id}"))
+    custom_tags = ch_data.get('custom_tags', [])
+    tag_status = ", ".join(custom_tags) if custom_tags else "None set"
+    markup.add(InlineKeyboardButton("🏷️ Edit Tags", callback_data=f"edittags_{ch_id}"))
     markup.add(InlineKeyboardButton("✏️ Edit Plans", callback_data=f"editplans_{ch_id}"))
     markup.add(InlineKeyboardButton("🎁 Free Trials", callback_data=f"trials_{ch_id}"))
     markup.add(InlineKeyboardButton("📝 Edit About/Description", callback_data=f"editdesc_{ch_id}"))
@@ -5190,6 +5249,7 @@ def manage_ch(call):
         f"⚙️ Settings for: *{ch_data['name']}*\n\n"
         f"🔗 Invite Link:\n`{link}`\n\n"
         f"📝 Description:\n_{desc_status}_\n\n"
+        f"🏷️ Custom tags: {tag_status}\n\n"
         f"💰 Current Plans:\n{format_plans_text(ch_data)}\n\n"
         f"🔀 Position: {position_status}\n\n"
         f"⏯ Status: {pause_status}\n"
@@ -5198,6 +5258,64 @@ def manage_ch(call):
         f"👥 On waitlist: {waitlist_count}\n\n"
         f"🖼 {ss_status}",
         reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('edittags_'))
+def edit_channel_tags_prompt(call):
+    if not _require_admin(call):
+        return
+    try:
+        ch_id = int(call.data.split('_', 1)[1])
+    except (TypeError, ValueError):
+        bot.answer_callback_query(call.id, "Invalid channel.")
+        return
+    ch_data = channels_col.find_one({"channel_id": ch_id})
+    if not ch_data:
+        bot.answer_callback_query(call.id, "Channel not found.")
+        return
+    bot.answer_callback_query(call.id)
+    current = ", ".join(ch_data.get('custom_tags', [])) or "None"
+    prompt = send_prompt(
+        call.message.chat.id,
+        f"🏷️ Tags for *{escape_markdown(ch_data.get('name', str(ch_id)))}*\n"
+        f"Current: `{escape_markdown(current)}`\n\n"
+        "Send tags separated by commas, for example: `RECOMMENDED, VIP, HOT`. "
+        "They will appear in small bracketed letters after the channel name.\n\n"
+        "Send /clear to remove custom tags, or /cancel to keep the current tags.",
+        parse_mode="Markdown",
+    )
+    bot.register_next_step_handler(prompt, save_channel_tags, ch_id)
+
+def save_channel_tags(message, ch_id):
+    raw = (getattr(message, 'text', '') or '').strip()
+    if raw.lower() == '/cancel':
+        send_admin_reply("Tag update cancelled; existing tags were kept.")
+        return
+    if raw.lower() == '/clear':
+        channels_col.update_one({"channel_id": ch_id}, {"$unset": {"custom_tags": ""}})
+        send_admin_reply("✅ Custom tags cleared.")
+        return
+    if not raw:
+        prompt = send_prompt(ADMIN_ID, "❌ Send one or more comma-separated tags, /clear, or /cancel.")
+        bot.register_next_step_handler(prompt, save_channel_tags, ch_id)
+        return
+
+    tags = []
+    for value in re.split(r'[,\n]+', raw):
+        cleaned = re.sub(r'[^A-Za-z0-9 ]', '', value).strip().upper()
+        cleaned = " ".join(cleaned.split())[:20]
+        reserved_key = cleaned.replace(' ', '')
+        if cleaned and reserved_key not in ('NEW', 'FREE') and cleaned not in tags:
+            tags.append(cleaned)
+        if len(tags) == 6:
+            break
+    if not tags:
+        prompt = send_prompt(ADMIN_ID, "❌ No valid custom tags found. Send tags such as RECOMMENDED, VIP, or /clear.")
+        bot.register_next_step_handler(prompt, save_channel_tags, ch_id)
+        return
+
+    channels_col.update_one({"channel_id": ch_id}, {"$set": {"custom_tags": tags}})
+    shown = " ".join(format_small_tag(tag) for tag in tags)
+    send_admin_reply(f"✅ Tags saved: {shown}")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('pausech_'))
 def cb_toggle_pause(call):
@@ -5369,10 +5487,11 @@ def _render_channel_order_menu(call):
     """Shows every channel with ⬆️/⬇️ to move it. Top 3 by position always get a medal
     and appear first in the list users see — no separate ranking step needed."""
     channels = _ensure_channel_order(ADMIN_ID)
+    newest_channel_id = latest_added_channel_id(ADMIN_ID)
     n = len(channels)
     markup = InlineKeyboardMarkup()
     for i, ch in enumerate(channels, start=1):
-        markup.row(InlineKeyboardButton(channel_button_label(ch, i), callback_data=f"manage_{ch['channel_id']}"))
+        markup.row(InlineKeyboardButton(channel_button_label(ch, i, newest_channel_id), callback_data=f"manage_{ch['channel_id']}"))
         row = []
         if i > 1:
             row.append(InlineKeyboardButton("⬆️", callback_data=f"chmove_{ch['channel_id']}_up"))
