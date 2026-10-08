@@ -530,6 +530,13 @@ def save_force_join_settings(**fields):
 def _fj_record_pending_request(chat_id, user_id, invite_link=None, channel_username=None):
     """Record a pending join request in MongoDB. Idempotent: upsert by unique key."""
     try:
+        # pyTelegramBotAPI exposes ChatJoinRequest.invite_link as a
+        # ChatInviteLink object. MongoDB can store the URL, but cannot encode
+        # the Telegram object itself.
+        if invite_link is not None:
+            invite_link = getattr(invite_link, 'invite_link', invite_link)
+            if not isinstance(invite_link, (str, int, float, bool)):
+                invite_link = str(invite_link)
         fj_pending_requests_col.update_one(
             {"channel_id": int(chat_id), "user_id": int(user_id)},
             {"$set": {
