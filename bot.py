@@ -512,6 +512,7 @@ def get_force_join_settings():
             "title": ch.get("title") or ch.get("channel", ""),
             "is_private": ch.get("is_private", False),
             "invite_link": ch.get("invite_link"),
+            "join_request_link": bool(ch.get("join_request_link", False)),
         })
     
     return {
@@ -631,6 +632,39 @@ def _fj_canonical_chat_id(channel):
         print(f"[fj_track] could not resolve configured channel {resolved}: {e}")
         return None
 
+
+def _fj_ensure_request_invite(channel_obj):
+    """Ensure private Force Join chats use an invite link that creates a request."""
+    if not isinstance(channel_obj, dict):
+        return None
+    if not channel_obj.get('is_private'):
+        return channel_obj.get('invite_link')
+    if channel_obj.get('join_request_link') and channel_obj.get('invite_link'):
+        return channel_obj['invite_link']
+
+    chat_id = _fj_canonical_chat_id(channel_obj.get('channel'))
+    if chat_id is None:
+        return channel_obj.get('invite_link')
+    try:
+        invite = bot.create_chat_invite_link(chat_id, creates_join_request=True)
+        invite_url = invite.invite_link
+        channel_obj['invite_link'] = invite_url
+        channel_obj['join_request_link'] = True
+
+        settings = get_force_join_settings()
+        channels = settings.get('channels', [])
+        for configured in channels:
+            if _fj_canonical_chat_id(configured.get('channel')) == chat_id:
+                configured['invite_link'] = invite_url
+                configured['join_request_link'] = True
+                break
+        save_force_join_settings(channels=channels)
+        print(f"[fj_track] created join-request invite for private chat {chat_id}")
+        return invite_url
+    except Exception as e:
+        print(f"[fj_track] could not create join-request invite for private chat {chat_id}: {e}")
+        return channel_obj.get('invite_link')
+
 def _fj_channel_url(channel_obj):
     """Best-effort https://t.me/... link for a channel dict, or None if it
     cannot be built. For private channels, uses the stored invite link."""
@@ -647,9 +681,10 @@ def _fj_channel_url(channel_obj):
     if not raw:
         return None
     
-    # For private channels, use the stored invite link
-    if is_private and invite_link:
-        return invite_link
+    # Private groups need a request-enabled invite so Telegram emits the
+    # chat_join_request update that unlocks bot access.
+    if is_private:
+        return _fj_ensure_request_invite(channel_obj) or invite_link
     
     # For public channels or channels without stored invite link
     if raw.lstrip('-').isdigit():
@@ -1061,13 +1096,25 @@ def _fj_save_channel(message):
         "title": title,
         "is_private": is_private,
         "invite_link": invite_link,
+        "join_request_link": False,
     })
     save_force_join_settings(channels=channels)
+    request_link_ready = False
+    if is_private:
+        _fj_ensure_request_invite(channels[-1])
+        request_link_ready = bool(channels[-1].get('join_request_link'))
     
     channel_type = "🔒 Private" if is_private else "🌐 Public"
+    request_link_status = (
+        "\n✅ Join-request invite link created."
+        if request_link_ready else
+        "\n⚠️ Could not create a join-request link. Check the bot's Invite Users admin permission."
+        if is_private else ""
+    )
     send_admin_reply(
         f"✅ Added *{escape_markdown(title)}* ({raw}) to Force Join.\n"
         f"Type: {channel_type}\n"
+        f"{request_link_status}\n"
         f"Total channels: {len(channels)}\n\n"
         f"Open /forcejoin to see the updated settings.",
         parse_mode="Markdown"
