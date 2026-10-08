@@ -3401,7 +3401,16 @@ def show_admin_menu(chat_id, message_id=None):
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", delay=None)
         return
-    dismiss_previous(chat_id, ADMIN_ID)
+    # A fresh /start should replace the previous admin card immediately so the
+    # admin never has multiple active panels/buttons open at once.
+    previous = last_bot_msg.pop(ADMIN_ID, None)
+    if previous:
+        previous_chat_id, previous_message_id = previous
+        cancel_delete(previous_chat_id, previous_message_id)
+        try:
+            bot.delete_message(previous_chat_id, previous_message_id)
+        except Exception:
+            pass
     reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML", vanish_delay=None)
     track_msg(ADMIN_ID, reply)
 
@@ -4614,8 +4623,6 @@ def show_admin_dashboard(chat_id, message_id=None):
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode='HTML', delay=None)
     else:
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode='HTML', vanish_delay=None)
-    bot.answer_callback_query(call.id)
-    show_channel_list(call.message.chat.id, call.message.message_id)
 
 # --- ADMIN: ADD NEW CHANNEL ---
 
