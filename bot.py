@@ -543,10 +543,10 @@ def _fj_record_pending_request(chat_id, user_id, invite_link=None, channel_usern
             }},
             upsert=True
         )
-        print(f"JOIN_REQUEST_RECEIVED channel={chat_id} user={user_id}")
+        print(f"JOIN_REQUEST_RECEIVED channel={chat_id} user={user_id} recorded=true", flush=True)
         return True
     except Exception as e:
-        print(f"[fj_track] error recording pending request for user {user_id} in chat {chat_id}: {e}")
+        print(f"JOIN_REQUEST_RECORD_FAILED channel={chat_id} user={user_id} error={e!r}", flush=True)
         return False
 
 def _fj_remove_pending_request(chat_id, user_id):
@@ -576,7 +576,8 @@ def _fj_has_pending_request(user_id, chat_id):
             ],
         })
         return doc is not None
-    except Exception:
+    except Exception as e:
+        print(f"FORCE_JOIN_REQUEST_LOOKUP_FAILED user={user_id} channel={chat_id} error={e!r}", flush=True)
         return False
 
 
@@ -888,16 +889,25 @@ def handle_fj_chat_join_request(req):
         chat_id = req.chat.id
         user_id = req.from_user.id
         invite_link = getattr(req, 'invite_link', None)
+        channel_username = getattr(req.chat, 'username', None)
+        print(
+            f"JOIN_REQUEST_UPDATE_RECEIVED channel={chat_id} username={channel_username or '-'} "
+            f"user={user_id} user_chat_id={getattr(req, 'user_chat_id', None)}",
+            flush=True,
+        )
         
         # Only track if this is a configured Force Join channel
-        channel_username = getattr(req.chat, 'username', None)
         if not _fj_is_force_join_channel(chat_id, channel_username):
-            print(f"[fj_track] ignoring join request for unconfigured chat {chat_id} (@{channel_username or 'private'})")
+            print(
+                f"JOIN_REQUEST_IGNORED_UNCONFIGURED channel={chat_id} username={channel_username or '-'} user={user_id}",
+                flush=True,
+            )
             return
         
         # Record the pending request
         recorded = _fj_record_pending_request(chat_id, user_id, invite_link, channel_username)
         if not recorded:
+            print(f"JOIN_REQUEST_NOT_CONFIRMED user={user_id} channel={chat_id} reason=database_write_failed", flush=True)
             return
 
         # Confirm the event reached the bot and give the requester a one-tap
@@ -906,28 +916,30 @@ def handle_fj_chat_join_request(req):
             continue_markup = InlineKeyboardMarkup().add(
                 InlineKeyboardButton("✅ Continue", callback_data=FJ_CB_RETRY)
             )
+            recipient_chat_id = getattr(req, 'user_chat_id', None) or user_id
             bot.send_message(
-                req.user_chat_id,
+                recipient_chat_id,
                 "✅ Your join request was received. You can use the bot while the group admin reviews it.",
                 reply_markup=continue_markup,
                 vanish_delay=None,
             )
+            print(f"JOIN_REQUEST_CONFIRMATION_SENT user={user_id} recipient={recipient_chat_id}", flush=True)
         except Exception as e:
-            print(f"[fj_track] could not notify requester {user_id}: {e}")
+            print(f"JOIN_REQUEST_CONFIRMATION_FAILED user={user_id} error={e!r}", flush=True)
         
         # Auto-approve if enabled
         settings = get_force_join_settings()
         if settings.get('auto_approve'):
             try:
                 bot.approve_chat_join_request(chat_id, user_id)
-                print(f"[fj_autoapprove] Auto-approved join request for user {user_id} in chat {chat_id}")
+                print(f"JOIN_REQUEST_AUTO_APPROVED channel={chat_id} user={user_id}", flush=True)
                 # Telegram membership status can lag behind approval. Keep an
                 # approval grant so Force Join can pass the user immediately.
                 _fj_mark_request_approved(chat_id, user_id)
             except Exception as e:
-                print(f"[fj_autoapprove] Failed to auto-approve join request for user {user_id} in chat {chat_id}: {e}")
+                print(f"JOIN_REQUEST_AUTO_APPROVE_FAILED channel={chat_id} user={user_id} error={e!r}", flush=True)
     except Exception as e:
-        print(f"[fj_track] error handling chat_join_request: {e}")
+        print(f"JOIN_REQUEST_HANDLER_FAILED error={e!r}", flush=True)
 
 @bot.chat_member_handler(func=lambda update: _fj_is_force_join_channel(update.chat.id))
 def handle_fj_chat_member_update(update):
@@ -1235,6 +1247,15 @@ def cb_fj_verify(call):
         
         # For private channels, check MongoDB for pending requests and event tracking status
         if ch.get('is_private'):
+            # Verify should also ensure the link currently shown to users is a
+            # join-request link. Older saved configs may still contain a normal
+            # invite, which lets a user join (or visit) without creating the
+            # chat_join_request event this feature relies on.
+            request_link = _fj_ensure_request_invite(ch)
+            if ch.get('join_request_link') and request_link:
+                lines.append("✅ Join-request invite is configured (refresh the user's Force Join screen to use it).")
+            else:
+                lines.append("❌ Join-request invite is not ready. Check the bot's Invite Users permission and Render logs.")
             try:
                 # Check MongoDB for active pending requests
                 pending_count = fj_pending_requests_col.count_documents({
@@ -1244,7 +1265,7 @@ def cb_fj_verify(call):
                 lines.append(f"📋 Pending join requests in DB: {pending_count}")
                 
                 # Check if chat_join_request handler is working
-                lines.append("✅ Event-based join-request tracking is active.")
+                lines.append("ℹ️ Handler is registered; this does not confirm Telegram has delivered a request update yet.")
             except Exception as e:
                 lines.append(f"⚠️ Could not check pending requests: {e}")
     send_admin_reply("\n".join(lines))
@@ -1271,9 +1292,9 @@ def cb_fj_retry(call):
     normal interface; not joined -> stay blocked with a clear alert."""
     user_id = call.from_user.id
     record_seen_user(call.from_user)
-    print(f"[fj_retry] user={user_id} checking force join pass")
+    print(f"FORCE_JOIN_RETRY_CLICKED user={user_id}", flush=True)
     passed = user_has_force_join_pass(user_id)
-    print(f"[fj_retry] user={user_id} passed={passed}")
+    print(f"FORCE_JOIN_RETRY_RESULT user={user_id} allowed={passed}", flush=True)
     if passed:
         bot.answer_callback_query(call.id, "✅ Welcome! You're all set.")
         chat_id = call.message.chat.id
