@@ -553,12 +553,30 @@ def _fj_remove_pending_request(chat_id, user_id):
         print(f"[fj_track] error removing pending request for user {user_id} in chat {chat_id}: {e}")
 
 def _fj_has_pending_request(user_id, chat_id):
-    """Check MongoDB for an active pending join-request record."""
+    """Check MongoDB for a pending or approved join-request record."""
     try:
-        doc = fj_pending_requests_col.find_one({"channel_id": int(chat_id), "user_id": int(user_id), "active": True})
+        doc = fj_pending_requests_col.find_one({
+            "channel_id": int(chat_id),
+            "user_id": int(user_id),
+            "$or": [
+                {"active": True},
+                {"approved": True, "approved_at": {"$gte": datetime.now() - timedelta(days=7)}},
+            ],
+        })
         return doc is not None
     except Exception:
         return False
+
+
+def _fj_mark_request_approved(chat_id, user_id):
+    """Preserve approval as an access grant until the user leaves/is removed."""
+    try:
+        fj_pending_requests_col.update_one(
+            {"channel_id": int(chat_id), "user_id": int(user_id)},
+            {"$set": {"active": False, "approved": True, "approved_at": datetime.now()}},
+        )
+    except Exception as e:
+        print(f"[fj_track] error saving approval for user {user_id} in chat {chat_id}: {e}")
 
 def _fj_is_force_join_channel(chat_id):
     """Check if the given chat_id is configured as a Force Join channel."""
@@ -566,7 +584,7 @@ def _fj_is_force_join_channel(chat_id):
         settings = get_force_join_settings()
         channels = settings.get('channels', [])
         for ch in channels:
-            resolved = _fj_resolve_chat_id(ch.get('channel'))
+            resolved = _fj_canonical_chat_id(ch.get('channel'))
             if resolved == chat_id:
                 return True
         return False
@@ -584,6 +602,20 @@ def _fj_resolve_chat_id(channel):
     if raw.lstrip('-').isdigit():
         return int(raw)
     return raw.lstrip('@')
+
+
+def _fj_canonical_chat_id(channel):
+    """Resolve configured usernames to Telegram's numeric ID for event matching."""
+    resolved = _fj_resolve_chat_id(channel)
+    if resolved is None:
+        return None
+    if isinstance(resolved, int):
+        return resolved
+    try:
+        return int(bot.get_chat(resolved).id)
+    except Exception as e:
+        print(f"[fj_track] could not resolve configured channel {resolved}: {e}")
+        return None
 
 def _fj_channel_url(channel_obj):
     """Best-effort https://t.me/... link for a channel dict, or None if it
@@ -629,7 +661,10 @@ def _fj_membership_status(user_id, settings):
     
     not_joined = []
     for ch in channels:
-        chat_id = _fj_resolve_chat_id(ch.get('channel'))
+        configured_chat_id = _fj_resolve_chat_id(ch.get('channel'))
+        # Join-request updates use numeric IDs. Normalize usernames so request
+        # records and membership checks use the same chat_id key.
+        chat_id = _fj_canonical_chat_id(ch.get('channel')) or configured_chat_id
         if chat_id is None:
             print(f"[fj_status] skipping channel {ch.get('title', '?')} - unresolved chat_id")
             continue
@@ -817,8 +852,9 @@ def handle_fj_chat_join_request(req):
             try:
                 bot.approve_chat_join_request(chat_id, user_id)
                 print(f"[fj_autoapprove] Auto-approved join request for user {user_id} in chat {chat_id}")
-                # Remove the pending request record since it's now approved
-                _fj_remove_pending_request(chat_id, user_id)
+                # Telegram membership status can lag behind approval. Keep an
+                # approval grant so Force Join can pass the user immediately.
+                _fj_mark_request_approved(chat_id, user_id)
             except Exception as e:
                 print(f"[fj_autoapprove] Failed to auto-approve join request for user {user_id} in chat {chat_id}: {e}")
     except Exception as e:
@@ -835,9 +871,14 @@ def handle_fj_chat_member_update(update):
         user_id = new_member.user.id
         status = getattr(new_member, 'status', None)
         
-        # If user became a member, or was removed, clean up pending request
-        if status in ('creator', 'administrator', 'member', 'restricted', 'left', 'kicked'):
+        # Preserve approved requests while users remain in the channel. Remove
+        # their grant if they leave or are kicked so it cannot bypass the gate.
+        if status in ('left', 'kicked'):
             _fj_remove_pending_request(chat_id, user_id)
+        elif status in ('creator', 'administrator', 'member'):
+            _fj_mark_request_approved(chat_id, user_id)
+        elif status == 'restricted' and getattr(new_member, 'is_member', False):
+            _fj_mark_request_approved(chat_id, user_id)
     except Exception as e:
         print(f"[fj_track] error handling chat_member update: {e}")
 
@@ -5994,7 +6035,17 @@ def bundle_reject_handler(call):
     token = call.data.split('_', 1)[1]
     doc = pending_offer_bundle_checkouts_col.find_one({'_id': ObjectId(token)})
     if doc:
-        try: bot.send_message(doc['user_id'], "❌ Your offer payment could not be verified. Please contact the admin.")
+        user_markup = InlineKeyboardMarkup()
+        contact_url = contact_admin_url() or (f"tg://user?id={ADMIN_ID}" if ADMIN_ID else None)
+        if contact_url:
+            user_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
+        try:
+            bot.send_message(
+                doc['user_id'],
+                "❌ Your offer payment could not be verified. Please contact the admin.",
+                reply_markup=user_markup if contact_url else None,
+                vanish_delay=None,
+            )
         except Exception: pass
         pending_offer_bundle_checkouts_col.delete_one({'_id': ObjectId(token)})
     _clear_pending_review_messages(token, current_admin_msg_id=call.message.message_id)
@@ -6269,8 +6320,17 @@ def cout_reject_handler(call):
     except Exception:
         doc = None
     if doc:
+        user_markup = InlineKeyboardMarkup()
+        contact_url = contact_admin_url() or (f"tg://user?id={ADMIN_ID}" if ADMIN_ID else None)
+        if contact_url:
+            user_markup.add(InlineKeyboardButton("📞 Contact Admin", url=contact_url))
         try:
-            bot.send_message(doc['user_id'], "❌ Your payment could not be verified. Please contact the admin for help.")
+            bot.send_message(
+                doc['user_id'],
+                "❌ Your payment could not be verified. Please contact the admin for help.",
+                reply_markup=user_markup if contact_url else None,
+                vanish_delay=None,
+            )
         except Exception:
             pass
         pending_checkouts_col.delete_one({"_id": ObjectId(token)})
@@ -8760,8 +8820,10 @@ def cleanup_stale_fj_pending_requests():
     try:
         cutoff = datetime.now() - timedelta(days=7)  # remove requests older than 7 days
         result = fj_pending_requests_col.delete_many({
-            "active": True,
-            "requested_at": {"$lt": cutoff}
+            "$or": [
+                {"active": True, "requested_at": {"$lt": cutoff}},
+                {"approved": True, "approved_at": {"$lt": cutoff}},
+            ]
         })
         if result.deleted_count > 0:
             print(f"[fj_cleanup] removed {result.deleted_count} stale pending join requests")
