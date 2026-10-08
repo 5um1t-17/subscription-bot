@@ -472,7 +472,6 @@ def clear_menu_image():
 FJ_SETTINGS_ID = "force_join"
 FJ_MSG_TEXT = "<i>Hey <a href='tg://user?id={user_id}'>{username}</a> </i>👋\n\nJoin the channels below to unlock access 🚀"
 FJ_BTN_JOIN = "Join Channel"
-FJ_BTN_RETRY = "🔄 Try Again"
 FJ_CB_RETRY = "fj_retry"
 FJ_CB_JOIN = "fj_join"
 FJ_BLOCK_COOLDOWN_SECONDS = 4   # don't re-send the block screen on every keystroke
@@ -790,9 +789,8 @@ def user_has_force_join_pass(user_id):
     return verdict == 'joined'
 
 def send_force_join_block(chat_id, user_id):
-    """Send (or refresh, throttled by cooldown) the 'join our channels' gate screen:
-    optional banner image, the lock message, and Join/Try Again buttons.
-    The message persists (vanish_delay=None) so the user can tap Try Again."""
+    """Send the persistent 'join our channels' gate screen with channel links.
+    Users who submit a join request receive a separate Continue button."""
     now = time.monotonic()
     if now - _fj_last_block.get(user_id, 0) < FJ_BLOCK_COOLDOWN_SECONDS:
         return None
@@ -808,8 +806,6 @@ def send_force_join_block(chat_id, user_id):
             markup.add(InlineKeyboardButton(f"Join Channel {idx}", url=url))
         else:
             markup.add(InlineKeyboardButton(f"Join Channel {idx}", callback_data=FJ_CB_JOIN))
-    
-    markup.add(InlineKeyboardButton(FJ_BTN_RETRY, callback_data=FJ_CB_RETRY))
     
     # Build personalized message with username
     try:
@@ -926,7 +922,7 @@ def handle_fj_chat_join_request(req):
             recipient_chat_id = getattr(req, 'user_chat_id', None) or user_id
             bot.send_message(
                 recipient_chat_id,
-                "✅ Your join request was received. You can use the bot while the group admin reviews it.",
+                "✅ Request received! Keep using the bot while awaiting approval.",
                 reply_markup=continue_markup,
                 vanish_delay=None,
             )
@@ -1295,8 +1291,7 @@ def cb_fj_join(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == FJ_CB_RETRY)
 def cb_fj_retry(call):
-    """'🔄 Try Again' — re-checks membership. Joined -> grant access and show the
-    normal interface; not joined -> stay blocked with a clear alert."""
+    """The join-request confirmation's Continue button re-checks access."""
     user_id = call.from_user.id
     record_seen_user(call.from_user)
     print(f"FORCE_JOIN_RETRY_CLICKED user={user_id}", flush=True)
