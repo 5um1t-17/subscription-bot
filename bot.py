@@ -878,7 +878,9 @@ def send_force_join_menu(chat_id, message_id=None):
     markup.add(InlineKeyboardButton("➕ Add Channel", callback_data="fj_setchannel"))
     if channels:
         markup.add(InlineKeyboardButton("➖ Remove Channel", callback_data="fj_removechannel_menu"))
-    markup.add(InlineKeyboardButton("🖼 Set Banner Image", callback_data="fj_setbanner"))
+    markup.add(InlineKeyboardButton(
+        "🖼 Replace Banner Image" if s.get('image_file_id') else "🖼 Set Banner Image",
+        callback_data="fj_setbanner"))
     if s.get('image_file_id'):
         markup.add(InlineKeyboardButton("🗑 𝗥𝗲𝗺𝗼𝘃𝗲 𝗕𝗮𝗻𝗻𝗲𝗿", callback_data="fj_rmbanner"))
     markup.add(InlineKeyboardButton("🔎 Verify Channels", callback_data="fj_verify"))
@@ -886,6 +888,20 @@ def send_force_join_menu(chat_id, message_id=None):
         InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
         InlineKeyboardButton("✖️ Close", callback_data="ui_close"),
     )
+    image_file_id = s.get('image_file_id')
+    if image_file_id:
+        if message_id:
+            cancel_delete(chat_id, message_id)
+            try:
+                bot.delete_message(chat_id, message_id)
+            except Exception:
+                pass
+        reply = bot.send_photo(
+            chat_id, image_file_id, caption=text, reply_markup=markup,
+            parse_mode="Markdown",
+            vanish_delay=MENU_VANISH_SECONDS if message_id else ADMIN_REPLY_VANISH_SECONDS,
+        )
+        return reply
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
     else:
@@ -2290,7 +2306,6 @@ def _show_menu_image_settings(chat_id, old_message_id=None):
         reply = bot.send_message(chat_id, "🖼 <b>No main menu banner is set.</b>\n\nUpload one to show it above the user menu.",
                                  reply_markup=markup, parse_mode="HTML", vanish_delay=None)
     _menu_image_settings_message_id[chat_id] = reply.message_id
-    bot.register_next_step_handler(reply, save_menu_image)
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "menuimg_replace")
@@ -4536,11 +4551,12 @@ def show_channel_list(chat_id, message_id=None):
     markup = InlineKeyboardMarkup()
     # Keep channel ordering easy to find from the /channels screen.
     markup.add(InlineKeyboardButton("🔀 Reorder Channels", callback_data="chorder_menu"))
-    cursor = channels_col.find({"admin_id": ADMIN_ID})
+    # Use the same persisted ordering as the reorder screen and user browse list.
+    channels = get_sorted_channels(ADMIN_ID)
     count = 0
     last_emoji = None
     emoji_pool = [e for e in FACE_EMOJIS if str(e).strip()] if FACE_EMOJIS else ["✨", "💎", "⭐", "🔥"]
-    for idx, ch in enumerate(cursor, start=1):
+    for idx, ch in enumerate(channels, start=1):
         candidates = [e for e in emoji_pool if e != last_emoji]
         emoji = random.choice(candidates if candidates else emoji_pool)
         last_emoji = emoji
@@ -4565,6 +4581,8 @@ def show_channel_list(chat_id, message_id=None):
 def cb_back_channels(call):
     if not _require_admin(call):
         return
+    bot.answer_callback_query(call.id)
+    show_channel_list(call.message.chat.id, call.message.message_id)
 
 
 def show_admin_dashboard(chat_id, message_id=None):
