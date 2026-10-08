@@ -882,6 +882,10 @@ def send_force_join_menu(chat_id, message_id=None):
     if s.get('image_file_id'):
         markup.add(InlineKeyboardButton("🗑 𝗥𝗲𝗺𝗼𝘃𝗲 𝗕𝗮𝗻𝗻𝗲𝗿", callback_data="fj_rmbanner"))
     markup.add(InlineKeyboardButton("🔎 Verify Channels", callback_data="fj_verify"))
+    markup.row(
+        InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+        InlineKeyboardButton("✖️ Close", callback_data="ui_close"),
+    )
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
     else:
@@ -991,6 +995,7 @@ def cb_fj_removechannel_menu(call):
         title = ch.get('title') or ch.get('channel') or f"Channel {i}"
         markup.add(InlineKeyboardButton(f"🗑 {title}", callback_data=f"fj_rmch_{i}"))
     markup.add(InlineKeyboardButton("🔙 𝗕𝗮𝗰𝗸", callback_data="fj_back"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data == "fj_back")
@@ -1662,6 +1667,7 @@ def _build_plan_selection(ch_data, user_id=None):
 
     markup.add(InlineKeyboardButton("⬅️ 𝗕𝗮𝗰𝗸 𝘁𝗼 𝗖𝗵𝗮𝗻𝗻𝗲𝗹𝘀", callback_data="cart_browse"))
     markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     contact_url = contact_admin_url()
     if contact_url:
         markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
@@ -1827,6 +1833,8 @@ def build_cart_summary(user_id):
         contact_url = contact_admin_url()
         if contact_url:
             markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
+        markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+        markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
         return text, markup
 
     lines = ["🛒 <b>Your Cart</b> 🛒\n"]
@@ -1845,6 +1853,8 @@ def build_cart_summary(user_id):
     contact_url = contact_admin_url()
     if contact_url:
         markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
+    markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     return text, markup
 
 RANK_BADGES = {1: "🥇", 2: "🥈", 3: "🥉"}  # top 3 by position always get a medal
@@ -1913,12 +1923,13 @@ def build_channel_list(user_id, back_to_menu=False):
     if contact_url:
         markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
     if back_to_menu:
-        markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
         text = (f"👋 <b>Welcome Dallo !</b> \n\nShaana banne ki Koshish mat karna 😂😂\n\nPick a channel/group you'd like to join below 👇\n\n"
             f"💡 <b><i>Stack multiple channels in your cart and pay once — easy money 🫶🏻</i></b>")
     else:
         text = (f"👋 <b>Pick a channel</b> 👇\n\n"
                 f"💡 <b><i>Stack multiple channels in your cart and pay once — easy money 🫶🏻</i></b>")
+    markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     return text, markup
 
 def show_all_channels(chat_id, user_id, back_to_menu=False):
@@ -1936,6 +1947,7 @@ def show_all_channels(chat_id, user_id, back_to_menu=False):
                 reply_markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
             if back_to_menu:
                 reply_markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+            reply_markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
             reply = bot.send_message(chat_id, "Nothing here right now 😕\nCheck back later or contact the admin.",
                               reply_markup=reply_markup)
             schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
@@ -1960,6 +1972,7 @@ def edit_all_channels(chat_id, message_id, user_id, message_obj=None, back_to_me
                 reply_markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
             if back_to_menu:
                 reply_markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+            reply_markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
             edit_menu(chat_id, message_id, "Nothing here right now 😕\nCheck back later or contact the admin.",
                       reply_markup=reply_markup,
                       message_obj=message_obj)
@@ -1993,6 +2006,7 @@ def build_main_menu(username=None, user_id=None, first_name=None):
         )
     else:
         markup.row(InlineKeyboardButton("🆓 𝙁𝙧𝙚𝙚 𝙂𝙧𝙤𝙪𝙥𝙨", callback_data="main_free_groups"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     if first_name:
         safe_name = escape(first_name)
         display = f'<a href="tg://user?id={user_id}">{safe_name}</a>' if user_id else safe_name
@@ -2048,6 +2062,26 @@ def cb_main_menu_back(call):
     bot.answer_callback_query(call.id)
     edit_main_menu(call.message.chat.id, call.message.message_id, message_obj=call.message, username=getattr(call.from_user, 'username', None), user_id=call.from_user.id, first_name=getattr(call.from_user, 'first_name', None))
 
+
+@bot.callback_query_handler(func=lambda call: call.data == "ui_close")
+def cb_close_ui(call):
+    bot.answer_callback_query(call.id, "Closed.")
+    user_id = getattr(call.from_user, 'id', None)
+    if call.message.chat.id == ADMIN_ID:
+        try:
+            bot.clear_step_handler_by_chat_id(call.message.chat.id)
+        except Exception:
+            pass
+        if _menu_image_settings_message_id.get(call.message.chat.id) == call.message.message_id:
+            _menu_image_settings_message_id.pop(call.message.chat.id, None)
+    if user_id and last_bot_msg.get(user_id) == (call.message.chat.id, call.message.message_id):
+        last_bot_msg.pop(user_id, None)
+    cancel_delete(call.message.chat.id, call.message.message_id)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
 # --- USER: FREE GROUPS ---
 
 def get_free_channels(admin_id):
@@ -2067,6 +2101,7 @@ def build_free_group_list(user_id):
         return None, None
     markup.add(InlineKeyboardButton("🆓 𝙁𝙧𝙚𝙚 𝙂𝙧𝙤𝙪𝙥𝙨", callback_data="main_free_groups"))
     markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     text = ("🆓 <b>Free Groups</b>\n\n"
             "Pick a free group to join below 👇\n\n"
             "💡 <i>These groups have time-limited access. You'll be automatically removed when your time expires.</i>")
@@ -2080,6 +2115,7 @@ def show_free_groups(chat_id, user_id):
             reply_markup = InlineKeyboardMarkup()
             reply_markup.add(InlineKeyboardButton("🆓 𝙁𝙧𝙚𝙚 𝙂𝙧𝙤𝙪𝙥𝙨", callback_data="main_free_groups"))
             reply_markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+            reply_markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
             reply = bot.send_message(chat_id, "No free groups available right now 😕\nCheck back later.", reply_markup=reply_markup)
             schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
             track_msg(user_id, reply)
@@ -2104,6 +2140,7 @@ def edit_free_groups(chat_id, message_id, message_obj=None):
             reply_markup = InlineKeyboardMarkup()
             reply_markup.add(InlineKeyboardButton("🆓 𝙁𝙧𝙚𝙚 𝙂𝙧𝙤𝙪𝙥𝙨", callback_data="main_free_groups"))
             reply_markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+            reply_markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
             edit_menu(chat_id, message_id, "No free groups available right now 😕\nCheck back later.", reply_markup=reply_markup, message_obj=message_obj)
             return
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=message_obj)
@@ -2136,6 +2173,7 @@ def build_free_group_join(ch_data, user_id):
     markup.add(InlineKeyboardButton("✅ Join Now", callback_data=f"freejoin_{ch_data['channel_id']}"))
     markup.add(InlineKeyboardButton("⬅️ 𝗕𝗮𝗰𝗸 𝘁𝗼 𝗙𝗿𝗲𝗲 𝗚𝗿𝗼𝘂𝗽𝘀", callback_data="main_free_groups"))
     markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     expiry_minutes = ch_data.get('free_expiry_minutes') or 0
     expiry_text = format_label(expiry_minutes) if expiry_minutes else "Lifetime"
     desc_part = f"\n\n📝 <b>About:</b> <b><i>{escape(ch_data.get('description', ''))}</i></b>" if ch_data.get('description') else ""
@@ -2223,15 +2261,45 @@ def free_group_join_handler(call):
 # _render_main_menu already used get_menu_image_file_id() — but nothing ever called the
 # setter, so there was no actual way for the admin to add the image in the first place.
 # This wires up the missing admin-facing command + button for it.
+_menu_image_settings_message_id = {}
 
 @bot.message_handler(commands=['setmenuimage'], func=lambda m: m.from_user.id == ADMIN_ID)
 def set_menu_image_start(message):
+    _show_menu_image_settings(ADMIN_ID)
+
+
+def _show_menu_image_settings(chat_id, old_message_id=None):
+    if old_message_id:
+        cancel_delete(chat_id, old_message_id)
+        try:
+            bot.delete_message(chat_id, old_message_id)
+        except Exception:
+            pass
+    file_id = get_menu_image_file_id()
     markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("🗑 Remove current image", callback_data="menuimg_remove"))
+    markup.add(InlineKeyboardButton("📤 Replace Image", callback_data="menuimg_replace"))
+    if file_id:
+        markup.add(InlineKeyboardButton("🗑 Remove Image", callback_data="menuimg_remove"))
+    markup.add(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
+    if file_id:
+        reply = bot.send_photo(chat_id, file_id,
+                               caption="🖼 <b>Current main menu banner</b>\n\nSend a replacement using the button below.",
+                               reply_markup=markup, parse_mode="HTML", vanish_delay=None)
+    else:
+        reply = bot.send_message(chat_id, "🖼 <b>No main menu banner is set.</b>\n\nUpload one to show it above the user menu.",
+                                 reply_markup=markup, parse_mode="HTML", vanish_delay=None)
+    _menu_image_settings_message_id[chat_id] = reply.message_id
+    bot.register_next_step_handler(reply, save_menu_image)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "menuimg_replace")
+def cb_menuimg_replace(call):
+    if not _require_admin(call):
+        return
+    bot.answer_callback_query(call.id)
     msg = send_prompt(ADMIN_ID,
-        "🖼 Send the PNG/JPG image you want shown as the main menu banner.\n\n"
-        "It will appear above the Premium Groups & Offers menu for every user.\n\n"
-        "Send a photo now, or type /skip to cancel.", reply_markup=markup)
+        "Send a PNG/JPG photo to replace the current main menu banner. Type /skip to keep the current image.")
     bot.register_next_step_handler(msg, save_menu_image)
 
 @bot.callback_query_handler(func=lambda call: call.data == "menuimg_remove")
@@ -2240,11 +2308,11 @@ def cb_menuimg_remove(call):
         return
     bot.answer_callback_query(call.id, "Menu image removed.")
     clear_menu_image()
-    send_admin_reply("✅ Main menu image removed. The menu will show as plain text again.")
+    _show_menu_image_settings(call.message.chat.id, call.message.message_id)
 
 def save_menu_image(message):
     if message.text and message.text.strip().lower() in ('/skip', 'skip'):
-        send_admin_reply("❌ Cancelled — menu image unchanged.")
+        send_admin_reply("✅ Cancelled — menu image unchanged.")
         return
     if not message.photo:
         msg = send_prompt(ADMIN_ID,
@@ -2253,7 +2321,8 @@ def save_menu_image(message):
         return
     file_id = message.photo[-1].file_id  # highest resolution
     set_menu_image_file_id(file_id)
-    send_admin_reply("✅ Main menu image saved! It will now show above the menu for every user.")
+    send_admin_reply("✅ Main menu banner updated.")
+    _show_menu_image_settings(ADMIN_ID, _menu_image_settings_message_id.get(ADMIN_ID))
 
 @bot.callback_query_handler(func=lambda call: call.data == "main_channels")
 def cb_main_channels(call):
@@ -2315,6 +2384,8 @@ def _render_bundle_list(chat_id, message_id=None):
                 callback_data=f"obdetail_{bundle['bundle_id']}"),
             InlineKeyboardButton(toggle_label, callback_data=f"obtogglelist_{bundle['bundle_id']}"))
     markup.add(InlineKeyboardButton("➕ Create Offer", callback_data="obadd"))
+    markup.row(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+               InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     text = "'🎉 *Offers*\n\nStack channels at one fixed price — built by the admin."
     if not bundles:
         text += "\n\nNo offers yet."
@@ -2355,6 +2426,7 @@ def _render_user_bundles(chat_id, message_id=None):
                                         callback_data=f"obuy_{bundle['bundle_id']}"))
     markup.add(InlineKeyboardButton("😍 Premium Groups", callback_data="main_channels"))
     markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     text = "🎉 <b>Offers</b>\n\nEach offer has a fixed price and includes the channels shown below."
     if not bundles:
         text = "No offers available right now."
@@ -2413,6 +2485,7 @@ def _send_bundle_preview_media(chat_id, bundle, channels):
             InlineKeyboardButton("⬅️ 𝘽𝘼𝘾𝙆", callback_data="main_obundles")
         )
         markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+        markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
         
         if screenshots:
             # Add initial channel preview
@@ -2764,6 +2837,8 @@ def render_search_results(chat_id, message_id, user_id, keyword, page=0, message
         markup.row(*nav)
     markup.add(InlineKeyboardButton("🔍 New Search", callback_data="search_prompt"))
     markup.add(InlineKeyboardButton("😍 All Channels", callback_data="cart_browse"))
+    markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
 
     text = f"🔍 <b>Search results</b> for \"{escape(keyword)}\"\n\nShowing {start + 1}-{end} of {total}:"
     if message_id:
@@ -3301,6 +3376,7 @@ def _admin_menu_markup():
         InlineKeyboardButton("🗄 Database", callback_data="admin_dbstats"),
         InlineKeyboardButton("🖼 Menu Image", callback_data="admin_menuimage"),
     )
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     return markup
 
 
@@ -3331,30 +3407,36 @@ def admin_menu_action(call):
         )
         bot.register_next_step_handler(msg, get_plans)
     elif action == 'admin_channels':
-        show_channel_list(chat_id)
+        show_channel_list(chat_id, call.message.message_id)
     elif action == 'admin_bundles':
-        _render_bundle_list(chat_id)
+        _render_bundle_list(chat_id, call.message.message_id)
     elif action == 'admin_subscribers':
-        show_active_users(chat_id, user_id=ADMIN_ID)
+        show_users_list(chat_id, user_id=ADMIN_ID, message_id=call.message.message_id)
+    elif action == 'admin_removesubscriber':
+        show_active_users(chat_id, user_id=ADMIN_ID, message_id=call.message.message_id)
     elif action == 'admin_pending':
-        pending_checkouts_handler(call.message)
+        pending_checkouts_handler(call.message, message_id=call.message.message_id)
     elif action == 'admin_approved':
-        show_approved_payments_list(chat_id)
+        show_approved_payments_list(chat_id, message_id=call.message.message_id, message_obj=call.message)
     elif action == 'admin_stats':
-        stats_handler(call.message)
+        stats_handler(call.message, message_id=call.message.message_id)
     elif action == 'admin_dashboard':
         show_admin_dashboard(chat_id, call.message.message_id)
     elif action == 'admin_broadcast':
-        _show_broadcast_menu(chat_id)
+        _show_broadcast_menu(chat_id, call.message.message_id)
     elif action == 'admin_forcejoin':
-        send_force_join_menu(chat_id)
+        send_force_join_menu(chat_id, call.message.message_id)
     elif action == 'admin_cleanup':
-        show_cleanup_menu(chat_id, user_id=ADMIN_ID)
+        show_cleanup_menu(chat_id, message_id=call.message.message_id, user_id=ADMIN_ID)
     elif action == 'admin_dbstats':
-        dbstats_handler(call.message)
+        dbstats_handler(call.message, message_id=call.message.message_id)
     elif action == 'admin_menuimage':
-        set_menu_image_start(call.message)
+        _show_menu_image_settings(chat_id, call.message.message_id)
     elif action == 'admin_home':
+        try:
+            bot.clear_step_handler_by_chat_id(chat_id)
+        except Exception:
+            pass
         show_admin_menu(chat_id, call.message.message_id)
 
 # =====================================================================
@@ -4200,9 +4282,14 @@ def myplans_handler(message):
         markup.add(InlineKeyboardButton(f"🔄 Renew — {ch_name}", callback_data=f"renew_{s['channel_id']}"))
 
     if not lines:
-        send_command_reply(message, "🤷‍♂️ No active subscriptions right now.\n\nUse /buy to browse channels and grab one 🔥")
+        markup.add(InlineKeyboardButton("😍 Browse Channels", callback_data="cart_browse"))
+        markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+        markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
+        send_command_reply(message, "🤷‍♂️ No active subscriptions right now.\n\nUse /buy to browse channels and grab one 🔥", reply_markup=markup)
         return
 
+    markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     send_command_reply(message, "╭━━━ 📋 𝙔𝙊𝙐𝙍 𝙋𝙇𝘼𝙉𝙎 ━━━╮\n\n" + "\n".join(lines) + "\n\n╰━━━━━━━━━━━━━━━━━━━━╯", reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('renew_'))
@@ -4247,12 +4334,14 @@ def show_users_list(chat_id, user_id=None, message=None, message_id=None, page=0
 
         if not active_subs:
             text = "ℹ️ *No active subscribers found.*"
+            markup = InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+                                                InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
             if message:
-                send_command_reply(message, text, parse_mode="Markdown")
+                send_command_reply(message, text, reply_markup=markup, parse_mode="Markdown")
             elif message_id:
-                edit_menu(chat_id, message_id, text, parse_mode="Markdown")
+                edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
             else:
-                bot.send_message(chat_id, text, parse_mode="Markdown")
+                bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
             return
 
         channel_map = {ch['channel_id']: ch for ch in channels_col.find({})}
@@ -4369,6 +4458,9 @@ def show_users_list(chat_id, user_id=None, message=None, message_id=None, page=0
                 InlineKeyboardButton("⬅️ Prev", callback_data=f"userspage_{page-1}" if page > 0 else "noop"),
                 InlineKeyboardButton("➡️ Next", callback_data=f"userspage_{page+1}" if end < total else "noop")
             )
+        markup.add(InlineKeyboardButton("🗑 Remove Subscriber", callback_data="admin_removesubscriber"))
+        markup.add(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+                   InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
 
         if message_id:
             edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
@@ -4391,6 +4483,8 @@ def show_users_list(chat_id, user_id=None, message=None, message_id=None, page=0
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('userspage_'))
 def cb_users_page(call):
+    if not _require_admin(call):
+        return
     page = int(call.data.split('_')[1])
     bot.answer_callback_query(call.id)
     show_users_list(call.message.chat.id, user_id=call.from_user.id, message_id=call.message.message_id, page=page)
@@ -4403,6 +4497,8 @@ def help_handler(message):
     markup = InlineKeyboardMarkup()
     if contact_url:
         markup.add(InlineKeyboardButton("📞 𝘾𝙤𝙣𝙩𝙖𝙘𝙩 𝘼𝙙𝙢𝙞𝙣", url=contact_url))
+    markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     send_command_reply(message,
         "╭━━━ ℹ️ 𝙃𝙊𝙒 𝙄𝙏 𝙒𝙊𝙍𝙆𝙎 ━━━╮\n\n"
         "1. Use /buy to see available channels\n"
@@ -4452,6 +4548,8 @@ def show_channel_list(chat_id, message_id=None):
         count += 1
 
     markup.add(InlineKeyboardButton("➕ Add New Channel", callback_data="add_new"))
+    markup.add(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     text = "No channels found. Add one below 👇" if count == 0 else "Your Managed Channels:"
     if message_id:
         # Reached by tapping a button (e.g. Back, or after deleting a channel) -> auto-vanish
@@ -4498,6 +4596,7 @@ def show_admin_dashboard(chat_id, message_id=None):
         InlineKeyboardButton("⏳ Pending Payments", callback_data="admin_pending"),
     )
     markup.add(InlineKeyboardButton("🏠 Admin Panel", callback_data="admin_home"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode='HTML', delay=None)
     else:
@@ -4847,6 +4946,7 @@ def manage_ch(call):
         markup.add(InlineKeyboardButton(expiry_label, callback_data=f"setfreeexpiry_{ch_id}"))
     markup.add(InlineKeyboardButton("🗑 Delete Channel", callback_data=f"delch_{ch_id}"))
     markup.add(InlineKeyboardButton("⬅️ 𝗕𝗮𝗰𝗸 𝘁𝗼 𝗖𝗵𝗮𝗻𝗻𝗲𝗹𝘀", callback_data="back_channels"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
 
     preview_count = len(_channel_preview_media(ch_data))
     ss_status = f"✅ Preview set ({preview_count} item(s))" if preview_count else "❌ No preview yet"
@@ -5056,6 +5156,7 @@ def _render_channel_order_menu(call):
         if row:
             markup.row(*row)
     markup.add(InlineKeyboardButton("⬅️ Back", callback_data="back_channels"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
 
     text = "🔀 *Reorder Channels*\n\nUse ⬆️/⬇️ to move a channel. Top 3 always get a medal and show first to users." if channels else "No channels found yet."
     edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="Markdown")
@@ -5199,6 +5300,7 @@ def edit_plans_menu(call):
     if len(ch_data.get('plans') or {}) > 1:
         markup.add(InlineKeyboardButton("🔀 Reorder Plans", callback_data=f"planorder_{ch_id}"))
     markup.add(InlineKeyboardButton("⬅️ Back", callback_data=f"manage_{ch_id}"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
 
     edit_menu(call.message.chat.id, call.message.message_id,
         f"✏️ Edit Plans for *{ch_data['name']}*\n\nTap a plan below to edit its price/duration, or add a new one:",
@@ -5232,6 +5334,7 @@ def _render_plan_order_menu(call, ch_id):
         if row:
             markup.row(*row)
     markup.add(InlineKeyboardButton("⬅️ Back", callback_data=f"editplans_{ch_id}"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     edit_menu(call.message.chat.id, call.message.message_id,
         f"🔀 *Reorder Plans* — {ch_data['name']}\n\nThis is the order buyers see (free trials always show above all plans, regardless of this order).",
         reply_markup=markup, parse_mode="Markdown")
@@ -5273,6 +5376,7 @@ def edit_single_plan(call):
     markup.add(InlineKeyboardButton("⏱ Edit Duration", callback_data=f"editdur_{ch_id}_{t}"))
     markup.add(InlineKeyboardButton("🗑 Delete Plan", callback_data=f"delplan_{ch_id}_{t}"))
     markup.add(InlineKeyboardButton("⬅️ Back", callback_data=f"editplans_{ch_id}"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
 
     edit_menu(call.message.chat.id, call.message.message_id,
         f"Plan: *{format_label(t)}* — ₹{price}\n\nWhat would you like to do?",
@@ -6271,7 +6375,7 @@ def cout_approve_handler(call):
                            is_photo=bool(getattr(call.message, 'photo', None)), delay=APPROVED_VANISH_SECONDS)
 
 @bot.message_handler(commands=['stats'], func=lambda m: m.from_user.id == ADMIN_ID)
-def stats_handler(message):
+def stats_handler(message, message_id=None):
     total_channels = channels_col.count_documents({"admin_id": ADMIN_ID})
     now = datetime.now().timestamp()
     active_subs = users_col.count_documents({
@@ -6301,7 +6405,13 @@ def stats_handler(message):
         + (f"🎁 Bundle Discounts Given: ₹{total_discount}\n" if total_discount else "") +
         f"📅 This Month's Revenue: ₹{month_revenue}"
     )
-    send_command_reply(message, text, parse_mode="Markdown")
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+               InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
+    if message_id:
+        edit_menu(message.chat.id, message_id, text, reply_markup=markup, parse_mode="Markdown", delay=None)
+    else:
+        send_command_reply(message, text, reply_markup=markup, parse_mode="Markdown")
 
 @bot.message_handler(commands=['about'])
 @bot.channel_post_handler(commands=['about'])
@@ -6444,7 +6554,7 @@ def about_handler(message):
 # --- ADMIN: DATABASE STORAGE (dbstats / cleanup) ---
 
 @bot.message_handler(commands=['dbstats'], func=lambda m: m.from_user.id == ADMIN_ID)
-def dbstats_handler(message):
+def dbstats_handler(message, message_id=None):
     """Sends DB storage breakdown. The /dbstats command message is deleted immediately,
     and the reply vanishes after COMMAND_VANISH_SECONDS.
     Plain text (no Markdown) is used deliberately — collection names like 'seen_users' contain
@@ -6474,13 +6584,21 @@ def dbstats_handler(message):
                 lines.append(f"• {name}: 0 docs — 0.00 MB")
 
         lines.append("\nUse /cleanup to free up space.")
-        # Dismiss previous, send new reply scheduled to vanish
-        dismiss_previous(message.chat.id, message.from_user.id)
-        reply = bot.send_message(message.chat.id, "\n".join(lines))
-        schedule_delete(message.chat.id, reply.message_id, COMMAND_VANISH_SECONDS)
-        track_msg(message.from_user.id, reply)
+        markup = InlineKeyboardMarkup()
+        markup.row(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+                   InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
+        if message_id:
+            edit_menu(message.chat.id, message_id, "\n".join(lines), reply_markup=markup, delay=None)
+        else:
+            send_command_reply(message, "\n".join(lines), reply_markup=markup)
     except Exception as e:
-        send_command_reply(message, f"❌ Couldn't fetch DB stats: {e}")
+        error_text = f"❌ Couldn't fetch DB stats: {e}"
+        if message_id:
+            markup = InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+                                                InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
+            edit_menu(message.chat.id, message_id, error_text, reply_markup=markup, delay=None)
+        else:
+            send_command_reply(message, error_text)
 
 @bot.message_handler(commands=['cleanup'], func=lambda m: m.from_user.id == ADMIN_ID)
 def cleanup_handler(message):
@@ -6574,6 +6692,8 @@ def show_cleanup_menu(chat_id, message_id=None, user_id=None):
         markup.add(InlineKeyboardButton("✅ Nothing to clean up right now", callback_data="cleanup_refresh"))
     else:
         markup.add(InlineKeyboardButton("🔄 Refresh counts", callback_data="cleanup_refresh"))
+    markup.row(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+               InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
 
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
@@ -6601,6 +6721,8 @@ def cb_cleanup_payments_ask(call):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ Yes, Delete Them", callback_data="cleanuppay_confirm"))
     markup.add(InlineKeyboardButton("❌ Cancel", callback_data="cleanup_refresh"))
+    markup.row(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+               InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     edit_menu(call.message.chat.id, call.message.message_id,
         f"⚠️ Delete *{count}* payment logs older than {CLEANUP_PAYMENTS_DAYS} days?\n\n"
         f"Your lifetime Total Sales/Revenue in /stats will stay accurate — only the itemized old records are removed.",
@@ -6613,9 +6735,12 @@ def cb_cleanup_payments_confirm(call):
     bot.answer_callback_query(call.id, "Deleting...")
     cutoff = datetime.now() - timedelta(days=CLEANUP_PAYMENTS_DAYS)
     result = payments_col.delete_many({"timestamp": {"$lt": cutoff}})
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔙 Back to Cleanup", callback_data="cleanup_refresh"))
+    markup.row(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+               InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     edit_menu(call.message.chat.id, call.message.message_id,
-        f"✅ Deleted {result.deleted_count} old payment logs.\n\nUse /dbstats to see updated storage usage.",
-        reply_markup=None)
+        f"✅ Deleted {result.deleted_count} old payment logs.\n\nUse Database to check storage usage.", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "cleanupseen_ask")
 def cb_cleanup_seenusers_ask(call):
@@ -6627,6 +6752,8 @@ def cb_cleanup_seenusers_ask(call):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ Yes, Delete Them", callback_data="cleanupseen_confirm"))
     markup.add(InlineKeyboardButton("❌ Cancel", callback_data="cleanup_refresh"))
+    markup.row(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+               InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     edit_menu(call.message.chat.id, call.message.message_id,
         f"⚠️ Delete *{count}* inactive users (not seen in {CLEANUP_SEENUSERS_DAYS}+ days)?\n\n"
         f"They just won't be reachable by future /broadcast messages — if they message the bot again, they'll be re-tracked automatically.",
@@ -6639,12 +6766,15 @@ def cb_cleanup_seenusers_confirm(call):
     bot.answer_callback_query(call.id, "Deleting...")
     cutoff = datetime.now() - timedelta(days=CLEANUP_SEENUSERS_DAYS)
     result = seen_users_col.delete_many({"last_seen": {"$lt": cutoff}})
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🔙 Back to Cleanup", callback_data="cleanup_refresh"))
+    markup.row(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+               InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     edit_menu(call.message.chat.id, call.message.message_id,
-        f"✅ Deleted {result.deleted_count} inactive user records.\n\nUse /dbstats to see updated storage usage.",
-        reply_markup=None)
+        f"✅ Deleted {result.deleted_count} inactive user records.", reply_markup=markup)
 
 @bot.message_handler(commands=['pending'], func=lambda m: m.from_user.id == ADMIN_ID)
-def pending_checkouts_handler(message):
+def pending_checkouts_handler(message, message_id=None):
     """Show all pending checkouts awaiting admin approval, with screenshot if available."""
     try:
         pending = list(pending_checkouts_col.find({}).sort("created_at", -1))
@@ -6652,7 +6782,13 @@ def pending_checkouts_handler(message):
         pending = []
 
     if not pending:
-        send_command_reply(message, "✅ No pending checkouts.")
+        text = "✅ No pending checkouts."
+        markup = InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+                                            InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
+        if message_id:
+            edit_menu(message.chat.id, message_id, text, reply_markup=markup, delay=None)
+        else:
+            send_command_reply(message, text, reply_markup=markup)
         return
 
     for doc in pending:
@@ -6678,6 +6814,8 @@ def pending_checkouts_handler(message):
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("✅ 𝘼𝙥𝙥𝙧𝙤𝙫𝙚", callback_data=f"coutapp_{token}"))
         markup.add(InlineKeyboardButton("❌ 𝗥𝗲𝗷𝗲𝗰𝘁", callback_data=f"coutrej_{token}"))
+        markup.row(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+                   InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
 
         try:
             if screenshot_file_id:
@@ -6780,6 +6918,7 @@ def show_approved_payments_list(chat_id, message_id=None, message=None, page=0, 
             "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
         )
         markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"))
         markup.add(InlineKeyboardButton("❌ 𝗖𝗹𝗼𝘀𝗲", callback_data="appv_close"))
         if message_id:
             edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown", message_obj=message_obj)
@@ -6833,6 +6972,7 @@ def show_approved_payments_list(chat_id, message_id=None, message=None, page=0, 
         InlineKeyboardButton("🔄 Refresh", callback_data=f"appv_p_{page}"),
         InlineKeyboardButton("❌ 𝗖𝗹𝗼𝘀𝗲", callback_data="appv_close")
     )
+    markup.add(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"))
 
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown", message_obj=message_obj)
@@ -6931,6 +7071,7 @@ def cb_approved_payments_view(call):
         InlineKeyboardButton("🗑 𝗗𝗲𝗹𝗲𝘁𝗲 𝗥𝗲𝗰𝗼𝗿𝗱", callback_data=f"appv_del_{pid}_{page}")
     )
     markup.add(InlineKeyboardButton("❌ 𝗖𝗹𝗼𝘀𝗲", callback_data="appv_close"))
+    markup.add(InlineKeyboardButton("🏠 Admin Panel", callback_data="admin_home"))
 
     ss_file_id = doc.get('screenshot_file_id')
     if ss_file_id:
@@ -6986,6 +7127,8 @@ def _show_broadcast_menu(chat_id, message_id=None):
     markup.add(InlineKeyboardButton("📨 Broadcast Now", callback_data="bcnow"))
     markup.add(InlineKeyboardButton("⏰ Schedule for Later", callback_data="bcsched"))
     markup.add(InlineKeyboardButton("📋 Scheduled Broadcasts", callback_data="bclist"))
+    markup.add(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     text = ("╭━━━ 📣 𝘽𝙍𝙊𝘼𝘿𝘾𝘼𝙎𝙏 ━━━╮\n\n"
             "Shoot a message to everyone who's ever used this bot 👇\n\n"
             "Send it now, or schedule it for later ⏰\n\n"
@@ -7192,6 +7335,7 @@ def show_scheduled_broadcasts(chat_id, message_id=None):
             text += f"\n• {when_dt.strftime('%m-%d %H:%M')} — {escape_markdown(preview)}"
 
     markup.add(InlineKeyboardButton("⬅️ Back", callback_data="bc_back"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
     else:
@@ -7293,17 +7437,21 @@ def _send_broadcast_now(text):
     except Exception:
         pass
 
-def show_active_users(chat_id, user_id=None, message=None, page=0, per_page=20):
+def show_active_users(chat_id, user_id=None, message=None, page=0, per_page=20, message_id=None):
     """Show active subscribers as inline buttons for the admin to remove.
     This is the fallback when /removeuser is used without arguments."""
     now = datetime.now().timestamp()
     admin_channel_ids = _admin_channel_ids()
     if not admin_channel_ids:
         text = "ℹ️ No channels are registered for this admin yet."
-        if message:
-            send_command_reply(message, text)
+        markup = InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+                                            InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
+        if message_id:
+            edit_menu(chat_id, message_id, text, reply_markup=markup)
+        elif message:
+            send_command_reply(message, text, reply_markup=markup)
         else:
-            bot.send_message(chat_id, text)
+            bot.send_message(chat_id, text, reply_markup=markup)
         return
 
     # Aggregate active subscriptions per user
@@ -7329,10 +7477,14 @@ def show_active_users(chat_id, user_id=None, message=None, page=0, per_page=20):
 
     if not user_sub_counts:
         text = "ℹ️ No active subscribers found to remove."
-        if message:
-            send_command_reply(message, text)
+        markup = InlineKeyboardMarkup().add(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+                                            InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
+        if message_id:
+            edit_menu(chat_id, message_id, text, reply_markup=markup)
+        elif message:
+            send_command_reply(message, text, reply_markup=markup)
         else:
-            bot.send_message(chat_id, text)
+            bot.send_message(chat_id, text, reply_markup=markup)
         return
 
     # Enrich with firstname from seen_users / chat_members if username is missing
@@ -7402,8 +7554,12 @@ def show_active_users(chat_id, user_id=None, message=None, page=0, per_page=20):
     if total > per_page:
         markup.add(InlineKeyboardButton("⬅️ Prev", callback_data=f"rmuserpage_{page-1}" if page > 0 else "noop"),
                    InlineKeyboardButton("➡️ Next", callback_data=f"rmuserpage_{page+1}" if end < total else "noop"))
+    markup.add(InlineKeyboardButton("⬅️ Admin Panel", callback_data="admin_home"),
+               InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
 
-    if message:
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
+    elif message:
         send_command_reply(message, text, reply_markup=markup, parse_mode="Markdown")
     else:
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
@@ -7519,11 +7675,8 @@ def cb_rmuser_page(call):
         return
     page = int(call.data.split('_')[1])
     bot.answer_callback_query(call.id)
-    show_active_users(call.message.chat.id, user_id=call.from_user.id, message=None, page=page)
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except Exception:
-        pass
+    show_active_users(call.message.chat.id, user_id=call.from_user.id, message=None, page=page,
+                      message_id=call.message.message_id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rmuserlist_'))
@@ -7532,14 +7685,11 @@ def cb_rmuser_list(call):
         return
     user_id = int(call.data.split('_')[1])
     bot.answer_callback_query(call.id)
-    show_user_channels(call.message.chat.id, user_id, message=None, page=0)
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except Exception:
-        pass
+    show_user_channels(call.message.chat.id, user_id, message=None, page=0,
+                       message_id=call.message.message_id)
 
 
-def show_user_channels(chat_id, user_id, message=None, page=0, per_page=20):
+def show_user_channels(chat_id, user_id, message=None, page=0, per_page=20, message_id=None):
     """Show all channels/groups subscribed by a specific user for the admin to selectively remove."""
     now = datetime.now().timestamp()
     admin_channel_ids = _admin_channel_ids()
@@ -7555,10 +7705,15 @@ def show_user_channels(chat_id, user_id, message=None, page=0, per_page=20):
 
     if not subs:
         text = f"ℹ️ No active subscriptions found for user `{user_id}`."
-        if message:
-            send_command_reply(message, text, parse_mode="Markdown")
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("🔙 Back to subscribers", callback_data="rmuserback"),
+                   InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
+        if message_id:
+            edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
+        elif message:
+            send_command_reply(message, text, reply_markup=markup, parse_mode="Markdown")
         else:
-            bot.send_message(chat_id, text, parse_mode="Markdown")
+            bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
         return
 
     # Sort by channel_id
@@ -7634,8 +7789,11 @@ def show_user_channels(chat_id, user_id, message=None, page=0, per_page=20):
                    InlineKeyboardButton("➡️ Next", callback_data=f"rmuserchpage_{user_id}_{page+1}" if end < total else "noop"))
 
     markup.add(InlineKeyboardButton("🔙 Back to subscribers", callback_data="rmuserback"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
 
-    if message:
+    if message_id:
+        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
+    elif message:
         send_command_reply(message, text, reply_markup=markup, parse_mode="Markdown")
     else:
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
@@ -7646,11 +7804,8 @@ def cb_rmuser_back(call):
     if not _require_admin(call):
         return
     bot.answer_callback_query(call.id)
-    show_active_users(call.message.chat.id, user_id=call.from_user.id, message=None, page=0)
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except Exception:
-        pass
+    show_active_users(call.message.chat.id, user_id=call.from_user.id, message=None, page=0,
+                      message_id=call.message.message_id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rmuserch_'))
@@ -7699,6 +7854,7 @@ def cb_rmuser_ch_confirm(call):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("✅ Yes, Remove", callback_data=f"rmuserchconfirm_{user_id}_{channel_id}"))
     markup.add(InlineKeyboardButton("❌ Cancel", callback_data=f"rmuserchcancel_{user_id}"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     edit_menu(call.message.chat.id, call.message.message_id,
         f"⚠️ Remove {user_label} from {ch_name}?",
         reply_markup=markup, parse_mode="Markdown")
@@ -7729,6 +7885,7 @@ def cb_rmuser_ch_do(call):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("🔙 Back to user channels", callback_data=f"rmuserlist_{user_id}"))
     markup.add(InlineKeyboardButton("🔙 Back to subscribers", callback_data="rmuserback"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="Markdown")
 
 
@@ -7738,11 +7895,8 @@ def cb_rmuser_ch_cancel(call):
         return
     user_id = int(call.data.split('_')[1])
     bot.answer_callback_query(call.id)
-    show_user_channels(call.message.chat.id, user_id, message=None, page=0)
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except Exception:
-        pass
+    show_user_channels(call.message.chat.id, user_id, message=None, page=0,
+                       message_id=call.message.message_id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rmuserchpage_'))
@@ -7754,11 +7908,8 @@ def cb_rmuser_ch_page(call):
     user_id = int(parts[1])
     page = int(parts[2])
     bot.answer_callback_query(call.id)
-    show_user_channels(call.message.chat.id, user_id, message=None, page=page)
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except Exception:
-        pass
+    show_user_channels(call.message.chat.id, user_id, message=None, page=page,
+                       message_id=call.message.message_id)
 
 
 @bot.message_handler(commands=['remove'])
