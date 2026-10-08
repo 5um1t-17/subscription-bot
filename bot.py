@@ -7534,17 +7534,49 @@ def group_add_handler(message):
         })
         users_col.insert_one(sub_data)
 
+    added = False
+    invite_link = None
+
+    if message.chat.type in ('group', 'supergroup'):
+        try:
+            bot.add_chat_member(chat_id, target_uid)
+            added = True
+        except Exception:
+            pass
+
+    if not added:
+        try:
+            if expiry_ts:
+                invite = bot.create_chat_invite_link(chat_id, member_limit=1, expire_date=int(expiry_ts))
+            else:
+                invite = bot.create_chat_invite_link(chat_id, member_limit=1)
+            invite_link = invite.invite_link
+        except Exception as e:
+            invite_link = None
+
     try:
         contact_url = contact_admin_url()
         markup = InlineKeyboardMarkup()
         user_msg = f"✅ You have been subscribed to *{ch_name}* for {duration_label}."
+        if invite_link:
+            markup.add(InlineKeyboardButton("🔗 Join Channel", url=invite_link))
         if contact_url:
             markup.add(InlineKeyboardButton("Contact Admin", url=contact_url))
         bot.send_message(target_uid, user_msg, reply_markup=markup, parse_mode="Markdown")
+        if not invite_link:
+            _safe_reply(message, f"Added user `{target_uid}` to *{ch_name}* for {duration_label}.", parse_mode="Markdown")
     except Exception:
-        pass
-
-    _safe_reply(message, f"Added user `{target_uid}` to *{ch_name}* for {duration_label}.", parse_mode="Markdown")
+        if invite_link:
+            try:
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton("🔗 Join Channel", url=invite_link))
+                if contact_url:
+                    markup.add(InlineKeyboardButton("Contact Admin", url=contact_url))
+                _safe_reply(message, f"Added user `{target_uid}` to *{ch_name}* for {duration_label}.\n\nUser hasn't started the bot, so share this invite:", reply_markup=markup, parse_mode="Markdown")
+            except Exception:
+                pass
+        else:
+            _safe_reply(message, f"Added user `{target_uid}` to *{ch_name}* for {duration_label}.", parse_mode="Markdown")
 
 
 @bot.chat_member_handler(func=lambda update: True)
