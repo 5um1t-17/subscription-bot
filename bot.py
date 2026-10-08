@@ -526,7 +526,7 @@ def save_force_join_settings(**fields):
 
 # --- Event-based pending join-request tracking ---
 
-def _fj_record_pending_request(chat_id, user_id, invite_link=None):
+def _fj_record_pending_request(chat_id, user_id, invite_link=None, channel_username=None):
     """Record a pending join request in MongoDB. Idempotent: upsert by unique key."""
     try:
         fj_pending_requests_col.update_one(
@@ -536,6 +536,8 @@ def _fj_record_pending_request(chat_id, user_id, invite_link=None):
                 "user_id": int(user_id),
                 "requested_at": datetime.now(),
                 "invite_link": invite_link,
+                "channel_username": (str(channel_username).strip().lstrip('@').lower()
+                                     if channel_username else None),
                 "active": True,
             }},
             upsert=True
@@ -555,12 +557,19 @@ def _fj_remove_pending_request(chat_id, user_id):
 def _fj_has_pending_request(user_id, chat_id):
     """Check MongoDB for a pending or approved join-request record."""
     try:
+        channel_match = []
+        try:
+            channel_match.append({"channel_id": int(chat_id)})
+        except (TypeError, ValueError):
+            channel_match.append({"channel_username": str(chat_id).strip().lstrip('@').lower()})
         doc = fj_pending_requests_col.find_one({
-            "channel_id": int(chat_id),
             "user_id": int(user_id),
-            "$or": [
-                {"active": True},
-                {"approved": True, "approved_at": {"$gte": datetime.now() - timedelta(days=7)}},
+            "$and": [
+                {"$or": channel_match},
+                {"$or": [
+                    {"active": True},
+                    {"approved": True, "approved_at": {"$gte": datetime.now() - timedelta(days=7)}},
+                ]},
             ],
         })
         return doc is not None
@@ -578,7 +587,7 @@ def _fj_mark_request_approved(chat_id, user_id):
     except Exception as e:
         print(f"[fj_track] error saving approval for user {user_id} in chat {chat_id}: {e}")
 
-def _fj_is_force_join_channel(chat_id):
+def _fj_is_force_join_channel(chat_id, username=None):
     """Check if the given chat_id is configured as a Force Join channel."""
     try:
         settings = get_force_join_settings()
@@ -586,6 +595,9 @@ def _fj_is_force_join_channel(chat_id):
         for ch in channels:
             resolved = _fj_canonical_chat_id(ch.get('channel'))
             if resolved == chat_id:
+                return True
+            configured_username = str(ch.get('channel') or '').strip().lstrip('@').lower()
+            if username and configured_username == str(username).strip().lstrip('@').lower():
                 return True
         return False
     except Exception:
@@ -668,6 +680,13 @@ def _fj_membership_status(user_id, settings):
         if chat_id is None:
             print(f"[fj_status] skipping channel {ch.get('title', '?')} - unresolved chat_id")
             continue
+
+        # A request is sufficient for bot access; do this first so we don't make
+        # a requester wait on getChatMember or on an admin's channel approval.
+        if _fj_has_pending_request(user_id, chat_id):
+            print(f"FORCE_JOIN_CHECK user={user_id} channel={chat_id} pending_request=true")
+            print(f"FORCE_JOIN_RESULT user={user_id} allowed=true reason=pending_request")
+            continue
         
         member_status = None
         try:
@@ -687,17 +706,11 @@ def _fj_membership_status(user_id, settings):
             member_status == 'restricted' and getattr(member, 'is_member', None) in (None, True)
         )
         
-        # Check MongoDB pending request record
-        pending = _fj_has_pending_request(user_id, chat_id)
-        print(f"FORCE_JOIN_CHECK user={user_id} channel={chat_id} member={is_member} pending_request={pending}")
+        print(f"FORCE_JOIN_CHECK user={user_id} channel={chat_id} member={is_member} pending_request=false")
         
         if is_member:
             print(f"FORCE_JOIN_RESULT user={user_id} allowed=true reason=member")
             continue
-        if pending:
-            print(f"FORCE_JOIN_RESULT user={user_id} allowed=true reason=pending_request")
-            continue
-        
         # Neither member nor pending request
         not_joined.append(ch.get('title') or ch.get('channel'))
     
@@ -705,7 +718,7 @@ def _fj_membership_status(user_id, settings):
         print(f"FORCE_JOIN_RESULT user={user_id} allowed=false reason=not_joined")
         return 'not_joined', not_joined
     
-    print(f"FORCE_JOIN_RESULT user={user_id} allowed=true reason=member")
+    print(f"FORCE_JOIN_RESULT user={user_id} allowed=true reason=member_or_request")
     return 'joined', None
 
 def user_has_force_join_pass(user_id):
@@ -830,7 +843,7 @@ bot.setup_middleware(ForceJoinMiddleware())
 
 # ---- Force Join join-request event tracking ----
 
-@bot.chat_join_request_handler(func=lambda req: _fj_is_force_join_channel(req.chat.id))
+@bot.chat_join_request_handler()
 def handle_fj_chat_join_request(req):
     """Capture join requests for configured Force Join channels and store them in MongoDB.
     If auto_approve is enabled, automatically approve the request."""
@@ -840,11 +853,13 @@ def handle_fj_chat_join_request(req):
         invite_link = getattr(req, 'invite_link', None)
         
         # Only track if this is a configured Force Join channel
-        if not _fj_is_force_join_channel(chat_id):
+        channel_username = getattr(req.chat, 'username', None)
+        if not _fj_is_force_join_channel(chat_id, channel_username):
+            print(f"[fj_track] ignoring join request for unconfigured chat {chat_id} (@{channel_username or 'private'})")
             return
         
         # Record the pending request
-        _fj_record_pending_request(chat_id, user_id, invite_link)
+        _fj_record_pending_request(chat_id, user_id, invite_link, channel_username)
         
         # Auto-approve if enabled
         settings = get_force_join_settings()
@@ -984,8 +999,8 @@ def cb_fj_setchannel(call):
     if not _fj_admin(call):
         return
     msg = send_prompt(call.message.chat.id,
-        "Send the channel username or numeric chat ID to add to Force Join, e.g. `@my_updates` or `-1001234567890`.\n\n"
-        "Make sure the bot is a member (admin) of that channel so membership checks can run.\n\n"
+        "Send the channel username or numeric chat ID, e.g. `@my_updates` or `-1001234567890`.\n\n"
+        "For a private group/channel, send its numeric ID (not its invite link). Add the bot as an admin with the *Invite Users* permission so Telegram can deliver join requests.\n\n"
         "Type /skip to cancel.",
         parse_mode="Markdown")
     bot.register_next_step_handler(msg, _fj_save_channel)
@@ -997,7 +1012,7 @@ def _fj_save_channel(message):
         return
     chat_id = _fj_resolve_chat_id(raw)
     if chat_id is None:
-        send_admin_reply("❌ That doesn't look like a channel. Send a username (e.g. @my_updates), a numeric ID, or a private invite link.")
+        send_admin_reply("❌ That doesn't look like a channel. Send a public username (e.g. @my_updates) or the numeric chat ID. Private invite links do not identify a chat to the bot.")
         return
     try:
         chat_obj = bot.get_chat(chat_id)
@@ -1013,14 +1028,17 @@ def _fj_save_channel(message):
     settings = get_force_join_settings()
     channels = settings.get('channels', [])
     
-    # Check if channel already exists
+    # Save the numeric chat ID for stable matching with chat_join_request updates.
+    stored_channel = str(chat_obj.id)
+
+    # Check for duplicates regardless of whether the admin entered a username or ID.
     for ch in channels:
-        if ch.get('channel') == raw:
+        if _fj_canonical_chat_id(ch.get('channel')) == int(chat_obj.id):
             send_admin_reply(f"❌ Channel *{escape_markdown(title)}* is already in the list.", parse_mode="Markdown")
             return
     
     channels.append({
-        "channel": raw,
+        "channel": stored_channel,
         "title": title,
         "is_private": is_private,
         "invite_link": invite_link,
