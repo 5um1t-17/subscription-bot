@@ -3415,12 +3415,7 @@ def admin_menu_action(call):
     action = call.data
 
     if action == 'admin_add':
-        msg = send_prompt(
-            ADMIN_ID,
-            "Forward a message from the group or channel you want to add. "
-            "I’ll show its chat ID before you enter the plans. The bot must be an admin there.",
-        )
-        bot.register_next_step_handler(msg, get_plans)
+        _prompt_add_channel(ADMIN_ID)
     elif action == 'admin_channels':
         show_channel_list(chat_id, call.message.message_id)
     elif action == 'admin_bundles':
@@ -4638,7 +4633,7 @@ def cb_add_new(call):
 
 
 def _prompt_add_channel(chat_id):
-    return bot.send_message(
+    msg = bot.send_message(
         chat_id,
         "Add a group or channel in either way:\n"
         "• Forward a message from it\n"
@@ -4647,6 +4642,8 @@ def _prompt_add_channel(chat_id):
         "the ID will be used as the temporary channel name. Send /cancel to stop.",
         vanish_delay=None,
     )
+    bot.register_next_step_handler(msg, get_plans)
+    return msg
     bot.register_next_step_handler(msg, get_plans)
 
 def _forwarded_source_chat(message):
