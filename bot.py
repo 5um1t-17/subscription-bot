@@ -543,8 +543,10 @@ def _fj_record_pending_request(chat_id, user_id, invite_link=None, channel_usern
             upsert=True
         )
         print(f"JOIN_REQUEST_RECEIVED channel={chat_id} user={user_id}")
+        return True
     except Exception as e:
         print(f"[fj_track] error recording pending request for user {user_id} in chat {chat_id}: {e}")
+        return False
 
 def _fj_remove_pending_request(chat_id, user_id):
     """Remove a pending join request record (e.g. approved, rejected, expired)."""
@@ -859,7 +861,24 @@ def handle_fj_chat_join_request(req):
             return
         
         # Record the pending request
-        _fj_record_pending_request(chat_id, user_id, invite_link, channel_username)
+        recorded = _fj_record_pending_request(chat_id, user_id, invite_link, channel_username)
+        if not recorded:
+            return
+
+        # Confirm the event reached the bot and give the requester a one-tap
+        # route into the bot while their group request is still pending.
+        try:
+            continue_markup = InlineKeyboardMarkup().add(
+                InlineKeyboardButton("✅ Continue", callback_data=FJ_CB_RETRY)
+            )
+            bot.send_message(
+                req.user_chat_id,
+                "✅ Your join request was received. You can use the bot while the group admin reviews it.",
+                reply_markup=continue_markup,
+                vanish_delay=None,
+            )
+        except Exception as e:
+            print(f"[fj_track] could not notify requester {user_id}: {e}")
         
         # Auto-approve if enabled
         settings = get_force_join_settings()
@@ -1151,8 +1170,17 @@ def cb_fj_verify(call):
             try:
                 bot_member = bot.get_chat_member(chat_id, bot.user.id)
                 bstatus = getattr(bot_member, 'status', None)
-                if bstatus in ('creator', 'administrator', 'member'):
-                    lines.append(f"🤖 Bot is in the channel ({bstatus}) — checks will work.")
+                can_receive_requests = (
+                    bstatus == 'creator' or
+                    (bstatus == 'administrator' and getattr(bot_member, 'can_invite_users', False))
+                )
+                if ch.get('is_private') and not can_receive_requests:
+                    lines.append(
+                        f"❌ Bot status is {bstatus}; it needs admin permission *Invite Users* "
+                        "to receive private-group join requests."
+                    )
+                elif bstatus in ('creator', 'administrator', 'member'):
+                    lines.append(f"🤖 Bot is in the channel ({bstatus}) — membership checks can run.")
                 else:
                     lines.append(f"⚠️ Bot status: {bstatus}. Add the bot so checks work.")
             except Exception:
