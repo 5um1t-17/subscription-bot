@@ -2047,10 +2047,7 @@ def format_small_tag(tag):
     return f"⁽{text.translate(SMALL_TAG_CHARS)}⁾˖✧" if text else ""
 
 def recently_added_channel_ids(admin_id=ADMIN_ID):
-    """Return the newest channel for this admin; its NEW tag stays until another is added.
-
-    Legacy documents without created_at are backfilled from their Mongo ObjectId time.
-    """
+    """Return the persisted NEW-tag channel, migrating legacy Mongo records as needed."""
     docs = list(channels_col.find({"admin_id": admin_id}))
     dated_docs = []
     for doc in docs:
@@ -2071,8 +2068,26 @@ def recently_added_channel_ids(admin_id=ADMIN_ID):
             dated_docs.append((created_at.timestamp(), str(doc.get('_id', '')), doc.get('channel_id')))
         except (AttributeError, TypeError, ValueError, OverflowError):
             continue
-    newest = max(dated_docs, default=None, key=lambda item: (item[0], item[1]))
-    return {newest[2]} if newest and newest[2] is not None else set()
+    marked = [doc for doc in docs if doc.get('is_new') is True]
+    if marked:
+        latest_marked = max(
+            marked,
+            key=lambda doc: (doc.get('created_at').timestamp() if hasattr(doc.get('created_at'), 'timestamp') else 0,
+                             str(doc.get('_id', ''))),
+        )
+        new_id = latest_marked.get('channel_id')
+    else:
+        newest = max(dated_docs, default=None, key=lambda item: (item[0], item[1]))
+        new_id = newest[2] if newest else None
+    if new_id is None:
+        return set()
+    # Keep one marker only; the admin can manually move it to an older group.
+    channels_col.update_many(
+        {"admin_id": admin_id, "is_new": True, "channel_id": {"$ne": new_id}},
+        {"$unset": {"is_new": ""}},
+    )
+    channels_col.update_one({"admin_id": admin_id, "channel_id": new_id}, {"$set": {"is_new": True}})
+    return {new_id}
 
 def channel_status_tags(ch, recent_channel_ids=None):
     """Small status tags shared by user and admin channel lists."""
@@ -4964,11 +4979,17 @@ def finalize_channel(message, ch_id, ch_name):
         existing_max = channels_col.find({"admin_id": ADMIN_ID}).sort("order", -1).limit(1)
         existing_max = list(existing_max)
         next_order = (existing_max[0].get('order', 0) + 1) if existing_max else 1
+        existing_channel = channels_col.find_one({"channel_id": ch_id}, {"_id": 1})
+        if not existing_channel:
+            channels_col.update_many(
+                {"admin_id": ADMIN_ID, "is_new": True},
+                {"$unset": {"is_new": ""}},
+            )
         channels_col.update_one(
             {"channel_id": ch_id},
             {
                 "$set": {"name": ch_name, "plans": plans_dict, "admin_id": ADMIN_ID, "order": next_order},
-                "$setOnInsert": {"created_at": datetime.now()},
+                "$setOnInsert": {"created_at": datetime.now(), "is_new": True},
             },
             upsert=True,
         )
@@ -5324,6 +5345,7 @@ def manage_ch(call):
     custom_tags = ch_data.get('custom_tags', [])
     tag_status = ", ".join(custom_tags) if custom_tags else "None set"
     markup.add(InlineKeyboardButton("🏷️ Edit Tags", callback_data=f"edittags_{ch_id}"))
+    markup.add(InlineKeyboardButton("🆕 Move NEW tag here", callback_data=f"setnewtag_{ch_id}"))
     markup.add(InlineKeyboardButton("✏️ Edit Plans", callback_data=f"editplans_{ch_id}"))
     markup.add(InlineKeyboardButton("🎁 Free Trials", callback_data=f"trials_{ch_id}"))
     markup.add(InlineKeyboardButton("📝 Edit About/Description", callback_data=f"editdesc_{ch_id}"))
@@ -5346,6 +5368,7 @@ def manage_ch(call):
     preview_count = len(_channel_preview_media(ch_data))
     ss_status = f"✅ Preview set ({preview_count} item(s))" if preview_count else "❌ No preview yet"
     desc_status = ch_data.get('description', 'None set')
+    new_tag_is_here = ch_id in recently_added_channel_ids(ADMIN_ID)
     position = next((i for i, c in enumerate(get_sorted_channels(ADMIN_ID), start=1) if c['channel_id'] == ch_id), None)
     position_status = f"{RANK_BADGES.get(position, '')} #{position}".strip() if position else "Unset"
     pause_status = "⏸ Paused (waitlist open)" if ch_data.get('paused') else "▶️ Active"
@@ -5361,6 +5384,7 @@ def manage_ch(call):
         f"🔗 Invite Link:\n`{link}`\n\n"
         f"📝 Description:\n_{desc_status}_\n\n"
         f"🏷️ Custom tags: {tag_status}\n\n"
+        f"🆕 NEW tag: {'Yes' if new_tag_is_here else 'No'}\n\n"
         f"💰 Current Plans:\n{format_plans_text(ch_data)}\n\n"
         f"🔀 Position: {position_status}\n\n"
         f"⏯ Status: {pause_status}\n"
@@ -5369,6 +5393,27 @@ def manage_ch(call):
         f"👥 On waitlist: {waitlist_count}\n\n"
         f"🖼 {ss_status}",
         reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('setnewtag_'))
+def set_channel_new_tag(call):
+    if not _require_admin(call):
+        return
+    try:
+        ch_id = int(call.data.split('_', 1)[1])
+    except (TypeError, ValueError):
+        bot.answer_callback_query(call.id, "Invalid channel.")
+        return
+    channel = channels_col.find_one({"channel_id": ch_id, "admin_id": ADMIN_ID})
+    if not channel:
+        bot.answer_callback_query(call.id, "Channel not found.")
+        return
+    channels_col.update_many(
+        {"admin_id": ADMIN_ID, "is_new": True, "channel_id": {"$ne": ch_id}},
+        {"$unset": {"is_new": ""}},
+    )
+    channels_col.update_one({"channel_id": ch_id}, {"$set": {"is_new": True}})
+    bot.answer_callback_query(call.id, "NEW tag moved to this group/channel.")
+    send_admin_reply(f"🆕 NEW tag set on *{escape_markdown(channel.get('name', str(ch_id)))}*. It will move when another channel is added.", parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('edittags_'))
 def edit_channel_tags_prompt(call):
