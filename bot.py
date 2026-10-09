@@ -27,7 +27,7 @@ from bson import ObjectId
 from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
-from threading import Thread, Timer
+from threading import Thread, Timer, RLock
 from queue import Queue
 
 # Telegram's built-in identity when a group admin posts with "Remain anonymous" on.
@@ -2047,12 +2047,28 @@ def format_small_tag(tag):
     return f"⁽{text.translate(SMALL_TAG_CHARS)}⁾˖✧" if text else ""
 
 def latest_added_channel_id(admin_id=ADMIN_ID):
-    """Return the most recently created channel for this admin, if available."""
-    latest = channels_col.find_one(
-        {"admin_id": admin_id, "created_at": {"$exists": True}},
-        sort=[("created_at", -1)],
-    )
-    return latest.get('channel_id') if latest else None
+    """Return the latest channel, backfilling dates from legacy Mongo ObjectIds."""
+    docs = list(channels_col.find({"admin_id": admin_id}))
+    dated_docs = []
+    for doc in docs:
+        created_at = doc.get('created_at')
+        if created_at is None:
+            object_id = doc.get('_id')
+            try:
+                if not isinstance(object_id, ObjectId):
+                    object_id = ObjectId(str(object_id))
+                created_at = object_id.generation_time.replace(tzinfo=None)
+                channels_col.update_one(
+                    {"_id": doc['_id'], "created_at": {"$exists": False}},
+                    {"$set": {"created_at": created_at}},
+                )
+            except Exception:
+                continue
+        try:
+            dated_docs.append((created_at.timestamp(), str(doc.get('_id', '')), doc.get('channel_id')))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            continue
+    return max(dated_docs, default=(None, '', None), key=lambda item: (item[0], item[1]))[2]
 
 def channel_status_tags(ch, newest_channel_id=None):
     """Small status tags shared by user and admin channel lists."""
@@ -4962,20 +4978,20 @@ def finalize_channel(message, ch_id, ch_name):
 
         # Now ask for an optional photo/video preview
         msg = send_prompt(ADMIN_ID,
-            "🖼 *Optional preview:* Send a photo, an MP4 video, or an album of photos/videos.\n\n"
-            "Users will see this media before the channel plans. Send /skip to continue without a preview.", parse_mode="Markdown")
-        bot.register_next_step_handler(msg, save_channel_screenshot, ch_id, True)
+            "🖼 *Optional preview:* Send photos/videos together as an album or one at a time. "
+            "When finished, send *Done* (or /done).\n\n"
+            "All sent media will be combined into one preview. Send /skip to continue without a preview.", parse_mode="Markdown")
+        _begin_channel_preview_upload(msg, ch_id, True)
     except Exception:
         send_admin_reply("❌ Invalid format. Please use `Days:Hours:Mins:Price` or `lifetime:Price`, comma-separated. Use /add to retry.")
 
 _preview_uploads = {}
 _preview_drafts = {}
 _preview_editor_album_ids = {}
-# Telegram delivers each album item as a separate update. Keep the collector
-# open long enough for slower polling hosts (for example Render) to receive all
-# parts before opening the preview editor, otherwise one album can split into
-# multiple single-item drafts.
-PREVIEW_ALBUM_COLLECT_SECONDS = 4.0
+_preview_upload_sessions = {}
+_preview_upload_lock = RLock()
+# Wait briefly after Done so concurrently-dispatched album item updates can finish.
+PREVIEW_DONE_SETTLE_SECONDS = 1.0
 
 
 def _preview_upload_entry(message):
@@ -4997,26 +5013,88 @@ def _prompt_channel_description(ch_id):
     bot.register_next_step_handler(msg, save_channel_description, ch_id)
 
 
+def _begin_channel_preview_upload(prompt_message, ch_id, is_initial=False):
+    """Arm a chat-scoped upload listener so every album update is collected."""
+    with _preview_upload_lock:
+        old_state = _preview_uploads.pop(ch_id, None)
+        if old_state and old_state.get('timer'):
+            old_state['timer'].cancel()
+    _preview_upload_sessions[ADMIN_ID] = {
+        'ch_id': ch_id,
+        'is_initial': is_initial,
+        'prompt_message_id': getattr(prompt_message, 'message_id', None),
+    }
+
+
+def _is_channel_preview_upload_message(message):
+    if not getattr(message, 'from_user', None) or message.from_user.id != ADMIN_ID:
+        return False
+    session = _preview_upload_sessions.get(message.chat.id)
+    if not session:
+        return False
+    text = getattr(message, 'text', None)
+    return not (text and text.strip().startswith('/') and text.strip().lower() not in ('/skip', '/done'))
+
+
+@bot.message_handler(content_types=['text', 'photo', 'video', 'document'], func=_is_channel_preview_upload_message)
+def handle_channel_preview_upload_message(message):
+    session = _preview_upload_sessions.get(message.chat.id)
+    if session:
+        save_channel_screenshot(message, session['ch_id'], session.get('is_initial', False))
+
+
 def _finish_channel_preview_upload(ch_id, media_items, is_initial):
+    print(f"PREVIEW_UPLOAD_COMPLETE channel={ch_id} items={len(media_items)} initial={is_initial}", flush=True)
     _preview_drafts[ch_id] = {'items': list(media_items), 'is_initial': is_initial}
     _render_preview_editor(ch_id, ADMIN_ID, is_draft=True)
 
 
-def _flush_preview_upload(ch_id, expected_group_id=None):
-    state = _preview_uploads.get(ch_id)
-    if not state or (expected_group_id is not None and state['group_id'] != expected_group_id):
+def _finalize_channel_preview_upload(ch_id):
+    with _preview_upload_lock:
+        state = _preview_uploads.pop(ch_id, None)
+        if not state:
+            return
+        if state.get('timer'):
+            state['timer'].cancel()
+        items = [entry for _, entry in sorted(state['items'], key=lambda pair: pair[0])]
+        is_initial = state['is_initial']
+        if items:
+            session = _preview_upload_sessions.get(ADMIN_ID)
+            if session and session.get('ch_id') == ch_id:
+                _preview_upload_sessions.pop(ADMIN_ID, None)
+    if not items:
+        send_admin_reply("No preview media received yet. Send photo/video items, then send Done.")
         return
-    _preview_uploads.pop(ch_id, None)
-    _finish_channel_preview_upload(ch_id, state['items'], state['is_initial'])
+    _finish_channel_preview_upload(ch_id, items, is_initial)
+
+
+def _schedule_channel_preview_finalize(ch_id, is_initial):
+    with _preview_upload_lock:
+        state = _preview_uploads.setdefault(ch_id, {
+            'items': [], 'seen_message_ids': set(), 'is_initial': is_initial, 'timer': None,
+        })
+        state['is_initial'] = is_initial
+        if state.get('timer'):
+            state['timer'].cancel()
+        timer = Timer(PREVIEW_DONE_SETTLE_SECONDS, _finalize_channel_preview_upload, args=(ch_id,))
+        timer.daemon = True
+        state['timer'] = timer
+    timer.start()
 
 
 def save_channel_screenshot(message, ch_id, is_initial=False):
-    """Save preview photos/videos; Telegram album parts are collected briefly."""
+    """Collect individual media and Telegram album parts until the admin sends Done."""
     text = (message.text or '').strip().lower() if message.text else ''
+    if text in ('done', '/done'):
+        _schedule_channel_preview_finalize(ch_id, is_initial)
+        send_admin_reply("✅ Got it. Preparing all preview media together...")
+        return
     if text in ('/skip', 'skip'):
-        state = _preview_uploads.pop(ch_id, None)
-        if state and state.get('timer'):
-            state['timer'].cancel()
+        with _preview_upload_lock:
+            state = _preview_uploads.pop(ch_id, None)
+            _preview_upload_sessions.pop(ADMIN_ID, None)
+            if state and state.get('timer'):
+                state['timer'].cancel()
         channels_col.update_one({"channel_id": ch_id}, {"$unset": {"screenshot_file_id": "", "preview_media": ""}})
         if is_initial:
             _prompt_channel_description(ch_id)
@@ -5026,37 +5104,26 @@ def save_channel_screenshot(message, ch_id, is_initial=False):
 
     entry = _preview_upload_entry(message)
     if not entry:
-        msg = send_prompt(ADMIN_ID,
-            "❌ Send a photo, an MP4 video, or a Telegram album of photos/videos. Type /skip to remove the current preview or finish without one.")
-        bot.register_next_step_handler(msg, save_channel_screenshot, ch_id, is_initial)
+        send_prompt(ADMIN_ID,
+            "❌ Send a photo, MP4 video, or album. Send Done when you've sent all preview media, or /skip to remove it.")
         return
 
     group_id = getattr(message, 'media_group_id', None)
-    if group_id:
-        state = _preview_uploads.get(ch_id)
-        if state and state['group_id'] != group_id:
-            old_state = _preview_uploads.pop(ch_id)
-            old_state['timer'].cancel()
-            _finish_channel_preview_upload(ch_id, old_state['items'], old_state['is_initial'])
-            state = None
-        if not state:
-            state = {'group_id': group_id, 'items': [], 'is_initial': is_initial, 'timer': None}
-            _preview_uploads[ch_id] = state
-        state['items'].append(entry)
-        if state['timer']:
-            state['timer'].cancel()
-        timer = Timer(PREVIEW_ALBUM_COLLECT_SECONDS, _flush_preview_upload, args=(ch_id, group_id))
-        timer.daemon = True
-        state['timer'] = timer
-        timer.start()
-        bot.register_next_step_handler(message, save_channel_screenshot, ch_id, is_initial)
-        return
-
-    pending = _preview_uploads.pop(ch_id, None)
-    if pending:
-        pending['timer'].cancel()
-        _finish_channel_preview_upload(ch_id, pending['items'], pending['is_initial'])
-    _finish_channel_preview_upload(ch_id, [entry], is_initial)
+    with _preview_upload_lock:
+        state = _preview_uploads.setdefault(ch_id, {
+            'items': [], 'seen_message_ids': set(), 'is_initial': is_initial, 'timer': None,
+        })
+        message_id = getattr(message, 'message_id', None)
+        if message_id not in state['seen_message_ids']:
+            state['items'].append((message_id or 0, entry))
+            if message_id is not None:
+                state['seen_message_ids'].add(message_id)
+        item_count = len(state['items'])
+    print(
+        f"PREVIEW_MEDIA_RECEIVED channel={ch_id} group={group_id or '-'} "
+        f"type={entry['type']} total={item_count}",
+        flush=True,
+    )
 
 
 def _clear_preview_editor_album(ch_id):
@@ -5532,9 +5599,10 @@ def edit_screenshot_prompt(call):
     has_existing = bool(ch_data and _channel_preview_media(ch_data))
     hint = " (or type /skip to *remove* the current preview)" if has_existing else " (or type /skip to finish without one)"
     msg = send_prompt(ADMIN_ID,
-        f"🖼 Send a photo, MP4 video, or album of photos/videos for *{ch_name}*. This uploads a replacement draft for review.{hint}",
+        f"🖼 Send photos/videos together as an album or one at a time for *{ch_name}*. "
+        f"Send *Done* when finished to review them together.{hint}",
         parse_mode="Markdown")
-    bot.register_next_step_handler(msg, save_channel_screenshot, ch_id)
+    _begin_channel_preview_upload(msg, ch_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('renamech_'))
 def rename_channel_prompt(call):
