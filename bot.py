@@ -2046,8 +2046,11 @@ def format_small_tag(tag):
     text = " ".join(str(tag).strip().upper().split())
     return f"⁽{text.translate(SMALL_TAG_CHARS)}⁾˖✧" if text else ""
 
-def latest_added_channel_id(admin_id=ADMIN_ID):
-    """Return the latest channel, backfilling dates from legacy Mongo ObjectIds."""
+def recently_added_channel_ids(admin_id=ADMIN_ID):
+    """Return the newest channel for this admin; its NEW tag stays until another is added.
+
+    Legacy documents without created_at are backfilled from their Mongo ObjectId time.
+    """
     docs = list(channels_col.find({"admin_id": admin_id}))
     dated_docs = []
     for doc in docs:
@@ -2068,14 +2071,15 @@ def latest_added_channel_id(admin_id=ADMIN_ID):
             dated_docs.append((created_at.timestamp(), str(doc.get('_id', '')), doc.get('channel_id')))
         except (AttributeError, TypeError, ValueError, OverflowError):
             continue
-    return max(dated_docs, default=(None, '', None), key=lambda item: (item[0], item[1]))[2]
+    newest = max(dated_docs, default=None, key=lambda item: (item[0], item[1]))
+    return {newest[2]} if newest and newest[2] is not None else set()
 
-def channel_status_tags(ch, newest_channel_id=None):
+def channel_status_tags(ch, recent_channel_ids=None):
     """Small status tags shared by user and admin channel lists."""
     tags = []
-    if newest_channel_id is None:
-        newest_channel_id = latest_added_channel_id(ch.get('admin_id', ADMIN_ID))
-    if ch.get('channel_id') == newest_channel_id:
+    if recent_channel_ids is None:
+        recent_channel_ids = recently_added_channel_ids(ch.get('admin_id', ADMIN_ID))
+    if ch.get('channel_id') in recent_channel_ids:
         tags.append(CHANNEL_NEW_TAG)
     if ch.get('is_free'):
         tags.append(CHANNEL_FREE_TAG)
@@ -2109,7 +2113,7 @@ def _ensure_channel_order(admin_id):
             ch['order'] = i
     return channels
 
-def channel_button_label(ch, position, newest_channel_id=None):
+def channel_button_label(ch, position, recent_channel_ids=None):
     """Clean minimal style: top-3 by position get a medal + name, everything else gets
     a plain running number + name. Paused channels get a ⏸ prefix."""
     name = ch['name']
@@ -2117,7 +2121,7 @@ def channel_button_label(ch, position, newest_channel_id=None):
         name = f"⏸ {name}"
     badge = RANK_BADGES.get(position)
     position_label = f"{badge} {name}" if badge else f"{position}. {name}"
-    tags = channel_status_tags(ch, newest_channel_id)
+    tags = channel_status_tags(ch, recent_channel_ids)
     return f"{position_label} {tags}" if tags else position_label
 
 def build_channel_list(user_id, back_to_menu=False):
@@ -2126,11 +2130,11 @@ def build_channel_list(user_id, back_to_menu=False):
     When back_to_menu is True, an extra 'Home' button is appended (used when this
     view was reached from the main hub, so the user can step back out to it)."""
     channels = get_sorted_channels(ADMIN_ID, include_free=False)
-    newest_channel_id = latest_added_channel_id(ADMIN_ID)
+    recent_channel_ids = recently_added_channel_ids(ADMIN_ID)
     print(f"[build_channel_list] user={user_id} back_to_menu={back_to_menu} channel_count={len(channels)}")
     markup = InlineKeyboardMarkup()
     for i, ch in enumerate(channels, start=1):
-        markup.add(InlineKeyboardButton(channel_button_label(ch, i, newest_channel_id), callback_data=f"browse_{ch['channel_id']}"))
+        markup.add(InlineKeyboardButton(channel_button_label(ch, i, recent_channel_ids), callback_data=f"browse_{ch['channel_id']}"))
 
     if not channels:
         return None, None
@@ -2321,10 +2325,10 @@ def get_free_channels(admin_id):
 def build_free_group_list(user_id):
     """Builds (text, markup) for browsing free groups."""
     channels = get_free_channels(ADMIN_ID)
-    newest_channel_id = latest_added_channel_id(ADMIN_ID)
+    recent_channel_ids = recently_added_channel_ids(ADMIN_ID)
     markup = InlineKeyboardMarkup()
     for i, ch in enumerate(channels, start=1):
-        markup.add(InlineKeyboardButton(channel_button_label(ch, i, newest_channel_id), callback_data=f"freebrowse_{ch['channel_id']}"))
+        markup.add(InlineKeyboardButton(channel_button_label(ch, i, recent_channel_ids), callback_data=f"freebrowse_{ch['channel_id']}"))
     if not channels:
         return None, None
     markup.add(InlineKeyboardButton("🆓 𝙁𝙧𝙚𝙚 𝙂𝙧𝙤𝙪𝙥𝙨", callback_data="main_free_groups"))
@@ -3048,12 +3052,12 @@ def render_search_results(chat_id, message_id, user_id, keyword, page=0, message
     # Real position in the full channel list, so top-3 medals still apply
     all_channels = get_sorted_channels(ADMIN_ID, include_free=False)
     position_map = {ch['channel_id']: i for i, ch in enumerate(all_channels, start=1)}
-    newest_channel_id = latest_added_channel_id(ADMIN_ID)
+    recent_channel_ids = recently_added_channel_ids(ADMIN_ID)
 
     markup = InlineKeyboardMarkup()
     for i, ch in enumerate(page_items, start=start + 1):
         real_pos = position_map.get(ch['channel_id'])
-        label = channel_button_label(ch, real_pos, newest_channel_id) if real_pos else ch['name']
+        label = channel_button_label(ch, real_pos, recent_channel_ids) if real_pos else ch['name']
         markup.add(InlineKeyboardButton(f"{i}. {label}", callback_data=f"browse_{ch['channel_id']}"))
 
     nav = []
@@ -4770,7 +4774,7 @@ def show_channel_list(chat_id, message_id=None):
     markup.add(InlineKeyboardButton("🔀 Reorder Channels", callback_data="chorder_menu"))
     # Use the same persisted ordering as the reorder screen and user browse list.
     channels = get_sorted_channels(ADMIN_ID)
-    newest_channel_id = latest_added_channel_id(ADMIN_ID)
+    recent_channel_ids = recently_added_channel_ids(ADMIN_ID)
     count = 0
     last_emoji = None
     emoji_pool = [e for e in FACE_EMOJIS if str(e).strip()] if FACE_EMOJIS else ["✨", "💎", "⭐", "🔥"]
@@ -4778,7 +4782,7 @@ def show_channel_list(chat_id, message_id=None):
         candidates = [e for e in emoji_pool if e != last_emoji]
         emoji = random.choice(candidates if candidates else emoji_pool)
         last_emoji = emoji
-        tags = channel_status_tags(ch, newest_channel_id)
+        tags = channel_status_tags(ch, recent_channel_ids)
         label = f"{emoji} {idx}. {ch['name']}"
         if tags:
             label += f" {tags}"
@@ -5114,6 +5118,9 @@ def save_channel_screenshot(message, ch_id, is_initial=False):
             'items': [], 'seen_message_ids': set(), 'is_initial': is_initial, 'timer': None,
         })
         message_id = getattr(message, 'message_id', None)
+        if len(state['items']) >= 10 and message_id not in state['seen_message_ids']:
+            send_admin_reply("Telegram albums support up to 10 preview items. Send Done to review the first 10.")
+            return
         if message_id not in state['seen_message_ids']:
             state['items'].append((message_id or 0, entry))
             if message_id is not None:
@@ -5139,24 +5146,6 @@ def _render_preview_editor(ch_id, chat_id, is_draft=True, message_id=None):
     ch_data = channels_col.find_one({'channel_id': ch_id}) or {}
     items = draft['items'] if draft is not None else _channel_preview_media(ch_data)
     _clear_preview_editor_album(ch_id)
-    album_ids = []
-    try:
-        if len(items) == 1:
-            item = items[0]
-            method = bot.send_video if item['type'] == 'video' else bot.send_photo
-            preview_msg = method(chat_id, item['file_id'], caption=f"Preview: {escape(ch_data.get('name', str(ch_id)))}")
-            album_ids.append(preview_msg.message_id)
-        elif len(items) > 1:
-            media = []
-            for item in items:
-                media_cls = InputMediaVideo if item['type'] == 'video' else InputMediaPhoto
-                media.append(media_cls(item['file_id']))
-            album_ids.extend(m.message_id for m in bot.send_media_group(chat_id, media))
-    except Exception as e:
-        print(f"[preview_editor] preview send failed for {ch_id}: {e}")
-        send_admin_reply("⚠️ Couldn't display one or more preview items. You can still edit or remove them below.")
-    _preview_editor_album_ids[ch_id] = album_ids
-
     markup = InlineKeyboardMarkup(row_width=3)
     if items:
         for idx, item in enumerate(items):
@@ -5174,11 +5163,66 @@ def _render_preview_editor(ch_id, chat_id, is_draft=True, message_id=None):
     mode = "Draft preview" if draft is not None else "Saved preview"
     text = (f"🖼 <b>{mode}: {escape(ch_data.get('name', str(ch_id)))}</b>\n"
             f"{len(items)} item(s). Use ⬆️/⬇️ to reorder or tap an item to remove it.\n"
-            "Review the media above, then save the preview.")
+            "Review the media, then save the preview.")
+
+    # The Bot API doesn't accept reply_markup on sendMediaGroup. Send the album,
+    # then attach its controls to the caption of its first item via editMessageCaption.
+    # This keeps the preview and its buttons together in the same album message.
     if message_id:
-        edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", delay=None)
-    else:
-        bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML", vanish_delay=None)
+        try:
+            bot.delete_message(chat_id, message_id)
+        except Exception:
+            pass
+
+    album_ids = []
+    controls_attached = False
+    try:
+        if len(items) == 1:
+            item = items[0]
+            method = bot.send_video if item['type'] == 'video' else bot.send_photo
+            preview_msg = method(
+                chat_id, item['file_id'], caption=text, reply_markup=markup,
+                parse_mode='HTML', vanish_delay=None,
+            )
+            album_ids.append(preview_msg.message_id)
+            controls_attached = True
+        elif len(items) > 1:
+            media = []
+            for index, item in enumerate(items):
+                media_cls = InputMediaVideo if item['type'] == 'video' else InputMediaPhoto
+                caption = text if index == 0 else None
+                media.append(media_cls(
+                    item['file_id'], caption=caption,
+                    parse_mode='HTML' if caption else None,
+                ))
+            album_messages = bot.send_media_group(chat_id, media)
+            album_ids.extend(m.message_id for m in album_messages)
+            bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=album_messages[0].message_id,
+                caption=text,
+                reply_markup=markup,
+                parse_mode='HTML',
+            )
+            controls_attached = True
+        else:
+            text_msg = bot.send_message(
+                chat_id, text, reply_markup=markup, parse_mode='HTML', vanish_delay=None,
+            )
+            album_ids.append(text_msg.message_id)
+            controls_attached = True
+    except Exception as e:
+        print(f"[preview_editor] preview/control send failed for {ch_id}: {e}", flush=True)
+    if not controls_attached:
+        try:
+            fallback = bot.send_message(
+                chat_id, text, reply_markup=markup, parse_mode='HTML', vanish_delay=None,
+            )
+            album_ids.append(fallback.message_id)
+        except Exception as fallback_error:
+            print(f"[preview_editor] fallback controls failed for {ch_id}: {fallback_error}", flush=True)
+            send_admin_reply("⚠️ Couldn't display preview controls. Please reopen Manage Preview.")
+    _preview_editor_album_ids[ch_id] = album_ids
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith(('pvmanage_', 'pvsave_', 'pvcancel_', 'pvup_', 'pvdown_', 'pvremove_')))
@@ -5211,7 +5255,7 @@ def preview_editor_action(call):
         if draft.get('is_initial'):
             _prompt_channel_description(ch_id)
         else:
-            show_channel_list(call.message.chat.id, call.message.message_id)
+            show_channel_list(call.message.chat.id)
         return
     if action == 'pvsave':
         items = draft['items']
@@ -5228,7 +5272,7 @@ def preview_editor_action(call):
         if draft.get('is_initial'):
             _prompt_channel_description(ch_id)
         else:
-            show_channel_list(call.message.chat.id, call.message.message_id)
+            show_channel_list(call.message.chat.id)
         return
     try:
         idx = int(parts[1])
@@ -5554,11 +5598,11 @@ def _render_channel_order_menu(call):
     """Shows every channel with ⬆️/⬇️ to move it. Top 3 by position always get a medal
     and appear first in the list users see — no separate ranking step needed."""
     channels = _ensure_channel_order(ADMIN_ID)
-    newest_channel_id = latest_added_channel_id(ADMIN_ID)
+    recent_channel_ids = recently_added_channel_ids(ADMIN_ID)
     n = len(channels)
     markup = InlineKeyboardMarkup()
     for i, ch in enumerate(channels, start=1):
-        markup.row(InlineKeyboardButton(channel_button_label(ch, i, newest_channel_id), callback_data=f"manage_{ch['channel_id']}"))
+        markup.row(InlineKeyboardButton(channel_button_label(ch, i, recent_channel_ids), callback_data=f"manage_{ch['channel_id']}"))
         row = []
         if i > 1:
             row.append(InlineKeyboardButton("⬆️", callback_data=f"chmove_{ch['channel_id']}_up"))
