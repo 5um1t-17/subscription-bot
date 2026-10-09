@@ -2172,7 +2172,7 @@ def channel_button_label(ch, position, recent_channel_ids=None):
     badge = RANK_BADGES.get(position)
     position_label = f"{badge} {name}" if badge else f"{position}. {name}"
     tags = channel_status_tags(ch, recent_channel_ids)
-    return f"{position_label} {tags}" if tags else position_label
+    return f"{position_label}   {tags}" if tags else position_label
 
 def build_channel_list(user_id, back_to_menu=False):
     """Builds the (text, markup) for browsing all channels, with a cart button if the
@@ -4835,7 +4835,7 @@ def show_channel_list(chat_id, message_id=None):
         tags = channel_status_tags(ch, recent_channel_ids)
         label = f"{emoji} {idx}. {ch['name']}"
         if tags:
-            label += f" {tags}"
+            label += f"   {tags}"
         markup.add(InlineKeyboardButton(label, callback_data=f"manage_{ch['channel_id']}"))
         count += 1
 
