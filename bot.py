@@ -1915,7 +1915,13 @@ def cb_channel_preview_navigation(call):
         bot.answer_callback_query(call.id, "No preview media is available.")
         return
     index = (index - 1 if action == 'chprevprev' else index + 1) % len(media_items)
-    text, markup = _build_plan_selection(ch_data, call.from_user.id)
+    # Keep free channels on their free join flow while browsing preview media.
+    # The paid plan picker would otherwise replace the free join button on every
+    # Prev/Next tap, even though the first preview was correctly marked free.
+    if ch_data.get('is_free'):
+        text, markup = build_free_group_join(ch_data, call.from_user.id)
+    else:
+        text, markup = _build_plan_selection(ch_data, call.from_user.id)
     markup.row(
         InlineKeyboardButton("◀️ Previous", callback_data=f"chprevprev_{ch_id}_{index}"),
         InlineKeyboardButton("Next ▶️", callback_data=f"chprevnext_{ch_id}_{index}"),
@@ -1938,6 +1944,8 @@ def cb_channel_preview_navigation(call):
 def send_plan_selection(chat_id, ch_data, user_id=None):
     """Used for a /start deep-link entry: sends a brand new message.
     Saved photos/videos are shown above the plan buttons."""
+    if ch_data.get('is_free'):
+        return send_free_group_join(chat_id, ch_data, user_id)
     text, markup = _build_plan_selection(ch_data, user_id)
     return _send_channel_preview(chat_id, ch_data, text, markup, user_id=user_id, delay=COMMAND_VANISH_SECONDS)
 
@@ -1946,6 +1954,8 @@ def edit_plan_selection(chat_id, message_id, ch_data, user_id=None):
     If the channel has preview media, the current text message is replaced by that media
     and the plan buttons.
     Without a screenshot the message is edited in-place as before."""
+    if ch_data.get('is_free'):
+        return edit_free_group_join(chat_id, message_id, ch_data, user_id)
     text, markup = _build_plan_selection(ch_data, user_id)
     if _channel_preview_media(ch_data):
         # Delete the existing text message and send a fresh photo message
