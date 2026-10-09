@@ -1868,37 +1868,72 @@ def _channel_preview_media(ch_data):
 
 
 def _send_channel_preview(chat_id, ch_data, text, reply_markup, user_id=None, delay=MENU_VANISH_SECONDS):
-    """Send saved preview media with its plan/join screen; albums get a separate button card."""
+    """Send one preview item with navigation and plan buttons in the same message."""
     media_items = _channel_preview_media(ch_data)
-    if len(media_items) == 1:
+    if media_items:
+        if len(media_items) > 1:
+            index = 0
+            reply_markup.row(
+                InlineKeyboardButton("◀️ Previous", callback_data=f"chprevprev_{ch_data['channel_id']}_{index}"),
+                InlineKeyboardButton("Next ▶️", callback_data=f"chprevnext_{ch_data['channel_id']}_{index}"),
+            )
+            caption = f"🎬 Preview {index + 1}/{len(media_items)}\n\n{text}"
+        else:
+            caption = text
         item = media_items[0]
         if item['type'] == 'video':
-            msg = bot.send_video(chat_id, item['file_id'], caption=text, reply_markup=reply_markup, parse_mode='HTML')
+            msg = bot.send_video(chat_id, item['file_id'], caption=caption, reply_markup=reply_markup, parse_mode='HTML')
         else:
-            msg = bot.send_photo(chat_id, item['file_id'], caption=text, reply_markup=reply_markup, parse_mode='HTML', vanish_delay=None)
+            msg = bot.send_photo(chat_id, item['file_id'], caption=caption, reply_markup=reply_markup, parse_mode='HTML', vanish_delay=None)
         schedule_delete(chat_id, msg.message_id, delay)
         if user_id:
             track_msg(user_id, msg)
         return msg
-
-    if len(media_items) > 1:
-        media_group = []
-        for index, item in enumerate(media_items):
-            caption = f"🎬 <b>{escape(ch_data.get('name') or 'Preview')}</b>" if index == 0 else None
-            media_cls = InputMediaVideo if item['type'] == 'video' else InputMediaPhoto
-            media_group.append(media_cls(item['file_id'], caption=caption, parse_mode='HTML' if caption else None))
-        try:
-            album_messages = bot.send_media_group(chat_id, media_group)
-            for album_message in album_messages:
-                schedule_delete(chat_id, album_message.message_id, delay)
-        except Exception as e:
-            print(f"[channel_preview] album send failed for {chat_id}: {e}")
 
     msg = bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode='HTML', vanish_delay=None)
     schedule_delete(chat_id, msg.message_id, delay)
     if user_id:
         track_msg(user_id, msg)
     return msg
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('chprevprev_', 'chprevnext_')))
+def cb_channel_preview_navigation(call):
+    try:
+        action, ch_id_text, index_text = call.data.split('_')
+        ch_id = int(ch_id_text)
+        index = int(index_text)
+    except (TypeError, ValueError):
+        bot.answer_callback_query(call.id, "Invalid preview button.")
+        return
+    ch_data = channels_col.find_one({"channel_id": ch_id})
+    if not ch_data:
+        bot.answer_callback_query(call.id, "This channel is no longer available.")
+        return
+    media_items = _channel_preview_media(ch_data)
+    if not media_items:
+        bot.answer_callback_query(call.id, "No preview media is available.")
+        return
+    index = (index - 1 if action == 'chprevprev' else index + 1) % len(media_items)
+    text, markup = _build_plan_selection(ch_data, call.from_user.id)
+    markup.row(
+        InlineKeyboardButton("◀️ Previous", callback_data=f"chprevprev_{ch_id}_{index}"),
+        InlineKeyboardButton("Next ▶️", callback_data=f"chprevnext_{ch_id}_{index}"),
+    )
+    caption = f"🎬 Preview {index + 1}/{len(media_items)}\n\n{text}"
+    item = media_items[index]
+    media_cls = InputMediaVideo if item['type'] == 'video' else InputMediaPhoto
+    try:
+        bot.edit_message_media(
+            media=media_cls(item['file_id'], caption=caption, parse_mode='HTML'),
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=markup,
+        )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print(f"[channel_preview] carousel edit failed user={call.from_user.id} channel={ch_id}: {e}", flush=True)
+        bot.answer_callback_query(call.id, "Couldn't change preview. Please try again.")
 
 def send_plan_selection(chat_id, ch_data, user_id=None):
     """Used for a /start deep-link entry: sends a brand new message.
@@ -2047,9 +2082,10 @@ def format_small_tag(tag):
     return f"⁽{text.translate(SMALL_TAG_CHARS)}⁾˖✧" if text else ""
 
 def recently_added_channel_ids(admin_id=ADMIN_ID):
-    """Return the persisted NEW-tag channel, migrating legacy Mongo records as needed."""
+    """Return all channels created in the last 24 hours plus admin-marked legacy channels."""
     docs = list(channels_col.find({"admin_id": admin_id}))
-    dated_docs = []
+    cutoff = datetime.now().timestamp() - (24 * 60 * 60)
+    recent_ids = set()
     for doc in docs:
         created_at = doc.get('created_at')
         if created_at is None:
@@ -2065,29 +2101,18 @@ def recently_added_channel_ids(admin_id=ADMIN_ID):
             except Exception:
                 continue
         try:
-            dated_docs.append((created_at.timestamp(), str(doc.get('_id', '')), doc.get('channel_id')))
+            if created_at.timestamp() >= cutoff and doc.get('channel_id') is not None:
+                recent_ids.add(doc['channel_id'])
         except (AttributeError, TypeError, ValueError, OverflowError):
             continue
-    marked = [doc for doc in docs if doc.get('is_new') is True]
-    if marked:
-        latest_marked = max(
-            marked,
-            key=lambda doc: (doc.get('created_at').timestamp() if hasattr(doc.get('created_at'), 'timestamp') else 0,
-                             str(doc.get('_id', ''))),
-        )
-        new_id = latest_marked.get('channel_id')
-    else:
-        newest = max(dated_docs, default=None, key=lambda item: (item[0], item[1]))
-        new_id = newest[2] if newest else None
-    if new_id is None:
-        return set()
-    # Keep one marker only; the admin can manually move it to an older group.
+        if doc.get('manual_new') is True and doc.get('channel_id') is not None:
+            recent_ids.add(doc['channel_id'])
+    # Remove the old single-channel marker left by earlier versions.
     channels_col.update_many(
-        {"admin_id": admin_id, "is_new": True, "channel_id": {"$ne": new_id}},
+        {"admin_id": admin_id, "is_new": {"$exists": True}},
         {"$unset": {"is_new": ""}},
     )
-    channels_col.update_one({"admin_id": admin_id, "channel_id": new_id}, {"$set": {"is_new": True}})
-    return {new_id}
+    return recent_ids
 
 def channel_status_tags(ch, recent_channel_ids=None):
     """Small status tags shared by user and admin channel lists."""
@@ -4982,14 +5007,14 @@ def finalize_channel(message, ch_id, ch_name):
         existing_channel = channels_col.find_one({"channel_id": ch_id}, {"_id": 1})
         if not existing_channel:
             channels_col.update_many(
-                {"admin_id": ADMIN_ID, "is_new": True},
-                {"$unset": {"is_new": ""}},
+                {"admin_id": ADMIN_ID, "manual_new": True},
+                {"$unset": {"manual_new": ""}},
             )
         channels_col.update_one(
             {"channel_id": ch_id},
             {
                 "$set": {"name": ch_name, "plans": plans_dict, "admin_id": ADMIN_ID, "order": next_order},
-                "$setOnInsert": {"created_at": datetime.now(), "is_new": True},
+                "$setOnInsert": {"created_at": datetime.now()},
             },
             upsert=True,
         )
@@ -5012,6 +5037,7 @@ def finalize_channel(message, ch_id, ch_name):
 
 _preview_uploads = {}
 _preview_drafts = {}
+_preview_editor_indices = {}
 _preview_editor_album_ids = {}
 _preview_upload_sessions = {}
 _preview_upload_lock = RLock()
@@ -5071,6 +5097,7 @@ def handle_channel_preview_upload_message(message):
 def _finish_channel_preview_upload(ch_id, media_items, is_initial):
     print(f"PREVIEW_UPLOAD_COMPLETE channel={ch_id} items={len(media_items)} initial={is_initial}", flush=True)
     _preview_drafts[ch_id] = {'items': list(media_items), 'is_initial': is_initial}
+    _preview_editor_indices[ch_id] = 0
     _render_preview_editor(ch_id, ADMIN_ID, is_draft=True)
 
 
@@ -5169,26 +5196,31 @@ def _render_preview_editor(ch_id, chat_id, is_draft=True, message_id=None):
     _clear_preview_editor_album(ch_id)
     markup = InlineKeyboardMarkup(row_width=3)
     if items:
-        for idx, item in enumerate(items):
-            controls = []
-            if idx > 0:
-                controls.append(InlineKeyboardButton("⬆️", callback_data=f"pvup_{ch_id}_{idx}"))
-            controls.append(InlineKeyboardButton(f"🗑 {idx + 1} ({item['type']})", callback_data=f"pvremove_{ch_id}_{idx}"))
-            if idx < len(items) - 1:
-                controls.append(InlineKeyboardButton("⬇️", callback_data=f"pvdown_{ch_id}_{idx}"))
-            markup.row(*controls)
+        index = min(_preview_editor_indices.get(ch_id, 0), len(items) - 1)
+        _preview_editor_indices[ch_id] = index
+        if len(items) > 1:
+            markup.row(
+                InlineKeyboardButton(f"◀️ Prev ({index + 1}/{len(items)})", callback_data=f"pvedprev_{ch_id}"),
+                InlineKeyboardButton("Next ▶️", callback_data=f"pvednext_{ch_id}"),
+            )
+        reorder_controls = []
+        if index > 0:
+            reorder_controls.append(InlineKeyboardButton("⬆️ Move earlier", callback_data=f"pvup_{ch_id}_{index}"))
+        reorder_controls.append(InlineKeyboardButton(f"🗑 Remove ({items[index]['type']})", callback_data=f"pvremove_{ch_id}_{index}"))
+        if index < len(items) - 1:
+            reorder_controls.append(InlineKeyboardButton("⬇️ Move later", callback_data=f"pvdown_{ch_id}_{index}"))
+        markup.row(*reorder_controls)
     markup.row(
         InlineKeyboardButton("💾 Save Preview", callback_data=f"pvsave_{ch_id}"),
         InlineKeyboardButton("Cancel", callback_data=f"pvcancel_{ch_id}"),
     )
     mode = "Draft preview" if draft is not None else "Saved preview"
     text = (f"🖼 <b>{mode}: {escape(ch_data.get('name', str(ch_id)))}</b>\n"
-            f"{len(items)} item(s). Use ⬆️/⬇️ to reorder or tap an item to remove it.\n"
-            "Review the media, then save the preview.")
+            f"{f'Item {_preview_editor_indices.get(ch_id, 0) + 1}/{len(items)}' if items else 'No media items'}. "
+            "Use Previous/Next to review; move or remove the current item, then save.")
 
-    # The Bot API doesn't accept reply_markup on sendMediaGroup. Send the album,
-    # then attach its controls to the caption of its first item via editMessageCaption.
-    # This keeps the preview and its buttons together in the same album message.
+    # Use one photo/video message at a time so the navigation and edit buttons
+    # stay attached to the preview instead of appearing in a separate album card.
     if message_id:
         try:
             bot.delete_message(chat_id, message_id)
@@ -5196,57 +5228,26 @@ def _render_preview_editor(ch_id, chat_id, is_draft=True, message_id=None):
             pass
 
     album_ids = []
-    controls_attached = False
     try:
-        if len(items) == 1:
-            item = items[0]
+        if items:
+            item = items[_preview_editor_indices.get(ch_id, 0)]
             method = bot.send_video if item['type'] == 'video' else bot.send_photo
             preview_msg = method(
                 chat_id, item['file_id'], caption=text, reply_markup=markup,
                 parse_mode='HTML', vanish_delay=None,
             )
-            album_ids.append(preview_msg.message_id)
-            controls_attached = True
-        elif len(items) > 1:
-            media = []
-            for index, item in enumerate(items):
-                media_cls = InputMediaVideo if item['type'] == 'video' else InputMediaPhoto
-                caption = text if index == 0 else None
-                media.append(media_cls(
-                    item['file_id'], caption=caption,
-                    parse_mode='HTML' if caption else None,
-                ))
-            album_messages = bot.send_media_group(chat_id, media)
-            album_ids.extend(m.message_id for m in album_messages)
-            bot.edit_message_caption(
-                chat_id=chat_id,
-                message_id=album_messages[0].message_id,
-                caption=text,
-                reply_markup=markup,
-                parse_mode='HTML',
-            )
-            controls_attached = True
         else:
-            text_msg = bot.send_message(
+            preview_msg = bot.send_message(
                 chat_id, text, reply_markup=markup, parse_mode='HTML', vanish_delay=None,
             )
-            album_ids.append(text_msg.message_id)
-            controls_attached = True
+        album_ids.append(preview_msg.message_id)
     except Exception as e:
         print(f"[preview_editor] preview/control send failed for {ch_id}: {e}", flush=True)
-    if not controls_attached:
-        try:
-            fallback = bot.send_message(
-                chat_id, text, reply_markup=markup, parse_mode='HTML', vanish_delay=None,
-            )
-            album_ids.append(fallback.message_id)
-        except Exception as fallback_error:
-            print(f"[preview_editor] fallback controls failed for {ch_id}: {fallback_error}", flush=True)
-            send_admin_reply("⚠️ Couldn't display preview controls. Please reopen Manage Preview.")
+        send_admin_reply("⚠️ Couldn't display preview controls. Please reopen Manage Preview.")
     _preview_editor_album_ids[ch_id] = album_ids
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith(('pvmanage_', 'pvsave_', 'pvcancel_', 'pvup_', 'pvdown_', 'pvremove_')))
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('pvmanage_', 'pvsave_', 'pvcancel_', 'pvup_', 'pvdown_', 'pvremove_', 'pvedprev_', 'pvednext_')))
 def preview_editor_action(call):
     if not _require_admin(call):
         return
@@ -5262,6 +5263,7 @@ def preview_editor_action(call):
             bot.answer_callback_query(call.id, "Channel not found.")
             return
         _preview_drafts[ch_id] = {'items': _channel_preview_media(ch_data), 'is_initial': False}
+        _preview_editor_indices[ch_id] = 0
         bot.answer_callback_query(call.id)
         _render_preview_editor(ch_id, call.message.chat.id, is_draft=True, message_id=call.message.message_id)
         return
@@ -5269,8 +5271,19 @@ def preview_editor_action(call):
     if not draft:
         bot.answer_callback_query(call.id, "Preview edit expired. Open Manage Preview again.")
         return
+    if action in ('pvedprev', 'pvednext'):
+        count = len(draft['items'])
+        if count < 2:
+            bot.answer_callback_query(call.id, "Only one preview item is available.")
+            return
+        current = _preview_editor_indices.get(ch_id, 0)
+        _preview_editor_indices[ch_id] = (current - 1 if action == 'pvedprev' else current + 1) % count
+        bot.answer_callback_query(call.id)
+        _render_preview_editor(ch_id, call.message.chat.id, is_draft=True, message_id=call.message.message_id)
+        return
     if action == 'pvcancel':
         _preview_drafts.pop(ch_id, None)
+        _preview_editor_indices.pop(ch_id, None)
         _clear_preview_editor_album(ch_id)
         bot.answer_callback_query(call.id, "Preview changes discarded.")
         if draft.get('is_initial'):
@@ -5288,6 +5301,7 @@ def preview_editor_action(call):
         else:
             channels_col.update_one({'channel_id': ch_id}, {'$unset': {'preview_media': '', 'screenshot_file_id': ''}})
         _preview_drafts.pop(ch_id, None)
+        _preview_editor_indices.pop(ch_id, None)
         _clear_preview_editor_album(ch_id)
         bot.answer_callback_query(call.id, "Preview saved.")
         if draft.get('is_initial'):
@@ -5302,10 +5316,12 @@ def preview_editor_action(call):
             raise ValueError
         if action == 'pvremove':
             items.pop(idx)
+            _preview_editor_indices[ch_id] = min(idx, max(len(items) - 1, 0))
         else:
             swap = idx - 1 if action == 'pvup' else idx + 1
             if 0 <= swap < len(items):
                 items[idx], items[swap] = items[swap], items[idx]
+                _preview_editor_indices[ch_id] = swap
         bot.answer_callback_query(call.id)
         _render_preview_editor(ch_id, call.message.chat.id, is_draft=True, message_id=call.message.message_id)
     except (ValueError, IndexError):
@@ -5345,7 +5361,7 @@ def manage_ch(call):
     custom_tags = ch_data.get('custom_tags', [])
     tag_status = ", ".join(custom_tags) if custom_tags else "None set"
     markup.add(InlineKeyboardButton("🏷️ Edit Tags", callback_data=f"edittags_{ch_id}"))
-    markup.add(InlineKeyboardButton("🆕 Move NEW tag here", callback_data=f"setnewtag_{ch_id}"))
+    markup.add(InlineKeyboardButton("🆕 Mark this group NEW", callback_data=f"setnewtag_{ch_id}"))
     markup.add(InlineKeyboardButton("✏️ Edit Plans", callback_data=f"editplans_{ch_id}"))
     markup.add(InlineKeyboardButton("🎁 Free Trials", callback_data=f"trials_{ch_id}"))
     markup.add(InlineKeyboardButton("📝 Edit About/Description", callback_data=f"editdesc_{ch_id}"))
@@ -5408,12 +5424,12 @@ def set_channel_new_tag(call):
         bot.answer_callback_query(call.id, "Channel not found.")
         return
     channels_col.update_many(
-        {"admin_id": ADMIN_ID, "is_new": True, "channel_id": {"$ne": ch_id}},
-        {"$unset": {"is_new": ""}},
+        {"admin_id": ADMIN_ID, "manual_new": True, "channel_id": {"$ne": ch_id}},
+        {"$unset": {"manual_new": ""}},
     )
-    channels_col.update_one({"channel_id": ch_id}, {"$set": {"is_new": True}})
-    bot.answer_callback_query(call.id, "NEW tag moved to this group/channel.")
-    send_admin_reply(f"🆕 NEW tag set on *{escape_markdown(channel.get('name', str(ch_id)))}*. It will move when another channel is added.", parse_mode="Markdown")
+    channels_col.update_one({"channel_id": ch_id}, {"$set": {"manual_new": True}})
+    bot.answer_callback_query(call.id, "NEW tag set for this group/channel.")
+    send_admin_reply(f"🆕 NEW tag set on *{escape_markdown(channel.get('name', str(ch_id)))}*. It stays until another group is added or its 24-hour new period ends.", parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('edittags_'))
 def edit_channel_tags_prompt(call):
