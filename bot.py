@@ -21,10 +21,6 @@ except ImportError:
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputFile, InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
 from telebot.handler_backends import BaseMiddleware, CancelUpdate
-<<<<<<< HEAD
-from pymongo import MongoClient
-=======
->>>>>>> d8cb240 (dayummm)
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 from bson import ObjectId
@@ -66,53 +62,6 @@ def run_web():
 def keep_alive():
     Thread(target=run_web).start()
 
-<<<<<<< HEAD
-# --- CONFIGURATION (Environment Variables) ---
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-MONGO_URI = os.getenv('MONGO_URI')
-admin_id_env = os.getenv('ADMIN_ID')
-# Additional admin Telegram user IDs, separated by commas, spaces, or semicolons.
-# Keep ADMIN_ID set to the original bot owner when possible; existing channel data
-# is retained under its MongoDB admin_id even if the configured IDs later change.
-admin_ids_env = os.getenv('ADMIN_IDS', '')
-
-def _parse_admin_ids(*values):
-    parsed = []
-    for value in values:
-        for raw_id in re.split(r'[,;\s]+', value or ''):
-            raw_id = raw_id.strip()
-            if raw_id.isdigit():
-                numeric_id = int(raw_id)
-                if numeric_id not in parsed:
-                    parsed.append(numeric_id)
-    return parsed
-
-_primary_admin_candidates = _parse_admin_ids(admin_id_env)
-_additional_admin_candidates = _parse_admin_ids(admin_ids_env)
-CONFIGURED_ADMIN_ID = (_primary_admin_candidates or _additional_admin_candidates or [0])[0]
-ADMIN_ID = CONFIGURED_ADMIN_ID
-ADMIN_USER_IDS = set(_primary_admin_candidates + _additional_admin_candidates)
-_admin_request_context = local()
-
-def is_admin_user_id(user_id):
-    try:
-        return int(user_id) in ADMIN_USER_IDS
-    except (TypeError, ValueError):
-        return False
-
-def current_admin_id():
-    user_id = getattr(_admin_request_context, 'user_id', None)
-    return user_id if is_admin_user_id(user_id) else ADMIN_ID
-UPI_ID = os.getenv('UPI_ID')
-CONTACT_USERNAME = os.getenv('CONTACT_USERNAME')
-
-def contact_admin_url():
-    if CONTACT_USERNAME:
-        return f"https://t.me/{CONTACT_USERNAME}"
-    return None
-
-=======
->>>>>>> d8cb240 (dayummm)
 # Emoji pool used to give each channel button a random face — picked fresh every time
 # the channel list is rendered so the list feels lively and each entry looks distinct.
 FACE_EMOJIS = [
@@ -525,33 +474,6 @@ class AutoReactMiddleware(BaseMiddleware):
 
 bot.setup_middleware(AutoReactMiddleware())
 
-<<<<<<< HEAD
-client = MongoClient(MONGO_URI)
-db = client['sub_management']
-channels_col = db['channels']
-users_col = db['users']
-payments_col = db['payments']
-seen_users_col = db['seen_users']  # every user who has ever started/interacted with the bot (for /broadcast)
-counters_col = db['counters']      # lifetime totals (sales/revenue) that survive even if old payment logs get pruned
-pending_checkouts_col = db['pending_checkouts']  # multi-channel cart checkouts awaiting admin approval
-chat_members_col = db['chat_members']  # users seen in each group/channel (for /remove all)
-tracked_chats_col = db['tracked_chats']  # every group/channel the bot is a member of (auto-detected on join)
-free_trials_col = db['free_trials']          # admin-configured free trial plans (logically separate from paid plans)
-free_trial_claims_col = db['free_trial_claims']  # PERMANENT "one trial ever" claim records (never deleted)
-free_trial_claims_history_col = db['free_trial_claims_history']  # archive of legacy duplicate claims moved during index migration
-pending_reactions_col = db['pending_reactions']  # durable auto-react queue backing (survives process restarts)
-carts_col = db['carts']                        # mirror of in-memory carts, for abandoned-cart nudges
-scheduled_broadcasts_col = db['scheduled_broadcasts']  # timed /broadcast messages awaiting their slot
-waitlist_col = db['waitlist']                  # users who asked to be notified when a paused channel returns
-expired_subs_col = db['expired_subs']          # lapsed subscriptions, for the 3-day win-back DM
-settings_col = db['settings']                  # small key/value bot settings (e.g. main menu image)
-offer_bundles_col = db['offer_bundles']        # admin-created custom bundles (fixed manual price, any set of channels)
-pending_offer_bundle_checkouts_col = db['pending_offer_bundle_checkouts']  # bundle purchases awaiting admin approval
-fj_pending_requests_col = db['fj_pending_requests']  # Force Join pending join requests (event-based tracking)
-approved_payments_col = db['approved_payments']  # archive of approved checkouts with user details & receipt screenshots
-
-=======
->>>>>>> d8cb240 (dayummm)
 def adopt_existing_channel_owner():
     """Keep existing channel data under its original owner when ADMIN_ID changes."""
     global ADMIN_ID
@@ -576,319 +498,6 @@ def adopt_existing_channel_owner():
         print(f"[admin-config] preserving existing channel owner {data_owner}; configured ID {ADMIN_ID} remains an authorized admin")
     ADMIN_USER_IDS.add(ADMIN_ID) if ADMIN_ID else None
     ADMIN_ID = data_owner
-<<<<<<< HEAD
-    ADMIN_USER_IDS.add(data_owner)
-
-# --- Append the configured admin's saved caption to their group media ---
-GROUP_MEDIA_CAPTION_SETTING_ID = "group_media_caption"
-GROUP_MEDIA_ALBUM_SETTLE_SECONDS = 1.5
-GROUP_ADMIN_CACHE_SECONDS = 60
-_group_media_album_batches = {}
-_group_media_album_lock = RLock()
-_group_admin_status_cache = {}
-_group_admin_status_lock = RLock()
-_bot_delete_permission_cache = {}
-
-def get_group_media_caption():
-    setting = settings_col.find_one({"_id": GROUP_MEDIA_CAPTION_SETTING_ID})
-    return (setting.get("caption") or "").strip() if setting else ""
-
-def _save_group_media_caption_value(caption):
-    caption = (caption or "").strip()
-    if not caption:
-        return False
-    settings_col.update_one(
-        {"_id": GROUP_MEDIA_CAPTION_SETTING_ID},
-        {"$set": {"caption": caption}},
-        upsert=True,
-    )
-    return True
-
-def _is_configured_admin_message(message):
-    return bool(CONFIGURED_ADMIN_ID and message.from_user and message.from_user.id == CONFIGURED_ADMIN_ID)
-
-@bot.message_handler(commands=['setmediacaption'], func=_is_configured_admin_message)
-def set_group_media_caption_command(message):
-    if message.chat.type != 'private':
-        bot.reply_to(message, "Please set the saved media caption in a private chat with the bot.")
-        return
-    caption = (message.text or "").partition(' ')[2].strip()
-    if not caption:
-        bot.reply_to(message, "Usage: /setmediacaption followed by the caption to append. Telegram HTML such as <b>bold</b>, <i>italic</i>, and <a href=\"https://example.com\">links</a> is supported.")
-        return
-    if len(_caption_visible_text(caption)) > 1024:
-        bot.reply_to(message, "The saved caption must be 1024 characters or fewer.")
-        return
-    _save_group_media_caption_value(caption)
-    bot.reply_to(message, "✅ Saved media caption updated.")
-
-@bot.message_handler(commands=['mediacaption'], func=_is_configured_admin_message)
-def show_group_media_caption_command(message):
-    if message.chat.type != 'private':
-        return
-    caption = get_group_media_caption()
-    bot.reply_to(message, f"Current saved media caption:\n\n{caption}" if caption else "No saved media caption is set.")
-
-@bot.message_handler(commands=['clearmediacaption'], func=_is_configured_admin_message)
-def clear_group_media_caption_command(message):
-    if message.chat.type != 'private':
-        bot.reply_to(message, "Please clear the saved media caption in a private chat with the bot.")
-        return
-    settings_col.delete_one({"_id": GROUP_MEDIA_CAPTION_SETTING_ID})
-    bot.reply_to(message, "✅ Saved media caption cleared.")
-
-def _is_group_admin_media_sender(message):
-    if not message.chat or message.chat.type not in ('group', 'supergroup'):
-        return False
-    # Telegram hides the real sender when an admin posts anonymously. In that
-    # case the message is sent as the group itself, which is only available to
-    # admins using the group's anonymous posting mode.
-    sender_chat = getattr(message, 'sender_chat', None)
-    if sender_chat and sender_chat.id == message.chat.id:
-        return True
-    if not message.from_user:
-        return False
-    # Some Telegram updates identify anonymous group admins through the
-    # GroupAnonymousBot user instead of (or in addition to) sender_chat.
-    if message.from_user.id == GROUP_ANONYMOUS_BOT_ID:
-        return True
-    if message.from_user.is_bot:
-        return False
-    key = (message.chat.id, message.from_user.id)
-    now = time.monotonic()
-    with _group_admin_status_lock:
-        cached = _group_admin_status_cache.get(key)
-        if cached and cached[0] > now:
-            return cached[1]
-    try:
-        member = bot.get_chat_member(message.chat.id, message.from_user.id)
-        is_admin = getattr(member, 'status', None) in ('administrator', 'creator')
-    except Exception as e:
-        print(f"[group-media-caption] couldn't verify sender admin status chat={message.chat.id} user={message.from_user.id}: {e}")
-        return False
-    with _group_admin_status_lock:
-        _group_admin_status_cache[key] = (now + GROUP_ADMIN_CACHE_SECONDS, is_admin)
-        if not is_admin:
-            # Do not retain a negative result: a regular member may be promoted
-            # moments later, and their next media must be checked against Telegram.
-            _group_admin_status_cache.pop(key, None)
-        expired = [cache_key for cache_key, value in _group_admin_status_cache.items() if value[0] <= now]
-        for cache_key in expired:
-            _group_admin_status_cache.pop(cache_key, None)
-    if not is_admin:
-        print(f"[group-media-caption] sender is not currently a group admin chat={message.chat.id} user={message.from_user.id} status={getattr(member, 'status', '?')}")
-    return is_admin
-
-def _message_has_supported_media(message):
-    return any(getattr(message, attr, None) for attr in ('photo', 'video', 'document', 'audio', 'animation', 'voice'))
-
-def _get_group_media_file(message):
-    if getattr(message, 'photo', None):
-        return 'photo', message.photo[-1].file_id
-    for kind in ('video', 'document', 'audio', 'animation', 'voice'):
-        media = getattr(message, kind, None)
-        if media:
-            return kind, media.file_id
-    return None, None
-
-class _CaptionTextExtractor(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts = []
-
-    def handle_data(self, data):
-        self.parts.append(data)
-
-def _caption_visible_text(caption_html):
-    """Return the visible text in the saved HTML caption for duplicate checks."""
-    parser = _CaptionTextExtractor()
-    try:
-        parser.feed(caption_html or '')
-        parser.close()
-    except Exception:
-        return ''
-    return ''.join(parser.parts).strip()
-
-def _caption_as_html(caption, entities=None):
-    """Escape existing caption text and retain its Telegram formatting entities."""
-    return telebot.formatting.apply_html_entities(caption or '', entities or None)
-
-def _append_saved_caption_html(original_caption, original_entities, saved_caption):
-    original_html = _caption_as_html(original_caption, original_entities)
-    return f"{original_html}\n\n{saved_caption}" if original_html else saved_caption
-
-def _caption_already_present(messages, saved_caption):
-    saved_text = _caption_visible_text(saved_caption)
-    return bool(saved_text) and any(
-        saved_text in (getattr(message, 'caption', None) or '')
-        for message in messages
-    )
-
-def _bot_can_delete_group_messages(chat_id):
-    now = time.monotonic()
-    with _group_admin_status_lock:
-        cached = _bot_delete_permission_cache.get(chat_id)
-        if cached and cached[0] > now:
-            return cached[1]
-    try:
-        bot_id = getattr(getattr(bot, 'user', None), 'id', None) or bot.get_me().id
-        member = bot.get_chat_member(chat_id, bot_id)
-        can_delete = (
-            getattr(member, 'status', None) == 'creator'
-            or (
-                getattr(member, 'status', None) == 'administrator'
-                and bool(getattr(member, 'can_delete_messages', False))
-            )
-        )
-    except Exception as e:
-        print(f"[group-media-caption] couldn't verify bot delete permission chat={chat_id}: {e}")
-        return False
-    with _group_admin_status_lock:
-        _bot_delete_permission_cache[chat_id] = (now + GROUP_ADMIN_CACHE_SECONDS, can_delete)
-    return can_delete
-
-def _repost_group_media(messages):
-    messages = sorted(messages, key=lambda item: item.message_id)
-    if not messages:
-        return
-    chat_id = messages[0].chat.id
-    saved_caption = get_group_media_caption()
-    if not saved_caption:
-        print(f"[group-media-caption] skipped chat={chat_id}: no saved caption is configured")
-        try:
-            bot.reply_to(messages[0], "ℹ️ No saved media caption is set yet. The configured bot admin must set one with /setmediacaption in a private chat.")
-        except Exception as reply_error:
-            print(f"[group-media-caption] couldn't notify sender chat={chat_id}: {reply_error}")
-        return
-    if _caption_already_present(messages, saved_caption):
-        print(f"[group-media-caption] already present chat={chat_id}; leaving source unchanged")
-        return
-    if not _bot_can_delete_group_messages(chat_id):
-        print(f"[group-media-caption] skipped chat={chat_id}: bot needs Delete Messages permission to replace the source")
-        try:
-            bot.reply_to(
-                messages[0],
-                "⚠️ I couldn't replace this media. Please grant me the Telegram admin permission to delete messages, then try again.",
-            )
-        except Exception as reply_error:
-            print(f"[group-media-caption] couldn't notify sender chat={chat_id}: {reply_error}")
-        return
-
-    try:
-        if len(messages) == 1:
-            message = messages[0]
-            caption_html = _append_saved_caption_html(
-                message.caption,
-                getattr(message, 'caption_entities', None),
-                saved_caption,
-            )
-            if len(_caption_visible_text(caption_html)) > 1024:
-                print(f"[group-media-caption] skipped chat={chat_id} message={message.message_id}: combined caption exceeds 1024 characters")
-                bot.reply_to(message, "⚠️ The combined caption is too long for Telegram, so I left the original media unchanged.")
-                return
-            kind, file_id = _get_group_media_file(message)
-            send_method = {
-                'photo': bot.send_photo,
-                'video': bot.send_video,
-                'document': bot.send_document,
-                'audio': bot.send_audio,
-                'animation': bot.send_animation,
-                'voice': bot.send_voice,
-            }.get(kind)
-            if not send_method or not file_id:
-                print(f"[group-media-caption] skipped chat={chat_id} message={message.message_id}: unsupported media type")
-                return
-            kwargs = {"caption": caption_html, "parse_mode": "HTML"}
-            thread_id = getattr(message, 'message_thread_id', None)
-            if thread_id is not None:
-                kwargs['message_thread_id'] = thread_id
-            # Resend the received file_id so protected-content groups do not
-            # block the replacement through copyMessage's forwarding rules.
-            send_method(chat_id, file_id, **kwargs)
-        else:
-            media_items = []
-            caption_index = next((i for i, item in enumerate(messages) if getattr(item, 'caption', None)), 0)
-            caption_source = messages[caption_index]
-            combined_caption = _append_saved_caption_html(
-                getattr(caption_source, 'caption', None),
-                getattr(caption_source, 'caption_entities', None),
-                saved_caption,
-            )
-            if len(_caption_visible_text(combined_caption)) > 1024:
-                print(f"[group-media-caption] skipped album chat={chat_id}: combined caption exceeds 1024 characters")
-                bot.reply_to(messages[0], "⚠️ The combined album caption is too long for Telegram, so I left the original album unchanged.")
-                return
-            for index, item in enumerate(messages):
-                kind, file_id = _get_group_media_file(item)
-                if not file_id:
-                    print(f"[group-media-caption] skipped album chat={chat_id}: unsupported media item {item.message_id}")
-                    return
-                if index == caption_index:
-                    caption = combined_caption
-                else:
-                    original_caption = getattr(item, 'caption', None)
-                    caption = _caption_as_html(original_caption, getattr(item, 'caption_entities', None)) if original_caption else None
-                if kind == 'photo':
-                    media = InputMediaPhoto(file_id, caption=caption, parse_mode='HTML')
-                elif kind == 'video':
-                    media = InputMediaVideo(file_id, caption=caption, parse_mode='HTML')
-                elif kind == 'audio':
-                    media = InputMediaAudio(file_id, caption=caption, parse_mode='HTML')
-                else:
-                    media = InputMediaDocument(file_id, caption=caption, parse_mode='HTML')
-                media_items.append(media)
-            kwargs = {}
-            thread_id = getattr(messages[0], 'message_thread_id', None)
-            if thread_id is not None:
-                kwargs['message_thread_id'] = thread_id
-            bot.send_media_group(chat_id, media_items, **kwargs)
-
-        # Delete the source only after Telegram confirms the replacement was sent.
-        for message in messages:
-            try:
-                bot.delete_message(chat_id, message.message_id)
-            except Exception as delete_error:
-                print(f"[group-media-caption] replacement sent but couldn't delete source chat={chat_id} message={message.message_id}: {delete_error}")
-        print(f"[group-media-caption] reposted media chat={chat_id} source_messages={len(messages)}")
-    except Exception as e:
-        print(f"[group-media-caption] could not replace media in chat={chat_id}: {e}")
-        try:
-            bot.reply_to(messages[0], "⚠️ I couldn't append the saved caption to this media. Please check that the saved caption uses valid Telegram HTML.")
-        except Exception as reply_error:
-            print(f"[group-media-caption] couldn't notify sender chat={chat_id}: {reply_error}")
-
-def _flush_group_media_album(album_key):
-    with _group_media_album_lock:
-        batch = _group_media_album_batches.pop(album_key, None)
-    if batch:
-        _repost_group_media(batch['messages'])
-
-@bot.message_handler(content_types=['photo', 'video', 'document', 'audio', 'animation', 'voice'], func=lambda message: _is_group_admin_media_sender(message) and _message_has_supported_media(message))
-def handle_configured_admin_group_media(message):
-    print(
-        f"[group-media-caption] received group media chat={message.chat.id} "
-        f"sender={message.from_user.id if message.from_user else '?'} "
-        f"message={message.message_id} album={getattr(message, 'media_group_id', None) or '-'}",
-        flush=True,
-    )
-    media_group_id = getattr(message, 'media_group_id', None)
-    if not media_group_id:
-        _repost_group_media([message])
-        return
-
-    album_key = (message.chat.id, str(media_group_id))
-    with _group_media_album_lock:
-        batch = _group_media_album_batches.setdefault(album_key, {"messages": [], "timer": None})
-        if all(item.message_id != message.message_id for item in batch['messages']):
-            batch['messages'].append(message)
-        old_timer = batch.get('timer')
-        if old_timer:
-            old_timer.cancel()
-        timer = Timer(GROUP_MEDIA_ALBUM_SETTLE_SECONDS, _flush_group_media_album, args=(album_key,))
-        timer.daemon = True
-        batch['timer'] = timer
-        timer.start()
-=======
     bot_config.ADMIN_ID = data_owner
     ADMIN_USER_IDS.add(data_owner)
 
@@ -908,7 +517,6 @@ def get_group_media_caption():
 
 def show_group_media_caption_settings(chat_id, message_id=None, admin_user_id=None):
     caption_admin_feature.show_settings(chat_id, message_id, admin_user_id or current_admin_id())
->>>>>>> d8cb240 (dayummm)
 
 def get_menu_image_file_id():
     """Returns the Telegram file_id of the admin-set main menu image, or None if not set."""
@@ -4137,10 +3745,7 @@ def _admin_menu_markup():
         InlineKeyboardButton("🗄 Database", callback_data="admin_dbstats"),
         InlineKeyboardButton("🖼 Menu Image", callback_data="admin_menuimage"),
     )
-<<<<<<< HEAD
-=======
     markup.add(InlineKeyboardButton("📝 Saved Caption", callback_data="admin_caption"))
->>>>>>> d8cb240 (dayummm)
     markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     return markup
 
@@ -4202,11 +3807,8 @@ def admin_menu_action(call):
         dbstats_handler(call.message, message_id=call.message.message_id)
     elif action == 'admin_menuimage':
         _show_menu_image_settings(chat_id, call.message.message_id)
-<<<<<<< HEAD
-=======
     elif action == 'admin_caption':
         show_group_media_caption_settings(chat_id, call.message.message_id, call.from_user.id)
->>>>>>> d8cb240 (dayummm)
     elif action == 'admin_home':
         try:
             bot.clear_step_handler_by_chat_id(chat_id)
