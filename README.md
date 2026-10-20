@@ -1,154 +1,34 @@
-# 🤖 Telegram Subscription Management Bot By Ab
+# Telegram Subscription Bot
 
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
-[![PyTelegramBotAPI](https://img.shields.io/badge/PyTelegramBotAPI-v4.15.0%2B-brightgreen.svg)](https://github.com/eternnoir/pyTelegramBotAPI)
-[![MongoDB](https://img.shields.io/badge/MongoDB-Atlas-green.svg)](https://www.mongodb.com/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+## Project layout
 
-A powerful, production-ready Telegram Bot written in Python to sell channel/group subscriptions automatically. It handles multi-channel shopping carts, processes UPI/QR-code payments, manages subscription durations, sends automated expiry reminders, and kicks expired members automatically.
+- `bot.py` is the polling and web-health entry point.
+- `main/config.py` reads environment settings and admin IDs.
+- `main/database.py` creates the MongoDB client and collections.
+- `main/admin_caption.py` manages the saved media caption card, commands, and callbacks.
+- `main/group_media_caption.py` detects group admin media, preserves album/order handling, and reposts it with the saved caption.
+- `requirements.txt` lists the Python dependencies.
 
-It also features a robust administrator dashboard for channel configuration, payment approval, analytics, database cleanups, and broadcasting.
+Keep the `main` folder beside the entry point and include it in every deployment.
 
----
+## Configure
 
-## 🌟 Key Features
+Copy `.env.example` to `.env` for local development and fill in the values. Never commit a real `.env` file or paste a bot token into source code.
 
-### 👤 User Features
-* 🛒 **Multi-Channel Shopping Cart**: Users can browse channels, view pricing plans, and add multiple subscriptions to their cart before checking out in one transaction.
-* 💳 **Seamless Payments**: Generates custom UPI intent strings and payment QR codes based on your UPI ID and the cart total.
-* 📊 **Subscription Tracking (`/myplans`)**: Users can check active subscription statuses, remaining durations, and expiration timestamps.
-* ⚡ **Auto-Vanish Menus**: Clean interfaces that automatically vanish after a period of inactivity to prevent chat clutter.
+- `BOT_TOKEN`: token from BotFather.
+- `MONGO_URI`: MongoDB connection string. Restrict Atlas network access to the deployment host where practical.
+- `ADMIN_ID`: primary admin Telegram user ID. Keep this set to the existing primary admin when adding others.
+- `ADMIN_IDS`: optional additional admin IDs separated by commas, such as `111111,222222`.
+- `UPI_ID` and `CONTACT_USERNAME`: optional payment and contact settings.
 
-### ⚙️ Admin Features
-* 🎛️ **Interactive Channel Management (`/channels`, `/add`)**: Add channels, upload screenshots/banners, edit plans (durations & pricing), and delete channels via inline buttons.
-* 💰 **Payment Verification & Approval**: Decides whether to approve or reject checkout requests. Approvals automatically generate invite links and unban users; rejections notify users instantly.
-* ⏰ **Automated Subscription Lifecycle Scheduler**:
-  * **Auto-Kick**: Runs every minute to ban expired subscribers (preventing them from rejoining with old links).
-  * **Expiry Notifications**: Sends warnings to users 24 hours and 1 hour before subscription expiry.
-* 📢 **Broadcasting (`/broadcast`)**: Broadcast styled announcement messages to all users who have ever interacted with the bot.
-* 🧹 **Database Cleanups (`/cleanup`)**: Safe pruning of payments older than 6 months and inactive users older than 90 days, keeping database lookups fast.
-* 📈 **Analytics (`/stats`, `/dbstats`)**: View total sales count, total revenue in ₹ (INR), active subscriber distributions, and MongoDB storage metrics.
+On Render, add these values under the service's Environment settings. Render supplies `PORT` for the health endpoint.
 
-### 🛠️ Core Infrastructure
-* 🔄 **Auto-React Queue**: Sequentially queue and process Telegram message reactions in a background thread to prevent rate-limiting (HTTP 429) or connection pool depletion.
-* 🖥️ **Keep-Alive Server**: Built-in Flask web server designed to listen on an open port, satisfying Render/Heroku health-check requirements for 24/7 uptime.
+## Run
 
----
+Install dependencies with `pip install -r requirements.txt`, then set the Render start command to `python bot.py`.
 
-## 🛠️ Tech Stack
-* **Language**: Python 3.8+
-* **Framework**: [pyTelegramBotAPI](https://github.com/eternnoir/pyTelegramBotAPI) (Telegram Bot API 7.x compatible)
-* **Database**: MongoDB Atlas (via [pymongo](https://github.com/mongodb/mongo-python-driver))
-* **Scheduler**: [APScheduler](https://github.com/agronholm/apscheduler)
-* **Web Keep-Alive**: Flask
+The service exposes `/` as a health endpoint and runs one Telegram polling process. Keep a single running instance for the bot token so multiple pollers do not compete for updates.
 
----
+## Admin caption
 
-## 🚀 Getting Started
-
-### 📋 Prerequisites
-1. **Python 3.8+** installed.
-2. A **MongoDB Atlas** cluster (free tier works perfectly).
-3. A Telegram Bot Token from [@BotFather](https://t.me/BotFather).
-4. A channel or group where the bot is added as an **Administrator** with permissions to `Invite Users` and `Ban Users`.
-
-### 📂 Installation & Setup
-
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/yourusername/subscription-bot.git
-   cd subscription-bot
-   ```
-
-2. **Set up a Virtual Environment**:
-   ```bash
-   python -m venv venv
-   # On Windows:
-   venv\Scripts\activate
-   # On macOS/Linux:
-   source venv/bin/activate
-   ```
-
-3. **Install Dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Configure Environment Variables**:
-   Create a `.env` file in the root directory (or configure them in your deployment platform):
-   ```env
-   BOT_TOKEN=your_telegram_bot_token
-   MONGO_URI=mongodb+srv://username:password@cluster.mongodb.net/database_name?retryWrites=true&w=majority
-   ADMIN_ID=your_telegram_user_id
-   UPI_ID=your_upi_id@ybl
-   CONTACT_USERNAME=your_support_telegram_username
-   PORT=5000
-   ```
-
-5. **Run the Bot**:
-   ```bash
-   python bot.py
-   ```
-
----
-
-## ⚙️ Environment Variables Reference
-
-| Variable | Description | Example |
-| :--- | :--- | :--- |
-| `BOT_TOKEN` | API token generated by Telegram's `@BotFather`. | `123456789:ABCdefGhI...` |
-| `MONGO_URI` | The connection string for your MongoDB Atlas cluster. | `mongodb+srv://user:pass@cluster.mongodb.net/...` |
-| `ADMIN_ID` | Telegram User ID of the owner (who can access administrative commands). | `987654321` |
-| `UPI_ID` | The UPI ID to receive payments. | `username@upi` or `phone@ybl` |
-| `CONTACT_USERNAME`| Support contact handle (without the `@` symbol) shown to users. | `SupportOwner` |
-| `PORT` | Optional. Port for Flask keep-alive web server. Default is `5000`. | `5000` |
-
----
-
-## 🤖 Bot Commands
-
-### 👤 User Commands
-* `/start` - Launch the bot and view welcome screen (supports deep-linking directly to a channel).
-* `/buy` - Browse channels and select subscription packages.
-* `/myplans` - View your active subscriptions and remaining time.
-* `/help` - Show instructions and user support options.
-
-### 🛡️ Admin Commands
-* `/channels` - List channels, configure banners/pricing, edit info, or delete them.
-* `/add` - Add a new channel to the bot's system.
-* `/stats` - View lifetime metrics including sales counts and total revenue.
-* `/dbstats` - Check database health, connection statistics, and raw collection document counts.
-* `/broadcast` - Broadcast announcements to everyone who has ever interacted with the bot.
-* `/removeuser` - Revoke subscription access and remove a subscriber manually.
-* `/cleanup` - Free up database space by pruning historical records safely.
-
----
-
-## 📦 Database Schema Details
-The database `sub_management` contains the following collections:
-* **`channels`**: Stores channel metadata, description, price-duration mappings, and screenshot/banner file IDs.
-* **`users`**: Active subscribers containing user details, channel associations, start date, and expiry timestamp.
-* **`payments`**: Records of past checkouts, payment proof (screenshot file ID), amount paid, status, and approval dates.
-* **`seen_users`**: Unique records of every user who has ever started the bot (essential for `/broadcast`).
-* **`counters`**: Stores persistent lifetime metrics (e.g. total sales, total revenue) that persist even after old payments are cleaned up.
-* **`pending_checkouts`**: Active checkout requests awaiting admin review.
-
----
-
-## ☁️ Deployment
-
-### Render (Recommended)
-1. Fork/Push this repository to your GitHub account.
-2. Log in to [Render](https://render.com/) and create a new **Web Service**.
-3. Link your GitHub repository.
-4. Set the following settings:
-   * **Runtime**: `Python`
-   * **Build Command**: `pip install -r requirements.txt`
-   * **Start Command**: `python bot.py`
-5. Go to the **Environment** tab and add the variables listed in the [Environment Variables Reference](#-environment-variables-reference) section.
-6. Click **Deploy**. Render will host the bot and use the built-in Flask web server to verify service health automatically.
-
----
-
-## 📝 License
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+The admin panel has a **Saved Caption** card. The configured primary admin can edit or delete the saved caption there. `/setmediacaption` prompts for the caption text; Telegram HTML tags are supported. The bot must have **Delete Messages** permission in each group where it replaces admin media.

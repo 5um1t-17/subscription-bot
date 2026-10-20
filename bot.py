@@ -21,7 +21,10 @@ except ImportError:
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputFile, InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
 from telebot.handler_backends import BaseMiddleware, CancelUpdate
+<<<<<<< HEAD
 from pymongo import MongoClient
+=======
+>>>>>>> d8cb240 (dayummm)
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 from bson import ObjectId
@@ -30,6 +33,23 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
 from threading import Thread, Timer, RLock, local
 from queue import Queue
+from main.admin_caption import AdminCaptionFeature
+from main import group_media_caption as group_media_caption_feature
+from main.database import (
+    approved_payments_col, carts_col, channels_col, chat_members_col, client,
+    counters_col, db, expired_subs_col, fj_pending_requests_col,
+    free_trial_claims_col, free_trial_claims_history_col, free_trials_col,
+    offer_bundles_col, payments_col, pending_checkouts_col,
+    pending_offer_bundle_checkouts_col, pending_reactions_col,
+    scheduled_broadcasts_col, seen_users_col, settings_col, tracked_chats_col,
+    users_col, waitlist_col,
+)
+from main import config as bot_config
+from main.config import (
+    ADMIN_ID, ADMIN_USER_IDS, BOT_TOKEN, CONFIGURED_ADMIN_ID, CONTACT_USERNAME,
+    MONGO_URI, UPI_ID, _admin_request_context, contact_admin_url,
+    current_admin_id, is_admin_user_id,
+)
 
 # Telegram's built-in identity when a group admin posts with "Remain anonymous" on.
 GROUP_ANONYMOUS_BOT_ID = 1087968824
@@ -46,6 +66,7 @@ def run_web():
 def keep_alive():
     Thread(target=run_web).start()
 
+<<<<<<< HEAD
 # --- CONFIGURATION (Environment Variables) ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 MONGO_URI = os.getenv('MONGO_URI')
@@ -90,6 +111,8 @@ def contact_admin_url():
         return f"https://t.me/{CONTACT_USERNAME}"
     return None
 
+=======
+>>>>>>> d8cb240 (dayummm)
 # Emoji pool used to give each channel button a random face — picked fresh every time
 # the channel list is rendered so the list feels lively and each entry looks distinct.
 FACE_EMOJIS = [
@@ -502,6 +525,7 @@ class AutoReactMiddleware(BaseMiddleware):
 
 bot.setup_middleware(AutoReactMiddleware())
 
+<<<<<<< HEAD
 client = MongoClient(MONGO_URI)
 db = client['sub_management']
 channels_col = db['channels']
@@ -526,6 +550,8 @@ pending_offer_bundle_checkouts_col = db['pending_offer_bundle_checkouts']  # bun
 fj_pending_requests_col = db['fj_pending_requests']  # Force Join pending join requests (event-based tracking)
 approved_payments_col = db['approved_payments']  # archive of approved checkouts with user details & receipt screenshots
 
+=======
+>>>>>>> d8cb240 (dayummm)
 def adopt_existing_channel_owner():
     """Keep existing channel data under its original owner when ADMIN_ID changes."""
     global ADMIN_ID
@@ -550,6 +576,7 @@ def adopt_existing_channel_owner():
         print(f"[admin-config] preserving existing channel owner {data_owner}; configured ID {ADMIN_ID} remains an authorized admin")
     ADMIN_USER_IDS.add(ADMIN_ID) if ADMIN_ID else None
     ADMIN_ID = data_owner
+<<<<<<< HEAD
     ADMIN_USER_IDS.add(data_owner)
 
 # --- Append the configured admin's saved caption to their group media ---
@@ -861,6 +888,27 @@ def handle_configured_admin_group_media(message):
         timer.daemon = True
         batch['timer'] = timer
         timer.start()
+=======
+    bot_config.ADMIN_ID = data_owner
+    ADMIN_USER_IDS.add(data_owner)
+
+caption_admin_feature = AdminCaptionFeature(bot, settings_col, CONFIGURED_ADMIN_ID)
+GROUP_MEDIA_CAPTION_SETTING_ID = caption_admin_feature.setting_id
+caption_admin_feature.register_handlers()
+
+# --- Group media caption processing ---
+group_media_caption_feature.configure(
+    bot, GROUP_ANONYMOUS_BOT_ID, caption_admin_feature.get_caption,
+    lambda chat_id, message_id, delay: schedule_delete(chat_id, message_id, delay),
+)
+group_media_caption_feature.register_handlers()
+
+def get_group_media_caption():
+    return caption_admin_feature.get_caption()
+
+def show_group_media_caption_settings(chat_id, message_id=None, admin_user_id=None):
+    caption_admin_feature.show_settings(chat_id, message_id, admin_user_id or current_admin_id())
+>>>>>>> d8cb240 (dayummm)
 
 def get_menu_image_file_id():
     """Returns the Telegram file_id of the admin-set main menu image, or None if not set."""
@@ -4089,6 +4137,10 @@ def _admin_menu_markup():
         InlineKeyboardButton("🗄 Database", callback_data="admin_dbstats"),
         InlineKeyboardButton("🖼 Menu Image", callback_data="admin_menuimage"),
     )
+<<<<<<< HEAD
+=======
+    markup.add(InlineKeyboardButton("📝 Saved Caption", callback_data="admin_caption"))
+>>>>>>> d8cb240 (dayummm)
     markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     return markup
 
@@ -4150,6 +4202,11 @@ def admin_menu_action(call):
         dbstats_handler(call.message, message_id=call.message.message_id)
     elif action == 'admin_menuimage':
         _show_menu_image_settings(chat_id, call.message.message_id)
+<<<<<<< HEAD
+=======
+    elif action == 'admin_caption':
+        show_group_media_caption_settings(chat_id, call.message.message_id, call.from_user.id)
+>>>>>>> d8cb240 (dayummm)
     elif action == 'admin_home':
         try:
             bot.clear_step_handler_by_chat_id(chat_id)
