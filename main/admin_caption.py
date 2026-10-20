@@ -2,7 +2,9 @@
 
 from html.parser import HTMLParser
 
-from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
+from telebot.types import InlineKeyboardMarkup
+
+from main.ui import InlineKeyboardButton
 
 
 class _VisibleText(HTMLParser):
@@ -108,22 +110,6 @@ class AdminCaptionFeature:
             return
         self._prompt_edit(message.chat.id)
 
-    def show_command(self, message):
-        if message.chat.type != "private":
-            return
-        caption = self.get_caption()
-        self.bot.reply_to(
-            message,
-            f"Current saved media caption:\n\n{caption}" if caption else "No saved media caption is set.",
-        )
-
-    def delete_command(self, message):
-        if message.chat.type != "private":
-            self.bot.reply_to(message, "Please clear the saved media caption in a private chat with the bot.")
-            return
-        self.settings.delete_one({"_id": self.setting_id})
-        self.bot.reply_to(message, "✅ Saved media caption cleared.")
-
     def edit_callback(self, call):
         if not self._can_edit(call.from_user.id):
             self.bot.answer_callback_query(call.id, "Only the configured caption admin can edit this setting.", show_alert=True)
@@ -143,11 +129,5 @@ class AdminCaptionFeature:
         self.bot.message_handler(
             commands=["setmediacaption"], func=self._is_configured_admin_message
         )(self.set_command)
-        self.bot.message_handler(
-            commands=["mediacaption"], func=self._is_configured_admin_message
-        )(self.show_command)
-        self.bot.message_handler(
-            commands=["clearmediacaption"], func=self._is_configured_admin_message
-        )(self.delete_command)
         self.bot.callback_query_handler(func=lambda call: call.data == "caption_edit")(self.edit_callback)
         self.bot.callback_query_handler(func=lambda call: call.data == "caption_delete")(self.delete_callback)

@@ -46,6 +46,7 @@ from main.config import (
     MONGO_URI, UPI_ID, _admin_request_context, contact_admin_url,
     current_admin_id, is_admin_user_id,
 )
+from main.ui import InlineKeyboardButton
 
 # Telegram's built-in identity when a group admin posts with "Remain anonymous" on.
 GROUP_ANONYMOUS_BOT_ID = 1087968824
@@ -360,58 +361,6 @@ def queue_reaction(chat_id, message_id):
             reaction_queues[chat_id] = q
             Thread(target=_reaction_worker_for_chat, args=(chat_id,), daemon=True).start()
         q.put((message_id, 0))
-
-def reaction_backlog_size(chat_id=None):
-    """Total number of reactions still waiting (in-memory queues, which is what
-    actually drives the delay the admin experiences). Pass a chat_id to check just
-    one chat, or omit for the total across every chat."""
-    with _reaction_queues_lock:
-        if chat_id is not None:
-            q = reaction_queues.get(chat_id)
-            return q.qsize() if q else 0
-        return sum(q.qsize() for q in reaction_queues.values())
-
-def _drain_queue(q):
-    """Empty a Queue object in place, returning how many items were removed.
-    Note: if a worker thread has already pulled an item off and is mid-send, that
-    one message will still get its reaction — this only clears what's still waiting."""
-    removed = 0
-    while True:
-        try:
-            q.get_nowait()
-            q.task_done()
-            removed += 1
-        except Exception:
-            break
-    return removed
-
-def clear_reaction_cache(chat_id=None):
-    """Wipe the reaction backlog — both the in-memory queue(s) and the persisted
-    MongoDB records — so the bot stops working through a large/stale backlog and
-    reacts promptly to new messages again. Returns (in_memory_cleared, persisted_cleared).
-
-    Pass a chat_id to clear just that chat's backlog, or omit to clear everything.
-    Whatever is cleared here will simply never get a reaction — this trades
-    completeness for the bot staying responsive/current, so use it when a backlog
-    has grown large enough that reacting to it is no longer useful (e.g. after a
-    100+ message forward you don't actually care about reacting to anymore)."""
-    in_memory_cleared = 0
-    with _reaction_queues_lock:
-        if chat_id is not None:
-            q = reaction_queues.get(chat_id)
-            if q:
-                in_memory_cleared = _drain_queue(q)
-        else:
-            for q in reaction_queues.values():
-                in_memory_cleared += _drain_queue(q)
-    try:
-        if chat_id is not None:
-            persisted_cleared = pending_reactions_col.delete_many({"chat_id": chat_id}).deleted_count
-        else:
-            persisted_cleared = pending_reactions_col.delete_many({}).deleted_count
-    except Exception:
-        persisted_cleared = 0
-    return in_memory_cleared, persisted_cleared
 
 class AutoReactMiddleware(BaseMiddleware):
     def __init__(self):
@@ -3617,7 +3566,7 @@ def _admin_channel_ids():
 
 def _admin_active_subscriber_ids():
     """Numeric user_ids of every ACTIVE subscriber across the admin's channels
-    (used by /removeuser in the private DM)."""
+    (used by /remove in the private DM)."""
     ids = set()
     now = datetime.now().timestamp()
     admin_channel_ids = _admin_channel_ids()
@@ -3672,15 +3621,13 @@ def setup_commands():
         BotCommand("help", "Help & contact admin"),
     ]
     admin_commands =  user_commands + [
-        BotCommand("add", "Add group/channel by forwarding a message"),
+        BotCommand("add", "Add a group/channel by ID or forwarded message"),
         BotCommand("channels", "Manage channels (edit/delete)"),
         BotCommand("bundles", "Manage offers (custom fixed-price offers)"),
         BotCommand("setmenuimage", "Set/remove the main menu image"),
         BotCommand("setmediacaption", "Set the caption appended to your group media"),
-        BotCommand("mediacaption", "Show the saved group media caption"),
-        BotCommand("clearmediacaption", "Clear the saved group media caption"),
         BotCommand("forcejoin", "Require users to join a channel (Force Join settings)"),
-        BotCommand("removeuser", "Remove a subscriber early"),
+        BotCommand("remove", "Remove a member or revoke a subscriber"),
         BotCommand("stats", "View bot stats & revenue"),
         BotCommand("broadcast", "Message everyone who has used the bot"),
         BotCommand("listbroadcasts", "List scheduled broadcasts"),
@@ -3690,8 +3637,6 @@ def setup_commands():
         BotCommand("sync", "Tracked chats & re-sync members"),
         BotCommand("pending", "Review pending payment checkouts"),
         BotCommand("approved_payments", "View approved payments & receipts"),
-        BotCommand("reactcachestatus", "Check auto-react backlog size"),
-        BotCommand("clearreactcache", "Clear the auto-react backlog"),
         BotCommand("users", "List all active subscribers & plans"),
     ]
     group_admin_commands = [
@@ -7252,66 +7197,6 @@ def cleanup_handler(message):
     dismiss_previous(message.chat.id, message.from_user.id)
     show_cleanup_menu(message.chat.id, user_id=message.from_user.id)
 
-@bot.message_handler(commands=['clearreactcache'], func=lambda m: is_admin_user_id(m.from_user.id))
-def clear_react_cache_handler(message):
-    """Admin escape hatch: wipe the auto-react backlog (in-memory + persisted) so the
-    bot stops slowly working through a large/stale queue and reacts promptly to new
-    messages again. Anything cleared here simply never gets a reaction — it trades
-    completeness for staying current, which is the right trade once a backlog has
-    grown large enough that reacting to it late isn't useful anymore.
-
-    Usage:
-      /clearreactcache            -> clear the backlog for every chat
-      /clearreactcache <chat_id>  -> clear the backlog for just one chat
-      /reactcachestatus           -> check the current backlog size first (see below)"""
-    dismiss_previous(message.chat.id, message.from_user.id)
-    args = message.text.split()[1:]
-    if args:
-        try:
-            chat_id = int(args[0].strip())
-        except ValueError:
-            send_command_reply(message,
-                "❌ Invalid chat id. Usage: `/clearreactcache` (clears every chat) or "
-                "`/clearreactcache <chat_id>` (clears just one chat).", parse_mode="Markdown")
-            return
-        mem, persisted = clear_reaction_cache(chat_id)
-        send_command_reply(message,
-            f"✅ Cleared reaction backlog for chat `{chat_id}`.\n"
-            f"In-memory: {mem} | Persisted: {persisted}", parse_mode="Markdown")
-    else:
-        mem, persisted = clear_reaction_cache()
-        send_command_reply(message,
-            f"✅ Cleared the entire reaction backlog across all chats.\n"
-            f"In-memory: {mem} | Persisted: {persisted}\n\n"
-            f"New messages will start getting reactions promptly again.")
-
-@bot.message_handler(commands=['reactcachestatus'], func=lambda m: is_admin_user_id(m.from_user.id))
-def react_cache_status_handler(message):
-    """Quick check of how backed-up the auto-react queue is before deciding whether
-    to /clearreactcache."""
-    dismiss_previous(message.chat.id, message.from_user.id)
-    args = message.text.split()[1:]
-    if args:
-        try:
-            chat_id = int(args[0].strip())
-        except ValueError:
-            send_command_reply(message, "❌ Invalid chat id. Usage: `/reactcachestatus <chat_id>`.", parse_mode="Markdown")
-            return
-        size = reaction_backlog_size(chat_id)
-        send_command_reply(message, f"📊 Reaction backlog for chat `{chat_id}`: {size} message(s) waiting.", parse_mode="Markdown")
-    else:
-        with _reaction_queues_lock:
-            per_chat = {cid: q.qsize() for cid, q in reaction_queues.items() if q.qsize() > 0}
-        total = sum(per_chat.values())
-        if not per_chat:
-            send_command_reply(message, "📊 Reaction backlog: empty across all chats.")
-            return
-        lines = [f"📊 Reaction backlog: {total} message(s) waiting across {len(per_chat)} chat(s):"]
-        for cid, size in sorted(per_chat.items(), key=lambda x: -x[1])[:10]:
-            lines.append(f"• `{cid}`: {size}")
-        lines.append("\nUse `/clearreactcache <chat_id>` to clear one, or `/clearreactcache` to clear all.")
-        send_command_reply(message, "\n".join(lines), parse_mode="Markdown")
-
 def show_cleanup_menu(chat_id, message_id=None, user_id=None):
     now = datetime.now()
     payments_cutoff = now - timedelta(days=CLEANUP_PAYMENTS_DAYS)
@@ -8085,7 +7970,7 @@ def _send_broadcast_now(text):
 
 def show_active_users(chat_id, user_id=None, message=None, page=0, per_page=20, message_id=None):
     """Show active subscribers as inline buttons for the admin to remove.
-    This is the fallback when /removeuser is used without arguments."""
+    This is the fallback when /remove is used without arguments."""
     now = datetime.now().timestamp()
     admin_channel_ids = _admin_channel_ids()
     if not admin_channel_ids:
@@ -8211,7 +8096,6 @@ def show_active_users(chat_id, user_id=None, message=None, page=0, per_page=20, 
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
 
-@bot.message_handler(commands=['removeuser'])
 def removeuser_handler(message):
     if not message.from_user:
         return
@@ -8219,7 +8103,7 @@ def removeuser_handler(message):
         send_command_reply(message, f"❌ Access denied. Your User ID (`{message.from_user.id}`) is not configured as ADMIN_ID.", parse_mode="Markdown")
         return
     if message.chat.type != 'private':
-        _safe_reply(message, "⚠️ /removeuser only works in a private chat with the bot.\n\nIn groups, use `/remove` to kick a member.", parse_mode="Markdown")
+        _safe_reply(message, "⚠️ In a private chat use `/remove` to revoke a subscriber. In a group, use `/remove` to kick a member.", parse_mode="Markdown")
         return
 
     # Dismiss previous bot reply
@@ -8235,7 +8119,7 @@ def removeuser_handler(message):
             except ValueError:
                 pass
 
-        # `/removeuser all` (or `/remove all` in a DM) -> revoke every active
+        # `/remove all` in a private DM -> revoke every active
         # subscriber across the admin's channels.
         if target.lower() == 'all':
             now = datetime.now().timestamp()
@@ -8304,7 +8188,7 @@ def removeuser_handler(message):
                 send_admin_reply(f"⚠️ No subscriptions found for `{escape_markdown(target)}` ({target_uid}).", parse_mode="Markdown")
                 return
         else:
-            send_admin_reply(f"❌ Could not resolve `{escape_markdown(target)}`. Check the spelling (usernames are case-insensitive), try their numeric User ID, or use `/removeuser` without arguments to pick from the menu.", parse_mode="Markdown")
+            send_admin_reply(f"❌ Could not resolve `{escape_markdown(target)}`. Check the spelling (usernames are case-insensitive), try their numeric User ID, or use `/remove` without arguments to pick from the menu.", parse_mode="Markdown")
             return
 
     show_active_users(message.chat.id, user_id=message.from_user.id, message=message)
@@ -8561,7 +8445,7 @@ def cb_rmuser_ch_page(call):
 @bot.message_handler(commands=['remove'])
 @bot.channel_post_handler(commands=['remove'])
 def group_remove_handler(message):
-    """In groups/channels: any chat admin can kick members. In private DM: same as /removeuser for bot owner."""
+    """In groups/channels: chat admins can kick members. In private DM: bot admins can revoke subscriptions."""
     if getattr(message.chat, 'type', None) == 'private':
         removeuser_handler(message)
         return
