@@ -557,9 +557,15 @@ def _is_group_admin_media_sender(message):
         return False
     with _group_admin_status_lock:
         _group_admin_status_cache[key] = (now + GROUP_ADMIN_CACHE_SECONDS, is_admin)
+        if not is_admin:
+            # Do not retain a negative result: a regular member may be promoted
+            # moments later, and their next media must be checked against Telegram.
+            _group_admin_status_cache.pop(key, None)
         expired = [cache_key for cache_key, value in _group_admin_status_cache.items() if value[0] <= now]
         for cache_key in expired:
             _group_admin_status_cache.pop(cache_key, None)
+    if not is_admin:
+        print(f"[group-media-caption] sender is not currently a group admin chat={message.chat.id} user={message.from_user.id} status={getattr(member, 'status', '?')}")
     return is_admin
 
 def _message_has_supported_media(message):
