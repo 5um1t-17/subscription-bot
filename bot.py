@@ -611,8 +611,20 @@ def clear_group_media_caption_command(message):
     bot.reply_to(message, "✅ Saved media caption cleared.")
 
 def _is_group_admin_media_sender(message):
-    if not message.from_user or not message.chat or message.chat.type not in ('group', 'supergroup'):
+    if not message.chat or message.chat.type not in ('group', 'supergroup'):
         return False
+    # Telegram hides the real sender when an admin posts anonymously. In that
+    # case the message is sent as the group itself, which is only available to
+    # admins using the group's anonymous posting mode.
+    sender_chat = getattr(message, 'sender_chat', None)
+    if sender_chat and sender_chat.id == message.chat.id:
+        return True
+    if not message.from_user:
+        return False
+    # Some Telegram updates identify anonymous group admins through the
+    # GroupAnonymousBot user instead of (or in addition to) sender_chat.
+    if message.from_user.id == GROUP_ANONYMOUS_BOT_ID:
+        return True
     if message.from_user.is_bot:
         return False
     key = (message.chat.id, message.from_user.id)
@@ -646,7 +658,7 @@ def _message_has_supported_media(message):
 def _get_group_media_file(message):
     if getattr(message, 'photo', None):
         return 'photo', message.photo[-1].file_id
-    for kind in ('video', 'document', 'audio'):
+    for kind in ('video', 'document', 'audio', 'animation', 'voice'):
         media = getattr(message, kind, None)
         if media:
             return kind, media.file_id
@@ -747,14 +759,25 @@ def _repost_group_media(messages):
                 print(f"[group-media-caption] skipped chat={chat_id} message={message.message_id}: combined caption exceeds 1024 characters")
                 bot.reply_to(message, "⚠️ The combined caption is too long for Telegram, so I left the original media unchanged.")
                 return
-            kwargs = {
-                "caption": caption_html,
-                "parse_mode": "HTML",
-            }
+            kind, file_id = _get_group_media_file(message)
+            send_method = {
+                'photo': bot.send_photo,
+                'video': bot.send_video,
+                'document': bot.send_document,
+                'audio': bot.send_audio,
+                'animation': bot.send_animation,
+                'voice': bot.send_voice,
+            }.get(kind)
+            if not send_method or not file_id:
+                print(f"[group-media-caption] skipped chat={chat_id} message={message.message_id}: unsupported media type")
+                return
+            kwargs = {"caption": caption_html, "parse_mode": "HTML"}
             thread_id = getattr(message, 'message_thread_id', None)
             if thread_id is not None:
                 kwargs['message_thread_id'] = thread_id
-            bot.copy_message(chat_id, chat_id, message.message_id, **kwargs)
+            # Resend the received file_id so protected-content groups do not
+            # block the replacement through copyMessage's forwarding rules.
+            send_method(chat_id, file_id, **kwargs)
         else:
             media_items = []
             caption_index = next((i for i, item in enumerate(messages) if getattr(item, 'caption', None)), 0)
