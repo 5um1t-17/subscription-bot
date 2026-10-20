@@ -28,7 +28,7 @@ from bson import ObjectId
 from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
-from threading import Thread, Timer, RLock
+from threading import Thread, Timer, RLock, local
 from queue import Queue
 
 # Telegram's built-in identity when a group admin posts with "Remain anonymous" on.
@@ -50,7 +50,38 @@ def keep_alive():
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 MONGO_URI = os.getenv('MONGO_URI')
 admin_id_env = os.getenv('ADMIN_ID')
-ADMIN_ID = int(admin_id_env) if admin_id_env and admin_id_env.isdigit() else 0
+# Additional admin Telegram user IDs, separated by commas, spaces, or semicolons.
+# Keep ADMIN_ID set to the original bot owner when possible; existing channel data
+# is retained under its MongoDB admin_id even if the configured IDs later change.
+admin_ids_env = os.getenv('ADMIN_IDS', '')
+
+def _parse_admin_ids(*values):
+    parsed = []
+    for value in values:
+        for raw_id in re.split(r'[,;\s]+', value or ''):
+            raw_id = raw_id.strip()
+            if raw_id.isdigit():
+                numeric_id = int(raw_id)
+                if numeric_id not in parsed:
+                    parsed.append(numeric_id)
+    return parsed
+
+_primary_admin_candidates = _parse_admin_ids(admin_id_env)
+_additional_admin_candidates = _parse_admin_ids(admin_ids_env)
+CONFIGURED_ADMIN_ID = (_primary_admin_candidates or _additional_admin_candidates or [0])[0]
+ADMIN_ID = CONFIGURED_ADMIN_ID
+ADMIN_USER_IDS = set(_primary_admin_candidates + _additional_admin_candidates)
+_admin_request_context = local()
+
+def is_admin_user_id(user_id):
+    try:
+        return int(user_id) in ADMIN_USER_IDS
+    except (TypeError, ValueError):
+        return False
+
+def current_admin_id():
+    user_id = getattr(_admin_request_context, 'user_id', None)
+    return user_id if is_admin_user_id(user_id) else ADMIN_ID
 UPI_ID = os.getenv('UPI_ID')
 CONTACT_USERNAME = os.getenv('CONTACT_USERNAME')
 
@@ -109,6 +140,24 @@ class _BotExceptionLogger(telebot.ExceptionHandler):
 # whatever else the bot is doing at that moment. Raised to give bursts real headroom.
 bot = telebot.TeleBot(BOT_TOKEN, use_class_middlewares=True, num_threads=16,
                       exception_handler=_BotExceptionLogger())
+
+class AdminRequestContextMiddleware(BaseMiddleware):
+    """Keep admin prompt/reply flows attached to the admin who opened them."""
+    def __init__(self):
+        self.update_types = ['message', 'edited_message', 'callback_query']
+
+    def pre_process(self, update, data):
+        _admin_request_context.user_id = None
+        user = getattr(update, 'from_user', None)
+        message = getattr(update, 'message', None) or update
+        chat = getattr(message, 'chat', None)
+        if user and chat and chat.type == 'private' and is_admin_user_id(user.id):
+            _admin_request_context.user_id = user.id
+
+    def post_process(self, message, data, exception):
+        pass
+
+bot.setup_middleware(AdminRequestContextMiddleware())
 
 # --- AUTO-REACT QUEUE SYSTEM ---
 # One queue + one worker thread PER CHAT (spawned lazily, exits when idle) instead of a
@@ -477,6 +526,32 @@ pending_offer_bundle_checkouts_col = db['pending_offer_bundle_checkouts']  # bun
 fj_pending_requests_col = db['fj_pending_requests']  # Force Join pending join requests (event-based tracking)
 approved_payments_col = db['approved_payments']  # archive of approved checkouts with user details & receipt screenshots
 
+def adopt_existing_channel_owner():
+    """Keep existing channel data under its original owner when ADMIN_ID changes."""
+    global ADMIN_ID
+    try:
+        owners = list(channels_col.aggregate([
+            {"$match": {"admin_id": {"$type": "number"}}},
+            {"$group": {"_id": "$admin_id", "channel_count": {"$sum": 1}}},
+            {"$sort": {"channel_count": -1}},
+        ]))
+    except Exception as e:
+        print(f"[admin-config] couldn't inspect channel owners; keeping configured ADMIN_ID: {e}")
+        return
+    if not owners:
+        if CONFIGURED_ADMIN_ID:
+            ADMIN_USER_IDS.add(CONFIGURED_ADMIN_ID)
+        return
+
+    top_count = owners[0].get('channel_count', 0)
+    top_owner_ids = [int(doc['_id']) for doc in owners if doc.get('channel_count') == top_count]
+    data_owner = CONFIGURED_ADMIN_ID if CONFIGURED_ADMIN_ID in top_owner_ids else top_owner_ids[0]
+    if ADMIN_ID and ADMIN_ID != data_owner:
+        print(f"[admin-config] preserving existing channel owner {data_owner}; configured ID {ADMIN_ID} remains an authorized admin")
+    ADMIN_USER_IDS.add(ADMIN_ID) if ADMIN_ID else None
+    ADMIN_ID = data_owner
+    ADMIN_USER_IDS.add(data_owner)
+
 # --- Append the configured admin's saved caption to their group media ---
 GROUP_MEDIA_CAPTION_SETTING_ID = "group_media_caption"
 GROUP_MEDIA_ALBUM_SETTLE_SECONDS = 1.5
@@ -503,7 +578,7 @@ def _save_group_media_caption_value(caption):
     return True
 
 def _is_configured_admin_message(message):
-    return bool(ADMIN_ID and message.from_user and message.from_user.id == ADMIN_ID)
+    return bool(CONFIGURED_ADMIN_ID and message.from_user and message.from_user.id == CONFIGURED_ADMIN_ID)
 
 @bot.message_handler(commands=['setmediacaption'], func=_is_configured_admin_message)
 def set_group_media_caption_command(message):
@@ -540,9 +615,6 @@ def _is_group_admin_media_sender(message):
         return False
     if message.from_user.is_bot:
         return False
-    if ADMIN_ID and message.from_user.id == ADMIN_ID:
-        return True
-
     key = (message.chat.id, message.from_user.id)
     now = time.monotonic()
     with _group_admin_status_lock:
@@ -1174,7 +1246,7 @@ class ForceJoinMiddleware(BaseMiddleware):
                 if chat is None or user is None or getattr(chat, 'type', None) != 'private':
                     return None
                 user_id = user.id
-                if user_id == ADMIN_ID:
+                if is_admin_user_id(user_id):
                     return None
                 if (update.data or '').startswith('fj_'):
                     return None  # Force Join's own buttons must always be reachable
@@ -1191,7 +1263,7 @@ class ForceJoinMiddleware(BaseMiddleware):
             user = getattr(update, 'from_user', None)
             if chat is None or user is None or getattr(chat, 'type', None) != 'private':
                 return None
-            if user.id == ADMIN_ID:
+            if is_admin_user_id(user.id):
                 return None
             if getattr(bot, 'user', None) and user.id == bot.user.id:
                 return None
@@ -1294,7 +1366,7 @@ def handle_fj_chat_member_update(update):
 
 # ---- Admin: /forcejoin settings panel ----
 
-@bot.message_handler(commands=['forcejoin'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['forcejoin'], func=lambda m: is_admin_user_id(m.from_user.id))
 def forcejoin_command(message):
     send_force_join_menu(message.chat.id)
 
@@ -1925,16 +1997,19 @@ def send_prompt(chat_id, text, reply_markup=None, parse_mode=None):
     """Send a message that is awaiting a text/photo reply via register_next_step_handler.
     These NEVER auto-vanish, regardless of how the flow was entered (command or button),
     because the person still needs to read it to complete their reply."""
+    if chat_id == ADMIN_ID:
+        chat_id = current_admin_id()
     return bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 def send_admin_reply(text, parse_mode=None, reply_markup=None, delay=ADMIN_REPLY_VANISH_SECONDS):
     """Send a confirmation or error reply to the admin that auto-deletes after `delay` seconds
     (default 20 s). Used for one-shot result messages like '✅ Price updated' or '❌ Invalid format'
     so the admin chat stays clean without the admin having to manually dismiss anything."""
-    if not ADMIN_ID:
+    admin_chat_id = current_admin_id()
+    if not admin_chat_id:
         return None
-    msg = bot.send_message(ADMIN_ID, text, parse_mode=parse_mode, reply_markup=reply_markup)
-    schedule_delete(ADMIN_ID, msg.message_id, delay)
+    msg = bot.send_message(admin_chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
+    schedule_delete(admin_chat_id, msg.message_id, delay)
     return msg
 
 def _safe_reply(message, text, parse_mode=None, delay=COMMAND_VANISH_SECONDS):
@@ -2417,8 +2492,10 @@ def format_small_tag(tag):
     text = " ".join(str(tag).strip().upper().split())
     return f"⁽{text.translate(SMALL_TAG_CHARS)}⁾˖✧" if text else ""
 
-def recently_added_channel_ids(admin_id=ADMIN_ID):
+def recently_added_channel_ids(admin_id=None):
     """Return all channels created in the last 24 hours plus admin-marked legacy channels."""
+    if admin_id is None:
+        admin_id = ADMIN_ID
     docs = list(channels_col.find({"admin_id": admin_id}))
     cutoff = datetime.now().timestamp() - (24 * 60 * 60)
     recent_ids = set()
@@ -2674,7 +2751,7 @@ def cb_main_menu_back(call):
 def cb_close_ui(call):
     bot.answer_callback_query(call.id, "Closed.")
     user_id = getattr(call.from_user, 'id', None)
-    if call.message.chat.id == ADMIN_ID:
+    if call.message.chat.id in ADMIN_USER_IDS:
         try:
             bot.clear_step_handler_by_chat_id(call.message.chat.id)
         except Exception:
@@ -2871,9 +2948,9 @@ def free_group_join_handler(call):
 # This wires up the missing admin-facing command + button for it.
 _menu_image_settings_message_id = {}
 
-@bot.message_handler(commands=['setmenuimage'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['setmenuimage'], func=lambda m: is_admin_user_id(m.from_user.id))
 def set_menu_image_start(message):
-    _show_menu_image_settings(ADMIN_ID)
+    _show_menu_image_settings(current_admin_id())
 
 
 def _show_menu_image_settings(chat_id, old_message_id=None):
@@ -2929,7 +3006,7 @@ def save_menu_image(message):
     file_id = message.photo[-1].file_id  # highest resolution
     set_menu_image_file_id(file_id)
     send_admin_reply("✅ Main menu banner updated.")
-    _show_menu_image_settings(ADMIN_ID, _menu_image_settings_message_id.get(ADMIN_ID))
+    _show_menu_image_settings(current_admin_id(), _menu_image_settings_message_id.get(current_admin_id()))
 
 @bot.callback_query_handler(func=lambda call: call.data == "main_channels")
 def cb_main_channels(call):
@@ -3001,7 +3078,7 @@ def _render_bundle_list(chat_id, message_id=None):
     else:
         send_admin_reply(text, parse_mode="Markdown", reply_markup=markup, delay=COMMAND_VANISH_SECONDS)
 
-@bot.message_handler(commands=['bundles'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['bundles'], func=lambda m: is_admin_user_id(m.from_user.id))
 def bundles_command(message):
     _render_bundle_list(message.chat.id)
 
@@ -3266,18 +3343,18 @@ def _bundle_add_duration(message, title, description, price):
     except Exception:
         _bundle_prompt(message, "Invalid duration. Use Days:Hours:Mins or lifetime.", _bundle_add_duration, title, description, price); return
     bundle_id = secrets.token_hex(4)
-    bundle_selection_state[ADMIN_ID] = {"bundle_id": bundle_id, "title": title, "description": description, "price": price, "duration_minutes": duration, "new": True, "channel_ids": []}
-    _render_bundle_channel_picker(ADMIN_ID, None)
+    bundle_selection_state[current_admin_id()] = {"bundle_id": bundle_id, "title": title, "description": description, "price": price, "duration_minutes": duration, "new": True, "channel_ids": []}
+    _render_bundle_channel_picker(current_admin_id(), None)
 
 def _render_bundle_channel_picker(chat_id, message_id, bundle_id=None):
-    state = bundle_selection_state.get(ADMIN_ID)
+    state = bundle_selection_state.get(current_admin_id())
     if bundle_id:
         bundle = _bundle_doc(bundle_id)
         if not bundle: return
         state = dict(bundle)
         state['channel_ids'] = [int(x) for x in bundle.get('channel_ids', [])]
         state['new'] = False
-        bundle_selection_state[ADMIN_ID] = state
+        bundle_selection_state[current_admin_id()] = state
     if not state: return
     selected = {int(x) for x in state.get('channel_ids', [])}
     markup = InlineKeyboardMarkup()
@@ -3301,7 +3378,7 @@ def cb_bundle_channels(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('obpick_'))
 def cb_bundle_pick(call):
     if not _require_admin(call): return
-    state = bundle_selection_state.get(ADMIN_ID)
+    state = bundle_selection_state.get(current_admin_id())
     if not state: return
     ch_id = int(call.data.split('_', 1)[1])
     selected = {int(x) for x in state.get('channel_ids', [])}
@@ -3313,7 +3390,7 @@ def cb_bundle_pick(call):
 @bot.callback_query_handler(func=lambda call: call.data == 'obsave')
 def cb_bundle_save(call):
     if not _require_admin(call): return
-    state = bundle_selection_state.pop(ADMIN_ID, None)
+    state = bundle_selection_state.pop(current_admin_id(), None)
     if not state or not state.get('channel_ids'):
         bot.answer_callback_query(call.id, "Select at least one channel.", show_alert=True); return
     now = datetime.now()
@@ -3610,7 +3687,7 @@ def _is_chat_admin_message(message):
         return True
 
     if message.from_user:
-        if ADMIN_ID and message.from_user.id == ADMIN_ID:
+        if is_admin_user_id(message.from_user.id):
             return True
         if message.from_user.id == GROUP_ANONYMOUS_BOT_ID:
             return True
@@ -3628,8 +3705,7 @@ def _is_chat_admin_message(message):
 
 def _get_protected_admin_ids(chat_id):
     admin_ids = {GROUP_ANONYMOUS_BOT_ID}
-    if ADMIN_ID:
-        admin_ids.add(ADMIN_ID)
+    admin_ids.update(ADMIN_USER_IDS)
     try:
         admin_ids.add(bot.get_me().id)
     except Exception:
@@ -3947,8 +4023,11 @@ def setup_commands():
 
     ]
     bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
-    if ADMIN_ID:
-        bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(ADMIN_ID))
+    for admin_user_id in sorted(ADMIN_USER_IDS):
+        try:
+            bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(admin_user_id))
+        except Exception as e:
+            print(f"[admin-config] couldn't register admin commands for {admin_user_id}: {e}")
     try:
         scope_cls = (
             getattr(telebot.types, 'BotCommandScopeAllChatAdministrators', None) or
@@ -3992,6 +4071,7 @@ def _admin_menu_markup():
 
 
 def show_admin_menu(chat_id, message_id=None):
+    admin_user_id = current_admin_id()
     text = "👑 <b>Admin Panel</b>\n\nChoose an action:"
     markup = _admin_menu_markup()
     if message_id:
@@ -3999,7 +4079,7 @@ def show_admin_menu(chat_id, message_id=None):
         return
     # A fresh /start should replace the previous admin card immediately so the
     # admin never has multiple active panels/buttons open at once.
-    previous = last_bot_msg.pop(ADMIN_ID, None)
+    previous = last_bot_msg.pop(admin_user_id, None)
     if previous:
         previous_chat_id, previous_message_id = previous
         cancel_delete(previous_chat_id, previous_message_id)
@@ -4008,7 +4088,7 @@ def show_admin_menu(chat_id, message_id=None):
         except Exception:
             pass
     reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML", vanish_delay=None)
-    track_msg(ADMIN_ID, reply)
+    track_msg(admin_user_id, reply)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
@@ -4020,15 +4100,15 @@ def admin_menu_action(call):
     action = call.data
 
     if action == 'admin_add':
-        _prompt_add_channel(ADMIN_ID)
+        _prompt_add_channel(current_admin_id())
     elif action == 'admin_channels':
         show_channel_list(chat_id, call.message.message_id)
     elif action == 'admin_bundles':
         _render_bundle_list(chat_id, call.message.message_id)
     elif action == 'admin_subscribers':
-        show_users_list(chat_id, user_id=ADMIN_ID, message_id=call.message.message_id)
+        show_users_list(chat_id, user_id=current_admin_id(), message_id=call.message.message_id)
     elif action == 'admin_removesubscriber':
-        show_active_users(chat_id, user_id=ADMIN_ID, message_id=call.message.message_id)
+        show_active_users(chat_id, user_id=current_admin_id(), message_id=call.message.message_id)
     elif action == 'admin_pending':
         pending_checkouts_handler(call.message, message_id=call.message.message_id)
     elif action == 'admin_approved':
@@ -4042,7 +4122,7 @@ def admin_menu_action(call):
     elif action == 'admin_forcejoin':
         send_force_join_menu(chat_id, call.message.message_id)
     elif action == 'admin_cleanup':
-        show_cleanup_menu(chat_id, message_id=call.message.message_id, user_id=ADMIN_ID)
+        show_cleanup_menu(chat_id, message_id=call.message.message_id, user_id=current_admin_id())
     elif action == 'admin_dbstats':
         dbstats_handler(call.message, message_id=call.message.message_id)
     elif action == 'admin_menuimage':
@@ -4091,7 +4171,7 @@ def _require_admin(call):
     """Every admin free-trial callback must pass through here. Only ADMIN_ID may
     run admin actions; callback_data is never trusted (never rely on a button
     having merely been shown to an admin)."""
-    if not getattr(call, 'from_user', None) or not ADMIN_ID or call.from_user.id != ADMIN_ID:
+    if not getattr(call, 'from_user', None) or not is_admin_user_id(call.from_user.id):
         try:
             bot.answer_callback_query(call.id, "Access denied.")
         except Exception:
@@ -4838,7 +4918,7 @@ def start_handler(message):
             pass
 
     # Admin Panel Greeting
-    if user_id == ADMIN_ID:
+    if is_admin_user_id(user_id):
         if message.chat.type == 'private':
             show_admin_menu(message.chat.id)
         else:
@@ -4932,7 +5012,7 @@ def users_handler(message):
     last name, subscribed plan/offer name, subscription start date, and expiry date/time."""
     if not message.from_user:
         return
-    if not ADMIN_ID or message.from_user.id != ADMIN_ID:
+    if not is_admin_user_id(message.from_user.id):
         send_command_reply(message, "⛔ *Access Denied.*\n\nThe `/users` command is restricted to configured bot administrators.", parse_mode="Markdown")
         return
 
@@ -5143,11 +5223,12 @@ def browse_channel(call):
 
 # --- ADMIN: CHANNEL LIST ---
 
-@bot.message_handler(commands=['channels'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['channels'], func=lambda m: is_admin_user_id(m.from_user.id))
 def list_channels(message):
     show_channel_list(message.chat.id)
 
 def show_channel_list(chat_id, message_id=None):
+    admin_user_id = current_admin_id()
     markup = InlineKeyboardMarkup()
     # Keep channel ordering easy to find from the /channels screen.
     markup.add(InlineKeyboardButton("🔀 Reorder Channels", callback_data="chorder_menu"))
@@ -5177,10 +5258,10 @@ def show_channel_list(chat_id, message_id=None):
         edit_menu(chat_id, message_id, text, reply_markup=markup)
     else:
         # Direct /channels command: animate out previous, send new, schedule vanish
-        dismiss_previous(chat_id, ADMIN_ID)
+        dismiss_previous(chat_id, admin_user_id)
         reply = bot.send_message(chat_id, text, reply_markup=markup)
         schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
-        track_msg(ADMIN_ID, reply)
+        track_msg(admin_user_id, reply)
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_channels")
 def cb_back_channels(call):
@@ -5227,9 +5308,9 @@ def show_admin_dashboard(chat_id, message_id=None):
 
 # --- ADMIN: ADD NEW CHANNEL ---
 
-@bot.message_handler(commands=['add'], func=lambda m: m.chat.type == 'private' and m.from_user and m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['add'], func=lambda m: m.chat.type == 'private' and m.from_user and is_admin_user_id(m.from_user.id))
 def add_channel_start(message):
-    _prompt_add_channel(ADMIN_ID)
+    _prompt_add_channel(message.chat.id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "add_new")
 def cb_add_new(call):
@@ -5237,7 +5318,7 @@ def cb_add_new(call):
         return
     bot.answer_callback_query(call.id)
     # This prompt accepts a forward, a numeric chat ID, or a public @username.
-    msg = _prompt_add_channel(ADMIN_ID)
+    msg = _prompt_add_channel(call.message.chat.id)
 
 
 def _prompt_add_channel(chat_id):
@@ -5409,7 +5490,7 @@ def _begin_channel_preview_upload(prompt_message, ch_id, is_initial=False):
         old_state = _preview_uploads.pop(ch_id, None)
         if old_state and old_state.get('timer'):
             old_state['timer'].cancel()
-    _preview_upload_sessions[ADMIN_ID] = {
+    _preview_upload_sessions[current_admin_id()] = {
         'ch_id': ch_id,
         'is_initial': is_initial,
         'prompt_message_id': getattr(prompt_message, 'message_id', None),
@@ -5417,7 +5498,7 @@ def _begin_channel_preview_upload(prompt_message, ch_id, is_initial=False):
 
 
 def _is_channel_preview_upload_message(message):
-    if not getattr(message, 'from_user', None) or message.from_user.id != ADMIN_ID:
+    if not getattr(message, 'from_user', None) or not is_admin_user_id(message.from_user.id):
         return False
     session = _preview_upload_sessions.get(message.chat.id)
     if not session:
@@ -5433,11 +5514,11 @@ def handle_channel_preview_upload_message(message):
         save_channel_screenshot(message, session['ch_id'], session.get('is_initial', False))
 
 
-def _finish_channel_preview_upload(ch_id, media_items, is_initial):
+def _finish_channel_preview_upload(ch_id, media_items, is_initial, admin_user_id=None):
     print(f"PREVIEW_UPLOAD_COMPLETE channel={ch_id} items={len(media_items)} initial={is_initial}", flush=True)
     _preview_drafts[ch_id] = {'items': list(media_items), 'is_initial': is_initial}
     _preview_editor_indices[ch_id] = 0
-    _render_preview_editor(ch_id, ADMIN_ID, is_draft=True)
+    _render_preview_editor(ch_id, admin_user_id or current_admin_id(), is_draft=True)
 
 
 def _finalize_channel_preview_upload(ch_id):
@@ -5449,22 +5530,27 @@ def _finalize_channel_preview_upload(ch_id):
             state['timer'].cancel()
         items = [entry for _, entry in sorted(state['items'], key=lambda pair: pair[0])]
         is_initial = state['is_initial']
+        admin_user_id = state.get('admin_user_id') or ADMIN_ID
         if items:
-            session = _preview_upload_sessions.get(ADMIN_ID)
+            session = _preview_upload_sessions.get(admin_user_id)
             if session and session.get('ch_id') == ch_id:
-                _preview_upload_sessions.pop(ADMIN_ID, None)
+                _preview_upload_sessions.pop(admin_user_id, None)
     if not items:
-        send_admin_reply("No preview media received yet. Send photo/video items, then send Done.")
+        if admin_user_id:
+            msg = bot.send_message(admin_user_id, "No preview media received yet. Send photo/video items, then send Done.")
+            schedule_delete(admin_user_id, msg.message_id, ADMIN_REPLY_VANISH_SECONDS)
         return
-    _finish_channel_preview_upload(ch_id, items, is_initial)
+    _finish_channel_preview_upload(ch_id, items, is_initial, admin_user_id=admin_user_id)
 
 
-def _schedule_channel_preview_finalize(ch_id, is_initial):
+def _schedule_channel_preview_finalize(ch_id, is_initial, admin_user_id):
     with _preview_upload_lock:
         state = _preview_uploads.setdefault(ch_id, {
-            'items': [], 'seen_message_ids': set(), 'is_initial': is_initial, 'timer': None,
+            'items': [], 'seen_message_ids': set(), 'is_initial': is_initial,
+            'admin_user_id': admin_user_id, 'timer': None,
         })
         state['is_initial'] = is_initial
+        state['admin_user_id'] = admin_user_id
         if state.get('timer'):
             state['timer'].cancel()
         timer = Timer(PREVIEW_DONE_SETTLE_SECONDS, _finalize_channel_preview_upload, args=(ch_id,))
@@ -5476,14 +5562,15 @@ def _schedule_channel_preview_finalize(ch_id, is_initial):
 def save_channel_screenshot(message, ch_id, is_initial=False):
     """Collect individual media and Telegram album parts until the admin sends Done."""
     text = (message.text or '').strip().lower() if message.text else ''
+    admin_user_id = message.chat.id
     if text in ('done', '/done'):
-        _schedule_channel_preview_finalize(ch_id, is_initial)
+        _schedule_channel_preview_finalize(ch_id, is_initial, admin_user_id)
         send_admin_reply("✅ Got it. Preparing all preview media together...")
         return
     if text in ('/skip', 'skip'):
         with _preview_upload_lock:
             state = _preview_uploads.pop(ch_id, None)
-            _preview_upload_sessions.pop(ADMIN_ID, None)
+            _preview_upload_sessions.pop(admin_user_id, None)
             if state and state.get('timer'):
                 state['timer'].cancel()
         channels_col.update_one({"channel_id": ch_id}, {"$unset": {"screenshot_file_id": "", "preview_media": ""}})
@@ -5502,8 +5589,10 @@ def save_channel_screenshot(message, ch_id, is_initial=False):
     group_id = getattr(message, 'media_group_id', None)
     with _preview_upload_lock:
         state = _preview_uploads.setdefault(ch_id, {
-            'items': [], 'seen_message_ids': set(), 'is_initial': is_initial, 'timer': None,
+            'items': [], 'seen_message_ids': set(), 'is_initial': is_initial,
+            'admin_user_id': admin_user_id, 'timer': None,
         })
+        state['admin_user_id'] = admin_user_id
         message_id = getattr(message, 'message_id', None)
         if len(state['items']) >= 10 and message_id not in state['seen_message_ids']:
             send_admin_reply("Telegram albums support up to 10 preview items. Send Done to review the first 10.")
@@ -5521,9 +5610,9 @@ def save_channel_screenshot(message, ch_id, is_initial=False):
 
 
 def _clear_preview_editor_album(ch_id):
-    for message_id in _preview_editor_album_ids.pop(ch_id, []):
+    for chat_id, message_id in _preview_editor_album_ids.pop(ch_id, []):
         try:
-            bot.delete_message(ADMIN_ID, message_id)
+            bot.delete_message(chat_id, message_id)
         except Exception:
             pass
 
@@ -5579,7 +5668,7 @@ def _render_preview_editor(ch_id, chat_id, is_draft=True, message_id=None):
             preview_msg = bot.send_message(
                 chat_id, text, reply_markup=markup, parse_mode='HTML', vanish_delay=None,
             )
-        album_ids.append(preview_msg.message_id)
+        album_ids.append((chat_id, preview_msg.message_id))
     except Exception as e:
         print(f"[preview_editor] preview/control send failed for {ch_id}: {e}", flush=True)
         send_admin_reply("⚠️ Couldn't display preview controls. Please reopen Manage Preview.")
@@ -7249,7 +7338,7 @@ def cout_approve_handler(call):
     _update_review_message(call.message.chat.id, call.message.message_id, caption,
                            is_photo=bool(getattr(call.message, 'photo', None)), delay=APPROVED_VANISH_SECONDS)
 
-@bot.message_handler(commands=['stats'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['stats'], func=lambda m: is_admin_user_id(m.from_user.id))
 def stats_handler(message, message_id=None):
     total_channels = channels_col.count_documents({"admin_id": ADMIN_ID})
     now = datetime.now().timestamp()
@@ -7303,7 +7392,7 @@ def about_handler(message):
             return
         chat_id = chat.id
     else:
-        if not message.from_user or not ADMIN_ID or message.from_user.id != ADMIN_ID:
+        if not message.from_user or not is_admin_user_id(message.from_user.id):
             send_command_reply(message, "❌ Access denied.")
             return
         chat_id = None
@@ -7428,7 +7517,7 @@ def about_handler(message):
 
 # --- ADMIN: DATABASE STORAGE (dbstats / cleanup) ---
 
-@bot.message_handler(commands=['dbstats'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['dbstats'], func=lambda m: is_admin_user_id(m.from_user.id))
 def dbstats_handler(message, message_id=None):
     """Sends DB storage breakdown. The /dbstats command message is deleted immediately,
     and the reply vanishes after COMMAND_VANISH_SECONDS.
@@ -7475,13 +7564,13 @@ def dbstats_handler(message, message_id=None):
         else:
             send_command_reply(message, error_text)
 
-@bot.message_handler(commands=['cleanup'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['cleanup'], func=lambda m: is_admin_user_id(m.from_user.id))
 def cleanup_handler(message):
     # Animate out previous bot reply, then show cleanup menu
     dismiss_previous(message.chat.id, message.from_user.id)
     show_cleanup_menu(message.chat.id, user_id=message.from_user.id)
 
-@bot.message_handler(commands=['clearreactcache'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['clearreactcache'], func=lambda m: is_admin_user_id(m.from_user.id))
 def clear_react_cache_handler(message):
     """Admin escape hatch: wipe the auto-react backlog (in-memory + persisted) so the
     bot stops slowly working through a large/stale queue and reacts promptly to new
@@ -7514,7 +7603,7 @@ def clear_react_cache_handler(message):
             f"In-memory: {mem} | Persisted: {persisted}\n\n"
             f"New messages will start getting reactions promptly again.")
 
-@bot.message_handler(commands=['reactcachestatus'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['reactcachestatus'], func=lambda m: is_admin_user_id(m.from_user.id))
 def react_cache_status_handler(message):
     """Quick check of how backed-up the auto-react queue is before deciding whether
     to /clearreactcache."""
@@ -7648,7 +7737,7 @@ def cb_cleanup_seenusers_confirm(call):
     edit_menu(call.message.chat.id, call.message.message_id,
         f"✅ Deleted {result.deleted_count} inactive user records.", reply_markup=markup)
 
-@bot.message_handler(commands=['pending'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['pending'], func=lambda m: is_admin_user_id(m.from_user.id))
 def pending_checkouts_handler(message, message_id=None):
     """Show all pending checkouts awaiting admin approval, with screenshot if available."""
     try:
@@ -7856,7 +7945,7 @@ def show_approved_payments_list(chat_id, message_id=None, message=None, page=0, 
     else:
         bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
 
-@bot.message_handler(commands=['approved_payments', 'approvedpayments'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['approved_payments', 'approvedpayments'], func=lambda m: is_admin_user_id(m.from_user.id))
 def approved_payments_command(message):
     """Admin command /approved_payments to browse approved checkouts & receipts."""
     record_seen_user(message.from_user)
@@ -8011,12 +8100,12 @@ def _show_broadcast_menu(chat_id, message_id=None):
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
     else:
-        dismiss_previous(chat_id, ADMIN_ID)
+        dismiss_previous(chat_id, current_admin_id())
         reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
         schedule_delete(chat_id, reply.message_id, MENU_VANISH_SECONDS)
-        track_msg(ADMIN_ID, reply)
+        track_msg(current_admin_id(), reply)
 
-@bot.message_handler(commands=['broadcast'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['broadcast'], func=lambda m: is_admin_user_id(m.from_user.id))
 def broadcast_start(message):
     _show_broadcast_menu(message.chat.id)
 
@@ -8041,7 +8130,7 @@ def _bc_sched_time(message):
     if not message.text:
         send_admin_reply("❌ Please send plain text for the scheduled broadcast. Use /broadcast to try again.")
         return
-    _bc_pending_text[ADMIN_ID] = message.text
+    _bc_pending_text[current_admin_id()] = message.text
     msg = send_prompt(ADMIN_ID,
         "⏰ *When should this drop? (IST, UTC+05:30)*\n\n"
         "Accepted formats:\n"
@@ -8089,7 +8178,7 @@ def _bc_parse_time(raw):
     return None
 
 def _bc_sched_save(message):
-    text = _bc_pending_text.pop(ADMIN_ID, None)
+    text = _bc_pending_text.pop(current_admin_id(), None)
     if text is None:
         send_admin_reply("❌ Broadcast flow expired — start again with /broadcast.")
         return
@@ -8179,7 +8268,7 @@ def cb_bc_del(call):
     else:
         send_admin_reply("❌ That broadcast is already sent or doesn't exist.")
 
-@bot.message_handler(commands=['listbroadcasts'], func=lambda m: m.from_user.id == ADMIN_ID)
+@bot.message_handler(commands=['listbroadcasts'], func=lambda m: is_admin_user_id(m.from_user.id))
 def listbroadcasts_handler(message):
     dismiss_previous(message.chat.id, message.from_user.id)
     show_scheduled_broadcasts(message.chat.id)
@@ -8444,7 +8533,7 @@ def show_active_users(chat_id, user_id=None, message=None, page=0, per_page=20, 
 def removeuser_handler(message):
     if not message.from_user:
         return
-    if not ADMIN_ID or message.from_user.id != ADMIN_ID:
+    if not is_admin_user_id(message.from_user.id):
         send_command_reply(message, f"❌ Access denied. Your User ID (`{message.from_user.id}`) is not configured as ADMIN_ID.", parse_mode="Markdown")
         return
     if message.chat.type != 'private':
@@ -9060,7 +9149,7 @@ def sync_handler(message):
         return
 
     # ---- Private DM (bot owner only): tracked chats overview / targeted sync ----
-    if not message.from_user or not ADMIN_ID or message.from_user.id != ADMIN_ID:
+    if not message.from_user or not is_admin_user_id(message.from_user.id):
         send_command_reply(message, "❌ Access denied.")
         return
 
@@ -9117,7 +9206,7 @@ def import_members_handler(message):
         args = message.text.split()[1:]
         list_args = args
     else:
-        if not message.from_user or not ADMIN_ID or message.from_user.id != ADMIN_ID:
+        if not message.from_user or not is_admin_user_id(message.from_user.id):
             send_command_reply(message, "❌ Access denied.")
             return
         args = message.text.split()[1:]
@@ -9580,6 +9669,7 @@ def cleanup_stale_fj_pending_requests():
 if __name__ == '__main__':
     keep_alive()
     setup_indexes()
+    adopt_existing_channel_owner()
     bootstrap_counters()
     backfill_expired_subs()
     backfill_legacy_approved_payments()
