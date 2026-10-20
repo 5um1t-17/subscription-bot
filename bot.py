@@ -8,6 +8,7 @@ import secrets
 import traceback
 import math
 from html import escape
+from html.parser import HTMLParser
 import telebot
 try:
     import segno
@@ -18,7 +19,7 @@ try:
 except ImportError:
     qrcode = None
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputFile, InputMediaPhoto, InputMediaVideo
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputFile, InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
 from telebot.handler_backends import BaseMiddleware, CancelUpdate
 from pymongo import MongoClient
 from pymongo import ReturnDocument
@@ -166,6 +167,41 @@ _reaction_queues_lock = _threading.Lock()
 
 _last_reaction_by_chat = {}
 _reaction_emoji_lock = _threading.Lock()
+
+# Telegram delivers every item in a media album as a separate message update.
+# Remember album IDs briefly so the album produces only one auto-reaction.
+_reacted_media_groups = {}
+_media_group_reaction_lock = _threading.Lock()
+MEDIA_GROUP_REACTION_DEDUPE_SECONDS = 600
+
+def queue_message_reaction(message):
+    """Queue one reaction per ordinary message, or one per media album."""
+    chat_id = getattr(getattr(message, 'chat', None), 'id', None)
+    message_id = getattr(message, 'message_id', None)
+    if chat_id is None or message_id is None:
+        return False
+
+    media_group_id = getattr(message, 'media_group_id', None)
+    group_key = None
+    if media_group_id:
+        now = time.monotonic()
+        group_key = (chat_id, str(media_group_id))
+        with _media_group_reaction_lock:
+            expired = [key for key, expiry in _reacted_media_groups.items() if expiry <= now]
+            for key in expired:
+                _reacted_media_groups.pop(key, None)
+            if group_key in _reacted_media_groups:
+                return False
+            _reacted_media_groups[group_key] = now + MEDIA_GROUP_REACTION_DEDUPE_SECONDS
+
+    try:
+        queue_reaction(chat_id, message_id)
+    except Exception:
+        if group_key is not None:
+            with _media_group_reaction_lock:
+                _reacted_media_groups.pop(group_key, None)
+        raise
+    return True
 
 def _pick_next_reaction_emoji(chat_id):
     """Picks an emoji from REACT_EMOJIS ensuring that the chosen emoji cannot be the same
@@ -373,7 +409,7 @@ class AutoReactMiddleware(BaseMiddleware):
             print(f"[auto-react] pre_process error for chat {getattr(getattr(message, 'chat', None), 'id', '?')} "
                   f"message {getattr(message, 'message_id', '?')}: {e}")
             try:
-                queue_reaction(message.chat.id, message.message_id)
+                queue_message_reaction(message)
             except Exception:
                 pass
 
@@ -410,7 +446,7 @@ class AutoReactMiddleware(BaseMiddleware):
 
         if message.from_user and message.from_user.is_bot and not is_anon_admin:
             return
-        queue_reaction(message.chat.id, message.message_id)
+        queue_message_reaction(message)
 
     def post_process(self, message, data, exception):
         pass
@@ -440,6 +476,264 @@ offer_bundles_col = db['offer_bundles']        # admin-created custom bundles (f
 pending_offer_bundle_checkouts_col = db['pending_offer_bundle_checkouts']  # bundle purchases awaiting admin approval
 fj_pending_requests_col = db['fj_pending_requests']  # Force Join pending join requests (event-based tracking)
 approved_payments_col = db['approved_payments']  # archive of approved checkouts with user details & receipt screenshots
+
+# --- Append the configured admin's saved caption to their group media ---
+GROUP_MEDIA_CAPTION_SETTING_ID = "group_media_caption"
+GROUP_MEDIA_ALBUM_SETTLE_SECONDS = 1.5
+GROUP_ADMIN_CACHE_SECONDS = 60
+_group_media_album_batches = {}
+_group_media_album_lock = RLock()
+_group_admin_status_cache = {}
+_group_admin_status_lock = RLock()
+_bot_delete_permission_cache = {}
+
+def get_group_media_caption():
+    setting = settings_col.find_one({"_id": GROUP_MEDIA_CAPTION_SETTING_ID})
+    return (setting.get("caption") or "").strip() if setting else ""
+
+def _save_group_media_caption_value(caption):
+    caption = (caption or "").strip()
+    if not caption:
+        return False
+    settings_col.update_one(
+        {"_id": GROUP_MEDIA_CAPTION_SETTING_ID},
+        {"$set": {"caption": caption}},
+        upsert=True,
+    )
+    return True
+
+def _is_configured_admin_message(message):
+    return bool(ADMIN_ID and message.from_user and message.from_user.id == ADMIN_ID)
+
+@bot.message_handler(commands=['setmediacaption'], func=_is_configured_admin_message)
+def set_group_media_caption_command(message):
+    if message.chat.type != 'private':
+        bot.reply_to(message, "Please set the saved media caption in a private chat with the bot.")
+        return
+    caption = (message.text or "").partition(' ')[2].strip()
+    if not caption:
+        bot.reply_to(message, "Usage: /setmediacaption followed by the caption to append. Telegram HTML such as <b>bold</b>, <i>italic</i>, and <a href=\"https://example.com\">links</a> is supported.")
+        return
+    if len(_caption_visible_text(caption)) > 1024:
+        bot.reply_to(message, "The saved caption must be 1024 characters or fewer.")
+        return
+    _save_group_media_caption_value(caption)
+    bot.reply_to(message, "✅ Saved media caption updated.")
+
+@bot.message_handler(commands=['mediacaption'], func=_is_configured_admin_message)
+def show_group_media_caption_command(message):
+    if message.chat.type != 'private':
+        return
+    caption = get_group_media_caption()
+    bot.reply_to(message, f"Current saved media caption:\n\n{caption}" if caption else "No saved media caption is set.")
+
+@bot.message_handler(commands=['clearmediacaption'], func=_is_configured_admin_message)
+def clear_group_media_caption_command(message):
+    if message.chat.type != 'private':
+        bot.reply_to(message, "Please clear the saved media caption in a private chat with the bot.")
+        return
+    settings_col.delete_one({"_id": GROUP_MEDIA_CAPTION_SETTING_ID})
+    bot.reply_to(message, "✅ Saved media caption cleared.")
+
+def _is_group_admin_media_sender(message):
+    if not message.from_user or not message.chat or message.chat.type not in ('group', 'supergroup'):
+        return False
+    if message.from_user.is_bot:
+        return False
+    if ADMIN_ID and message.from_user.id == ADMIN_ID:
+        return True
+
+    key = (message.chat.id, message.from_user.id)
+    now = time.monotonic()
+    with _group_admin_status_lock:
+        cached = _group_admin_status_cache.get(key)
+        if cached and cached[0] > now:
+            return cached[1]
+    try:
+        member = bot.get_chat_member(message.chat.id, message.from_user.id)
+        is_admin = getattr(member, 'status', None) in ('administrator', 'creator')
+    except Exception as e:
+        print(f"[group-media-caption] couldn't verify sender admin status chat={message.chat.id} user={message.from_user.id}: {e}")
+        return False
+    with _group_admin_status_lock:
+        _group_admin_status_cache[key] = (now + GROUP_ADMIN_CACHE_SECONDS, is_admin)
+        expired = [cache_key for cache_key, value in _group_admin_status_cache.items() if value[0] <= now]
+        for cache_key in expired:
+            _group_admin_status_cache.pop(cache_key, None)
+    return is_admin
+
+def _message_has_supported_media(message):
+    return any(getattr(message, attr, None) for attr in ('photo', 'video', 'document', 'audio', 'animation', 'voice'))
+
+def _get_group_media_file(message):
+    if getattr(message, 'photo', None):
+        return 'photo', message.photo[-1].file_id
+    for kind in ('video', 'document', 'audio'):
+        media = getattr(message, kind, None)
+        if media:
+            return kind, media.file_id
+    return None, None
+
+class _CaptionTextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+def _caption_visible_text(caption_html):
+    """Return the visible text in the saved HTML caption for duplicate checks."""
+    parser = _CaptionTextExtractor()
+    try:
+        parser.feed(caption_html or '')
+        parser.close()
+    except Exception:
+        return ''
+    return ''.join(parser.parts).strip()
+
+def _caption_as_html(caption, entities=None):
+    """Escape existing caption text and retain its Telegram formatting entities."""
+    return telebot.formatting.apply_html_entities(caption or '', entities or None)
+
+def _append_saved_caption_html(original_caption, original_entities, saved_caption):
+    original_html = _caption_as_html(original_caption, original_entities)
+    return f"{original_html}\n\n{saved_caption}" if original_html else saved_caption
+
+def _caption_already_present(messages, saved_caption):
+    saved_text = _caption_visible_text(saved_caption)
+    return bool(saved_text) and any(
+        saved_text in (getattr(message, 'caption', None) or '')
+        for message in messages
+    )
+
+def _bot_can_delete_group_messages(chat_id):
+    now = time.monotonic()
+    with _group_admin_status_lock:
+        cached = _bot_delete_permission_cache.get(chat_id)
+        if cached and cached[0] > now:
+            return cached[1]
+    try:
+        bot_id = getattr(getattr(bot, 'user', None), 'id', None) or bot.get_me().id
+        member = bot.get_chat_member(chat_id, bot_id)
+        can_delete = (
+            getattr(member, 'status', None) == 'creator'
+            or (
+                getattr(member, 'status', None) == 'administrator'
+                and bool(getattr(member, 'can_delete_messages', False))
+            )
+        )
+    except Exception as e:
+        print(f"[group-media-caption] couldn't verify bot delete permission chat={chat_id}: {e}")
+        return False
+    with _group_admin_status_lock:
+        _bot_delete_permission_cache[chat_id] = (now + GROUP_ADMIN_CACHE_SECONDS, can_delete)
+    return can_delete
+
+def _repost_group_media(messages):
+    messages = sorted(messages, key=lambda item: item.message_id)
+    if not messages:
+        return
+    chat_id = messages[0].chat.id
+    saved_caption = get_group_media_caption()
+    if not saved_caption:
+        return
+    if _caption_already_present(messages, saved_caption):
+        return
+    if not _bot_can_delete_group_messages(chat_id):
+        print(f"[group-media-caption] skipped chat={chat_id}: bot needs Delete Messages permission to replace the source")
+        return
+
+    try:
+        if len(messages) == 1:
+            message = messages[0]
+            caption_html = _append_saved_caption_html(
+                message.caption,
+                getattr(message, 'caption_entities', None),
+                saved_caption,
+            )
+            if len(_caption_visible_text(caption_html)) > 1024:
+                print(f"[group-media-caption] skipped chat={chat_id} message={message.message_id}: combined caption exceeds 1024 characters")
+                return
+            kwargs = {
+                "caption": caption_html,
+                "parse_mode": "HTML",
+            }
+            thread_id = getattr(message, 'message_thread_id', None)
+            if thread_id is not None:
+                kwargs['message_thread_id'] = thread_id
+            bot.copy_message(chat_id, chat_id, message.message_id, **kwargs)
+        else:
+            media_items = []
+            caption_index = next((i for i, item in enumerate(messages) if getattr(item, 'caption', None)), 0)
+            caption_source = messages[caption_index]
+            combined_caption = _append_saved_caption_html(
+                getattr(caption_source, 'caption', None),
+                getattr(caption_source, 'caption_entities', None),
+                saved_caption,
+            )
+            if len(_caption_visible_text(combined_caption)) > 1024:
+                print(f"[group-media-caption] skipped album chat={chat_id}: combined caption exceeds 1024 characters")
+                return
+            for index, item in enumerate(messages):
+                kind, file_id = _get_group_media_file(item)
+                if not file_id:
+                    print(f"[group-media-caption] skipped album chat={chat_id}: unsupported media item {item.message_id}")
+                    return
+                if index == caption_index:
+                    caption = combined_caption
+                else:
+                    original_caption = getattr(item, 'caption', None)
+                    caption = _caption_as_html(original_caption, getattr(item, 'caption_entities', None)) if original_caption else None
+                if kind == 'photo':
+                    media = InputMediaPhoto(file_id, caption=caption, parse_mode='HTML')
+                elif kind == 'video':
+                    media = InputMediaVideo(file_id, caption=caption, parse_mode='HTML')
+                elif kind == 'audio':
+                    media = InputMediaAudio(file_id, caption=caption, parse_mode='HTML')
+                else:
+                    media = InputMediaDocument(file_id, caption=caption, parse_mode='HTML')
+                media_items.append(media)
+            kwargs = {}
+            thread_id = getattr(messages[0], 'message_thread_id', None)
+            if thread_id is not None:
+                kwargs['message_thread_id'] = thread_id
+            bot.send_media_group(chat_id, media_items, **kwargs)
+
+        # Delete the source only after Telegram confirms the replacement was sent.
+        for message in messages:
+            try:
+                bot.delete_message(chat_id, message.message_id)
+            except Exception as delete_error:
+                print(f"[group-media-caption] replacement sent but couldn't delete source chat={chat_id} message={message.message_id}: {delete_error}")
+    except Exception as e:
+        print(f"[group-media-caption] could not replace media in chat={chat_id}: {e}")
+
+def _flush_group_media_album(album_key):
+    with _group_media_album_lock:
+        batch = _group_media_album_batches.pop(album_key, None)
+    if batch:
+        _repost_group_media(batch['messages'])
+
+@bot.message_handler(content_types=['photo', 'video', 'document', 'audio', 'animation', 'voice'], func=lambda message: _is_group_admin_media_sender(message) and _message_has_supported_media(message))
+def handle_configured_admin_group_media(message):
+    media_group_id = getattr(message, 'media_group_id', None)
+    if not media_group_id:
+        _repost_group_media([message])
+        return
+
+    album_key = (message.chat.id, str(media_group_id))
+    with _group_media_album_lock:
+        batch = _group_media_album_batches.setdefault(album_key, {"messages": [], "timer": None})
+        if all(item.message_id != message.message_id for item in batch['messages']):
+            batch['messages'].append(message)
+        old_timer = batch.get('timer')
+        if old_timer:
+            old_timer.cancel()
+        timer = Timer(GROUP_MEDIA_ALBUM_SETTLE_SECONDS, _flush_group_media_album, args=(album_key,))
+        timer.daemon = True
+        batch['timer'] = timer
+        timer.start()
 
 def get_menu_image_file_id():
     """Returns the Telegram file_id of the admin-set main menu image, or None if not set."""
@@ -3595,6 +3889,9 @@ def setup_commands():
         BotCommand("channels", "Manage channels (edit/delete)"),
         BotCommand("bundles", "Manage offers (custom fixed-price offers)"),
         BotCommand("setmenuimage", "Set/remove the main menu image"),
+        BotCommand("setmediacaption", "Set the caption appended to your group media"),
+        BotCommand("mediacaption", "Show the saved group media caption"),
+        BotCommand("clearmediacaption", "Clear the saved group media caption"),
         BotCommand("forcejoin", "Require users to join a channel (Force Join settings)"),
         BotCommand("removeuser", "Remove a subscriber early"),
         BotCommand("stats", "View bot stats & revenue"),
