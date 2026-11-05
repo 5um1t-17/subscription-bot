@@ -5322,11 +5322,16 @@ def _render_preview_editor(ch_id, chat_id, is_draft=True, message_id=None):
     try:
         if items:
             item = items[_preview_editor_indices.get(ch_id, 0)]
-            method = bot.send_video if item['type'] == 'video' else bot.send_photo
-            preview_msg = method(
-                chat_id, item['file_id'], caption=text, reply_markup=markup,
-                parse_mode='HTML', vanish_delay=None,
-            )
+            if item['type'] == 'video':
+                preview_msg = bot.send_video(
+                    chat_id, item['file_id'], caption=text, reply_markup=markup,
+                    parse_mode='HTML',
+                )
+            else:
+                preview_msg = bot.send_photo(
+                    chat_id, item['file_id'], caption=text, reply_markup=markup,
+                    parse_mode='HTML', vanish_delay=None,
+                )
         else:
             preview_msg = bot.send_message(
                 chat_id, text, reply_markup=markup, parse_mode='HTML', vanish_delay=None,
