@@ -4,6 +4,7 @@ from html.parser import HTMLParser
 
 from telebot.types import InlineKeyboardMarkup
 
+from main.config import is_admin_user_id
 from main.ui import InlineKeyboardButton
 
 
@@ -21,10 +22,9 @@ class AdminCaptionFeature:
 
     setting_id = "group_media_caption"
 
-    def __init__(self, bot, settings_collection, configured_admin_id):
+    def __init__(self, bot, settings_collection):
         self.bot = bot
         self.settings = settings_collection
-        self.configured_admin_id = configured_admin_id
 
     def get_caption(self):
         setting = self.settings.find_one({"_id": self.setting_id})
@@ -39,15 +39,14 @@ class AdminCaptionFeature:
             return ""
         return "".join(parser.parts).strip()
 
-    def _is_configured_admin_message(self, message):
+    def _is_admin_message(self, message):
         return bool(
-            self.configured_admin_id
-            and message.from_user
-            and message.from_user.id == self.configured_admin_id
+            message.from_user
+            and is_admin_user_id(message.from_user.id)
         )
 
     def _can_edit(self, user_id):
-        return bool(self.configured_admin_id and user_id == self.configured_admin_id)
+        return is_admin_user_id(user_id)
 
     def show_settings(self, chat_id, message_id=None, admin_user_id=None):
         caption = self.get_caption()
@@ -62,7 +61,7 @@ class AdminCaptionFeature:
         markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
         text = "📝 <b>Saved Media Caption</b>\n\n" + (caption or "No caption is saved.")
         if not can_edit:
-            text += "\n\nOnly the configured caption admin can edit or delete it."
+            text += "\n\nOnly a configured bot admin can edit or delete it."
         if message_id:
             try:
                 self.bot.edit_message_text(
@@ -84,7 +83,7 @@ class AdminCaptionFeature:
         self.bot.register_next_step_handler(prompt, self._save_caption_step)
 
     def _save_caption_step(self, message):
-        if not self._is_configured_admin_message(message) or message.chat.type != "private":
+        if not self._is_admin_message(message) or message.chat.type != "private":
             return
         caption = (message.text or "").strip()
         if caption.lower() in ("/cancel", "cancel"):
@@ -112,14 +111,14 @@ class AdminCaptionFeature:
 
     def edit_callback(self, call):
         if not self._can_edit(call.from_user.id):
-            self.bot.answer_callback_query(call.id, "Only the configured caption admin can edit this setting.", show_alert=True)
+            self.bot.answer_callback_query(call.id, "Only a configured bot admin can edit this setting.", show_alert=True)
             return
         self.bot.answer_callback_query(call.id)
         self._prompt_edit(call.message.chat.id)
 
     def delete_callback(self, call):
         if not self._can_edit(call.from_user.id):
-            self.bot.answer_callback_query(call.id, "Only the configured caption admin can delete this setting.", show_alert=True)
+            self.bot.answer_callback_query(call.id, "Only a configured bot admin can delete this setting.", show_alert=True)
             return
         self.settings.delete_one({"_id": self.setting_id})
         self.bot.answer_callback_query(call.id, "Saved caption deleted.")
@@ -127,7 +126,7 @@ class AdminCaptionFeature:
 
     def register_handlers(self):
         self.bot.message_handler(
-            commands=["setmediacaption"], func=self._is_configured_admin_message
+            commands=["setmediacaption"], func=self._is_admin_message
         )(self.set_command)
         self.bot.callback_query_handler(func=lambda call: call.data == "caption_edit")(self.edit_callback)
         self.bot.callback_query_handler(func=lambda call: call.data == "caption_delete")(self.delete_callback)

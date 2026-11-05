@@ -18,7 +18,7 @@ Copy `.env.example` to `.env` for local development and fill in the values. Neve
 - `BOT_TOKEN`: token from BotFather.
 - `MONGO_URI`: MongoDB connection string. Restrict Atlas network access to the deployment host where practical.
 - `ADMIN_ID`: primary admin Telegram user ID. Keep this set to the existing primary admin when adding others.
-- `ADMIN_IDS`: optional additional admin IDs separated by commas, such as `111111,222222`.
+- `ADMIN_IDS`: optional additional admin Telegram user IDs separated by commas, such as `111111,222222`. Every ID listed here has full bot-admin access, including managing channels, payments, subscribers, and settings. Only add trusted users.
 - `UPI_ID` and `CONTACT_USERNAME`: optional payment and contact settings.
 
 On Render, add these values under the service's Environment settings. Render supplies `PORT` for the health endpoint.

@@ -163,7 +163,7 @@ def _repost_group_media(messages):
     if not saved_caption:
         print(f"[group-media-caption] skipped chat={chat_id}: no saved caption is configured")
         try:
-            bot.reply_to(messages[0], "ℹ️ No saved media caption is set yet. The configured bot admin must set one with /setmediacaption in a private chat.")
+            bot.reply_to(messages[0], "ℹ️ No saved media caption is set yet. A configured bot admin must set one with /setmediacaption in a private chat.")
         except Exception as reply_error:
             print(f"[group-media-caption] couldn't notify sender chat={chat_id}: {reply_error}")
         return

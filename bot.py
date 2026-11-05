@@ -122,9 +122,7 @@ class AdminRequestContextMiddleware(BaseMiddleware):
     def pre_process(self, update, data):
         _admin_request_context.user_id = None
         user = getattr(update, 'from_user', None)
-        message = getattr(update, 'message', None) or update
-        chat = getattr(message, 'chat', None)
-        if user and chat and chat.type == 'private' and is_admin_user_id(user.id):
+        if user and is_admin_user_id(user.id):
             _admin_request_context.user_id = user.id
 
     def post_process(self, message, data, exception):
@@ -450,7 +448,7 @@ def adopt_existing_channel_owner():
     bot_config.ADMIN_ID = data_owner
     ADMIN_USER_IDS.add(data_owner)
 
-caption_admin_feature = AdminCaptionFeature(bot, settings_col, CONFIGURED_ADMIN_ID)
+caption_admin_feature = AdminCaptionFeature(bot, settings_col)
 GROUP_MEDIA_CAPTION_SETTING_ID = caption_admin_feature.setting_id
 caption_admin_feature.register_handlers()
 
@@ -1665,11 +1663,12 @@ def send_prompt(chat_id, text, reply_markup=None, parse_mode=None):
         chat_id = current_admin_id()
     return bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
 
-def send_admin_reply(text, parse_mode=None, reply_markup=None, delay=ADMIN_REPLY_VANISH_SECONDS):
+def send_admin_reply(text, parse_mode=None, reply_markup=None, delay=ADMIN_REPLY_VANISH_SECONDS,
+                     admin_user_id=None):
     """Send a confirmation or error reply to the admin that auto-deletes after `delay` seconds
     (default 20 s). Used for one-shot result messages like '✅ Price updated' or '❌ Invalid format'
     so the admin chat stays clean without the admin having to manually dismiss anything."""
-    admin_chat_id = current_admin_id()
+    admin_chat_id = admin_user_id or current_admin_id()
     if not admin_chat_id:
         return None
     msg = bot.send_message(admin_chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
@@ -7801,7 +7800,10 @@ def _bc_sched_save(message):
         send_admin_reply("❌ That time is in the past — pick a future time. Use /broadcast to try again.")
         return
     token = secrets.token_urlsafe(6)
-    _pending_broadcast_actions[token] = {'kind': 'schedule', 'text': text, 'when_ts': int(when_ts)}
+    _pending_broadcast_actions[token] = {
+        'kind': 'schedule', 'text': text, 'when_ts': int(when_ts),
+        'admin_id': current_admin_id(),
+    }
     when_dt = datetime.fromtimestamp(when_ts, BROADCAST_TIMEZONE)
     preview = text if len(text) <= 100 else text[:97] + "..."
     markup = InlineKeyboardMarkup()
@@ -7813,19 +7815,21 @@ def _bc_sched_save(message):
         parse_mode="Markdown", reply_markup=markup)
 
 
-def _save_scheduled_broadcast(text, when_ts):
+def _save_scheduled_broadcast(text, when_ts, admin_user_id=None):
+    admin_user_id = admin_user_id or current_admin_id()
     try:
         res = scheduled_broadcasts_col.insert_one({
-            'text': text, 'when_ts': int(when_ts), 'created_at': datetime.now(), 'status': 'pending'
+            'text': text, 'when_ts': int(when_ts), 'created_at': datetime.now(), 'status': 'pending',
+            'admin_id': admin_user_id,
         })
     except Exception as e:
-        send_admin_reply(f"❌ Couldn't save the scheduled broadcast: {e}")
+        send_admin_reply(f"❌ Couldn't save the scheduled broadcast: {e}", admin_user_id=admin_user_id)
         return
     when_dt = datetime.fromtimestamp(when_ts, BROADCAST_TIMEZONE)
     preview = text if len(text) <= 100 else text[:97] + '...'
     markup = InlineKeyboardMarkup().add(InlineKeyboardButton('❌ Cancel Broadcast', callback_data=f"bcdel_{res.inserted_id}"))
     send_admin_reply(f"✅ *Broadcast scheduled* for {when_dt.strftime('%Y-%m-%d %H:%M')}.\n\nPreview:\n{escape_markdown(preview)}",
-                     parse_mode='Markdown', reply_markup=markup)
+                     parse_mode='Markdown', reply_markup=markup, admin_user_id=admin_user_id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith(('bcconfirm_', 'bccancel_')))
@@ -7841,10 +7845,11 @@ def confirm_broadcast_action(call):
     if action == 'bccancel':
         edit_menu(call.message.chat.id, call.message.message_id, '✅ Broadcast canceled. Nothing was sent or scheduled.')
         return
+    admin_user_id = pending.get('admin_id') or call.from_user.id
     if pending['kind'] == 'schedule':
-        _save_scheduled_broadcast(pending['text'], pending['when_ts'])
+        _save_scheduled_broadcast(pending['text'], pending['when_ts'], admin_user_id)
     else:
-        _send_broadcast_now(pending['text'])
+        _send_broadcast_now(pending['text'], admin_user_id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "bclist")
 def cb_bc_list(call):
@@ -7913,7 +7918,7 @@ def show_scheduled_broadcasts(chat_id, message_id=None):
     else:
         reply = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
         schedule_delete(chat_id, reply.message_id, COMMAND_VANISH_SECONDS)
-        track_msg(ADMIN_ID, reply)
+        track_msg(current_admin_id(), reply)
 
 def run_scheduled_broadcasts():
     """Scheduler job: sends every scheduled broadcast whose time has come. Marks each as
@@ -7953,35 +7958,43 @@ def run_scheduled_broadcasts():
         if errors:
             result += "\n\nFailure details (first 5):\n" + "\n".join(errors)
         try:
-            bot.send_message(ADMIN_ID, result, vanish_delay=None)
+            bot.send_message(doc.get('admin_id') or ADMIN_ID, result, vanish_delay=None)
         except Exception:
             pass
 
 def do_broadcast(message):
+    admin_user_id = message.from_user.id if message.from_user else current_admin_id()
     if not message.text:
-        send_admin_reply("❌ Please send plain text for the broadcast (photos/stickers/etc. aren't supported yet). Use /broadcast to try again.")
+        send_admin_reply("❌ Please send plain text for the broadcast (photos/stickers/etc. aren't supported yet). Use /broadcast to try again.",
+                         admin_user_id=admin_user_id)
         return
 
     user_ids = seen_users_col.distinct("user_id")
     if not user_ids:
-        send_admin_reply("⚠️ No users have interacted with the bot yet — broadcast not sent to anyone.")
+        send_admin_reply("⚠️ No users have interacted with the bot yet — broadcast not sent to anyone.",
+                         admin_user_id=admin_user_id)
         return
 
     token = secrets.token_urlsafe(6)
-    _pending_broadcast_actions[token] = {'kind': 'now', 'text': message.text}
+    _pending_broadcast_actions[token] = {
+        'kind': 'now', 'text': message.text,
+        'admin_id': admin_user_id,
+    }
     preview = message.text if len(message.text) <= 350 else message.text[:347] + '...'
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton(f"✅ Send to {len(user_ids)} users", callback_data=f"bcconfirm_{token}"))
     markup.add(InlineKeyboardButton("Cancel", callback_data=f"bccancel_{token}"))
     send_admin_reply(
         f"Confirm broadcast to {len(user_ids)} users?\n\nPreview:\n{escape_markdown(preview)}",
-        parse_mode='Markdown', reply_markup=markup)
+        parse_mode='Markdown', reply_markup=markup, admin_user_id=admin_user_id)
 
 
-def _send_broadcast_now(text):
+def _send_broadcast_now(text, admin_user_id=None):
+    admin_user_id = admin_user_id or current_admin_id()
     user_ids = seen_users_col.distinct("user_id")
     if not user_ids:
-        send_admin_reply("⚠️ No users have interacted with the bot yet — broadcast not sent to anyone.")
+        send_admin_reply("⚠️ No users have interacted with the bot yet — broadcast not sent to anyone.",
+                         admin_user_id=admin_user_id)
         return
     sent, failed = 0, 0
     errors = []
@@ -8005,7 +8018,7 @@ def _send_broadcast_now(text):
     # DEFAULT_VANISH_SECONDS unless vanish_delay=None is passed explicitly — a plain call
     # here still gets swept up by that default, so this MUST be passed every time.
     try:
-        bot.send_message(ADMIN_ID, result, vanish_delay=None)
+        bot.send_message(admin_user_id, result, vanish_delay=None)
     except Exception:
         pass
 
