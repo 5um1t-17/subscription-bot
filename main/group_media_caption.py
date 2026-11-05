@@ -126,6 +126,11 @@ def _caption_already_present(messages, saved_caption):
         for message in messages
     )
 
+def _keep_replacement_message(chat_id, message):
+    message_id = getattr(message, 'message_id', None)
+    if message_id is not None:
+        schedule_delete_fn(chat_id, message_id, None)
+
 def _bot_can_delete_group_messages(chat_id):
     now = time.monotonic()
     with _group_admin_status_lock:
@@ -206,7 +211,8 @@ def _repost_group_media(messages):
                 kwargs['message_thread_id'] = thread_id
             # Resend the received file_id so protected-content groups do not
             # block the replacement through copyMessage's forwarding rules.
-            send_method(chat_id, file_id, **kwargs)
+            replacement = send_method(chat_id, file_id, **kwargs)
+            _keep_replacement_message(chat_id, replacement)
         else:
             media_items = []
             caption_index = next((i for i, item in enumerate(messages) if getattr(item, 'caption', None)), 0)
@@ -243,7 +249,9 @@ def _repost_group_media(messages):
             thread_id = getattr(messages[0], 'message_thread_id', None)
             if thread_id is not None:
                 kwargs['message_thread_id'] = thread_id
-            bot.send_media_group(chat_id, media_items, **kwargs)
+            replacements = bot.send_media_group(chat_id, media_items, **kwargs)
+            for replacement in replacements or []:
+                _keep_replacement_message(chat_id, replacement)
 
         # Delete the source only after Telegram confirms the replacement was sent.
         for message in messages:
@@ -345,4 +353,3 @@ def handle_configured_admin_group_media(message):
         timer.daemon = True
         batch['timer'] = timer
         timer.start()
-

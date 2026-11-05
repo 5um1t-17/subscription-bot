@@ -1533,6 +1533,42 @@ bot.send_message = _vanishing_send_message
 bot.reply_to = _vanishing_reply_to
 bot.send_photo = _vanishing_send_photo
 
+def _queue_outgoing_message_reactions(result, chat_id):
+    messages = result if isinstance(result, (list, tuple)) else (result,)
+    for message in messages:
+        message_id = getattr(message, 'message_id', None)
+        if message_id is None:
+            continue
+        message_chat_id = getattr(getattr(message, 'chat', None), 'id', chat_id)
+        try:
+            queue_reaction(message_chat_id, message_id)
+        except Exception as e:
+            print(f"[auto-react] couldn't queue outgoing chat={message_chat_id} message={message_id}: {e}")
+
+
+def _install_outgoing_reaction_wrapper(method_name):
+    original_method = getattr(bot, method_name, None)
+    if not callable(original_method):
+        return
+
+    def _send_and_react(*args, **kwargs):
+        chat_id = kwargs.get('chat_id', args[0] if args else None)
+        result = original_method(*args, **kwargs)
+        _queue_outgoing_message_reactions(result, chat_id)
+        return result
+
+    setattr(bot, method_name, _send_and_react)
+
+
+for _outgoing_method_name in (
+    'send_message', 'send_photo', 'send_audio', 'send_document', 'send_video',
+    'send_animation', 'send_voice', 'send_video_note', 'send_sticker',
+    'send_media_group', 'send_location', 'send_venue', 'send_contact',
+    'send_poll', 'send_dice', 'send_game', 'send_invoice', 'send_paid_media',
+    'send_live_photo', 'send_checklist', 'send_rich_message',
+):
+    _install_outgoing_reaction_wrapper(_outgoing_method_name)
+
 def _clear_pending_review_messages(token, current_admin_msg_id=None):
     entry = pending_review_messages.pop(token, None)
     if not entry:
