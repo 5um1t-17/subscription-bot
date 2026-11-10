@@ -93,8 +93,9 @@ class AdminCaptionFeature:
             prompt = self.bot.send_message(message.chat.id, "Caption cannot be empty. Send it again, or /cancel.")
             self.bot.register_next_step_handler(prompt, self._save_caption_step)
             return
-        if len(self._visible_text(caption)) > 1024:
-            prompt = self.bot.send_message(message.chat.id, "Caption must be 1024 visible characters or fewer. Send it again, or /cancel.")
+        visible_text = self._visible_text(caption)
+        if len(visible_text.encode("utf-16-le")) // 2 > 1024:
+            prompt = self.bot.send_message(message.chat.id, "Caption must fit Telegram's 1024-unit media caption limit. Send it again, or /cancel.")
             self.bot.register_next_step_handler(prompt, self._save_caption_step)
             return
         self.settings.update_one(

@@ -7,7 +7,9 @@ from threading import RLock, Thread, Timer
 import telebot
 from telebot.types import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
 
-GROUP_MEDIA_ALBUM_SETTLE_SECONDS = 1.5
+# Telegram delivers album items as separate updates with a shared media_group_id.
+# Wait for a quiet gap so delayed sibling updates can join the same album batch.
+GROUP_MEDIA_ALBUM_SETTLE_SECONDS = 5.0
 GROUP_MEDIA_REPOST_SETTLE_SECONDS = 2.0
 GROUP_ADMIN_CACHE_SECONDS = 60
 
@@ -35,7 +37,7 @@ def configure(bot_client, anonymous_bot_id, get_caption, schedule_delete, reply_
 
 def register_handlers():
     bot.message_handler(
-        content_types=['photo', 'video', 'document', 'audio', 'animation', 'voice'],
+        content_types=['photo', 'video', 'document', 'audio', 'animation', 'voice', 'sticker', 'video_note'],
         func=lambda message: _is_group_admin_media_sender(message) and _message_has_supported_media(message),
     )(handle_configured_admin_group_media)
 
@@ -82,7 +84,12 @@ def _is_group_admin_media_sender(message):
     return is_admin
 
 def _message_has_supported_media(message):
-    return any(getattr(message, attr, None) for attr in ('photo', 'video', 'document', 'audio', 'animation', 'voice'))
+    # Stickers and video notes are included so we can explain that Telegram
+    # does not provide a caption field for them instead of silently ignoring them.
+    return any(getattr(message, attr, None) for attr in (
+        'photo', 'video', 'document', 'audio', 'animation', 'voice',
+        'sticker', 'video_note',
+    ))
 
 def _get_group_media_file(message):
     if getattr(message, 'photo', None):
@@ -92,6 +99,74 @@ def _get_group_media_file(message):
         if media:
             return kind, media.file_id
     return None, None
+
+def _send_one_group_media(message, caption_html):
+    """Resend one supported media item with a caption, preserving its Telegram type."""
+    kind, file_id = _get_group_media_file(message)
+    send_method = {
+        'photo': bot.send_photo,
+        'video': bot.send_video,
+        'document': bot.send_document,
+        'audio': bot.send_audio,
+        'animation': bot.send_animation,
+        'voice': bot.send_voice,
+    }.get(kind)
+    if not send_method or not file_id:
+        raise ValueError(f"unsupported media type: {kind or 'unknown'}")
+    kwargs = {"caption": caption_html, "parse_mode": "HTML"}
+    thread_id = getattr(message, 'message_thread_id', None)
+    if thread_id is not None:
+        kwargs['message_thread_id'] = thread_id
+    replacement = send_method(message.chat.id, file_id, **kwargs)
+    _keep_replacement_message(message.chat.id, replacement)
+    return replacement
+
+def _album_can_be_sent_together(kinds):
+    """Telegram media groups permit photo/video mixes, or homogeneous audio/docs."""
+    if len(kinds) < 2 or len(kinds) > 10:
+        return False
+    if all(kind in ('photo', 'video') for kind in kinds):
+        return True
+    return len(set(kinds)) == 1 and kinds[0] in ('audio', 'document')
+
+def _send_media_album(messages, caption_index, combined_caption):
+    media_data = [_get_group_media_file(item) for item in messages]
+    kinds = [kind for kind, file_id in media_data]
+    if any(not kind or not file_id for kind, file_id in media_data):
+        raise ValueError("album contains an unsupported media item")
+
+    if not _album_can_be_sent_together(kinds):
+        raise ValueError(
+            "Telegram cannot send this media_group as one album: albums need "
+            "2-10 photos/videos, or 2-10 audio files or documents of one type"
+        )
+
+    media_items = []
+    for index, (item, (kind, file_id)) in enumerate(zip(messages, media_data)):
+        if index == caption_index:
+            caption = combined_caption
+        else:
+            original_caption = getattr(item, 'caption', None)
+            caption = _caption_as_html(
+                original_caption, getattr(item, 'caption_entities', None)
+            ) if original_caption else None
+        if kind == 'photo':
+            media = InputMediaPhoto(file_id, caption=caption, parse_mode='HTML')
+        elif kind == 'video':
+            media = InputMediaVideo(file_id, caption=caption, parse_mode='HTML')
+        elif kind == 'audio':
+            media = InputMediaAudio(file_id, caption=caption, parse_mode='HTML')
+        else:  # homogeneous document album
+            media = InputMediaDocument(file_id, caption=caption, parse_mode='HTML')
+        media_items.append(media)
+
+    kwargs = {}
+    thread_id = getattr(messages[0], 'message_thread_id', None)
+    if thread_id is not None:
+        kwargs['message_thread_id'] = thread_id
+    replacements = bot.send_media_group(messages[0].chat.id, media_items, **kwargs)
+    for replacement in replacements or []:
+        _keep_replacement_message(messages[0].chat.id, replacement)
 
 class _CaptionTextExtractor(HTMLParser):
     def __init__(self):
@@ -110,6 +185,11 @@ def _caption_visible_text(caption_html):
     except Exception:
         return ''
     return ''.join(parser.parts).strip()
+
+def _caption_utf16_length(caption_html):
+    """Telegram caption limits count UTF-16 code units, not Python characters."""
+    visible_text = _caption_visible_text(caption_html)
+    return len(visible_text.encode('utf-16-le')) // 2
 
 def _caption_as_html(caption, entities=None):
     """Escape existing caption text and retain its Telegram formatting entities."""
@@ -182,39 +262,27 @@ def _repost_group_media(messages):
         return
 
     try:
-        if len(messages) == 1:
+        is_album = bool(getattr(messages[0], 'media_group_id', None))
+        if not is_album:
             message = messages[0]
             caption_html = _append_saved_caption_html(
                 message.caption,
                 getattr(message, 'caption_entities', None),
                 saved_caption,
             )
-            if len(_caption_visible_text(caption_html)) > 1024:
-                print(f"[group-media-caption] skipped chat={chat_id} message={message.message_id}: combined caption exceeds 1024 characters")
+            if _caption_utf16_length(caption_html) > 1024:
+                print(f"[group-media-caption] skipped chat={chat_id} message={message.message_id}: combined caption exceeds Telegram's 1024 UTF-16-unit media caption limit")
                 bot.reply_to(message, "⚠️ The combined caption is too long for Telegram, so I left the original media unchanged.")
                 return
-            kind, file_id = _get_group_media_file(message)
-            send_method = {
-                'photo': bot.send_photo,
-                'video': bot.send_video,
-                'document': bot.send_document,
-                'audio': bot.send_audio,
-                'animation': bot.send_animation,
-                'voice': bot.send_voice,
-            }.get(kind)
-            if not send_method or not file_id:
-                print(f"[group-media-caption] skipped chat={chat_id} message={message.message_id}: unsupported media type")
-                return
-            kwargs = {"caption": caption_html, "parse_mode": "HTML"}
-            thread_id = getattr(message, 'message_thread_id', None)
-            if thread_id is not None:
-                kwargs['message_thread_id'] = thread_id
-            # Resend the received file_id so protected-content groups do not
-            # block the replacement through copyMessage's forwarding rules.
-            replacement = send_method(chat_id, file_id, **kwargs)
-            _keep_replacement_message(chat_id, replacement)
+            # Reuse the received file_id so protected-content groups do not
+            # block replacement through copyMessage's forwarding rules.
+            _send_one_group_media(message, caption_html)
         else:
-            media_items = []
+            if len(messages) < 2 or len(messages) > 10:
+                raise ValueError(
+                    f"Telegram album batch has {len(messages)} item(s); "
+                    "sendMediaGroup requires 2-10 items. Originals were kept."
+                )
             caption_index = next((i for i, item in enumerate(messages) if getattr(item, 'caption', None)), 0)
             caption_source = messages[caption_index]
             combined_caption = _append_saved_caption_html(
@@ -222,36 +290,11 @@ def _repost_group_media(messages):
                 getattr(caption_source, 'caption_entities', None),
                 saved_caption,
             )
-            if len(_caption_visible_text(combined_caption)) > 1024:
+            if _caption_utf16_length(combined_caption) > 1024:
                 print(f"[group-media-caption] skipped album chat={chat_id}: combined caption exceeds 1024 characters")
                 bot.reply_to(messages[0], "⚠️ The combined album caption is too long for Telegram, so I left the original album unchanged.")
                 return
-            for index, item in enumerate(messages):
-                kind, file_id = _get_group_media_file(item)
-                if not file_id:
-                    print(f"[group-media-caption] skipped album chat={chat_id}: unsupported media item {item.message_id}")
-                    return
-                if index == caption_index:
-                    caption = combined_caption
-                else:
-                    original_caption = getattr(item, 'caption', None)
-                    caption = _caption_as_html(original_caption, getattr(item, 'caption_entities', None)) if original_caption else None
-                if kind == 'photo':
-                    media = InputMediaPhoto(file_id, caption=caption, parse_mode='HTML')
-                elif kind == 'video':
-                    media = InputMediaVideo(file_id, caption=caption, parse_mode='HTML')
-                elif kind == 'audio':
-                    media = InputMediaAudio(file_id, caption=caption, parse_mode='HTML')
-                else:
-                    media = InputMediaDocument(file_id, caption=caption, parse_mode='HTML')
-                media_items.append(media)
-            kwargs = {}
-            thread_id = getattr(messages[0], 'message_thread_id', None)
-            if thread_id is not None:
-                kwargs['message_thread_id'] = thread_id
-            replacements = bot.send_media_group(chat_id, media_items, **kwargs)
-            for replacement in replacements or []:
-                _keep_replacement_message(chat_id, replacement)
+            _send_media_album(messages, caption_index, combined_caption)
 
         # Delete the source only after Telegram confirms the replacement was sent.
         for message in messages:
@@ -261,9 +304,19 @@ def _repost_group_media(messages):
                 print(f"[group-media-caption] replacement sent but couldn't delete source chat={chat_id} message={message.message_id}: {delete_error}")
         print(f"[group-media-caption] reposted media chat={chat_id} source_messages={len(messages)}")
     except Exception as e:
-        print(f"[group-media-caption] could not replace media in chat={chat_id}: {e}")
+        kinds = ','.join(kind or 'unknown' for kind, _ in (_get_group_media_file(item) for item in messages))
+        print(
+            f"[group-media-caption] could not replace media chat={chat_id} "
+            f"message_ids={[item.message_id for item in messages]} types={kinds}: {e}",
+            flush=True,
+        )
         try:
-            bot.reply_to(messages[0], "⚠️ I couldn't append the saved caption to this media. Please check that the saved caption uses valid Telegram HTML.")
+            bot.reply_to(
+                messages[0],
+                "⚠️ I couldn't replace this media with its caption. The original was kept. "
+                "Albums stay grouped; Telegram only accepts 2-10 photos/videos, or "
+                "2-10 audio files or documents of the same type. Check the saved caption's HTML too.",
+            )
         except Exception as reply_error:
             print(f"[group-media-caption] couldn't notify sender chat={chat_id}: {reply_error}")
 
@@ -336,6 +389,16 @@ def handle_configured_admin_group_media(message):
         f"message={message.message_id} album={getattr(message, 'media_group_id', None) or '-'}",
         flush=True,
     )
+    if getattr(message, 'sticker', None) or getattr(message, 'video_note', None):
+        try:
+            bot.reply_to(
+                message,
+                "ℹ️ Telegram doesn't support captions on stickers or video notes. "
+                "I left the original media unchanged.",
+            )
+        except Exception as reply_error:
+            print(f"[group-media-caption] couldn't explain unsupported caption type chat={message.chat.id}: {reply_error}")
+        return
     media_group_id = getattr(message, 'media_group_id', None)
     if not media_group_id:
         _queue_group_media_repost([message])
