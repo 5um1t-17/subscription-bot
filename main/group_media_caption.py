@@ -117,6 +117,12 @@ def _send_one_group_media(message, caption_html):
     thread_id = getattr(message, 'message_thread_id', None)
     if thread_id is not None:
         kwargs['message_thread_id'] = thread_id
+    reply_target = getattr(message, 'reply_to_message', None)
+    if reply_target is not None:
+        kwargs['reply_to_message_id'] = reply_target.message_id
+        # If the replied-to message disappears while this delayed repost is
+        # queued, still deliver the media instead of losing the replacement.
+        kwargs['allow_sending_without_reply'] = True
     replacement = send_method(message.chat.id, file_id, **kwargs)
     _keep_replacement_message(message.chat.id, replacement)
     return replacement
@@ -164,6 +170,14 @@ def _send_media_album(messages, caption_index, combined_caption):
     thread_id = getattr(messages[0], 'message_thread_id', None)
     if thread_id is not None:
         kwargs['message_thread_id'] = thread_id
+    reply_target = next(
+        (getattr(item, 'reply_to_message', None) for item in messages
+         if getattr(item, 'reply_to_message', None) is not None),
+        None,
+    )
+    if reply_target is not None:
+        kwargs['reply_to_message_id'] = reply_target.message_id
+        kwargs['allow_sending_without_reply'] = True
     replacements = bot.send_media_group(messages[0].chat.id, media_items, **kwargs)
     for replacement in replacements or []:
         _keep_replacement_message(messages[0].chat.id, replacement)
