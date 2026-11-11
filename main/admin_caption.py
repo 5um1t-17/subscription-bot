@@ -36,6 +36,7 @@ class AdminCaptionFeature:
         self.chat_admin_checker = chat_admin_checker or (lambda message: False)
         self.pending_previews = {}
         self.pending_cc = {}
+        self.pending_cc_tokens = {}
 
     def get_caption(self):
         setting = self.settings.find_one({"_id": self.setting_id})
@@ -305,6 +306,8 @@ class AdminCaptionFeature:
     def _caption_entity_prefix(self, message, global_caption):
         text = getattr(message, "caption", None) or ""
         global_text = self._visible_text(global_caption)
+        if global_text and text == global_text:
+            return ""
         separator_suffix = "\n\n" + global_text if global_text else ""
         if separator_suffix and text.endswith(separator_suffix):
             custom_text = text[:-len(separator_suffix)]
@@ -339,9 +342,53 @@ class AdminCaptionFeature:
 
     def _finish_cc_messages(self, state, submitted_message_id=None):
         chat_id = state["chat_id"]
-        self._delete_workflow_message(chat_id, state.get("command_message_id"))
-        self._delete_workflow_message(chat_id, state.get("prompt_message_id"))
-        self._delete_workflow_message(chat_id, submitted_message_id)
+        if submitted_message_id is not None:
+            state.setdefault("workflow_message_ids", []).append(submitted_message_id)
+        if state.get("cc_token"):
+            self.pending_cc_tokens.pop(state["cc_token"], None)
+        message_ids = [
+            state.get("command_message_id"),
+            state.get("prompt_message_id"),
+            *state.get("workflow_message_ids", []),
+        ]
+        for message_id in dict.fromkeys(message_ids):
+            self._delete_workflow_message(chat_id, message_id)
+
+    @staticmethod
+    def _cc_cancel_markup(token):
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("✖ Cancel", callback_data=f"cc_cancel_{token}"))
+        return markup
+
+    def _cc_cancel_callback(self, call):
+        token = call.data.partition("cc_cancel_")[2]
+        key = self.pending_cc_tokens.get(token)
+        state = self.pending_cc.get(key) if key else None
+        if not state or state["expires_at"] <= time.monotonic():
+            if key:
+                self.pending_cc.pop(key, None)
+            self.pending_cc_tokens.pop(token, None)
+            self.bot.answer_callback_query(call.id, "This caption edit expired.", show_alert=True)
+            if state:
+                self._finish_cc_messages(state)
+            return
+        if call.message.chat.id != state["chat_id"] or not self._is_admin_user_in_chat(
+            state["chat_id"], call.from_user.id
+        ):
+            self.bot.answer_callback_query(call.id, "Only a chat admin can cancel this edit.", show_alert=True)
+            return
+        self.pending_cc.pop(key, None)
+        self.bot.answer_callback_query(call.id, "Caption edit cancelled.")
+        self._finish_cc_messages(state)
+
+    def _is_admin_user_in_chat(self, chat_id, user_id):
+        if is_admin_user_id(user_id):
+            return True
+        try:
+            member = self.bot.get_chat_member(chat_id, user_id)
+            return getattr(member, "status", None) in ("creator", "administrator")
+        except Exception:
+            return False
 
     def _start_cc(self, message):
         if not self._is_cc_chat_admin(message):
@@ -392,8 +439,9 @@ class AdminCaptionFeature:
         prompt_text = (
             "✏️ <b>Current custom caption</b>\n\n"
             + (current_custom or "<i>(none)</i>")
-            + "\n\nSend the replacement caption, or /cancel, /cancel@botname, or cancel."
+            + "\n\nSend the replacement caption below."
         )
+        token = secrets.token_hex(6)
         try:
             prompt_kwargs = {"parse_mode": "HTML"}
             if chat.type in ("group", "supergroup"):
@@ -401,7 +449,11 @@ class AdminCaptionFeature:
                 thread_id = getattr(message, "message_thread_id", None)
                 if thread_id is not None:
                     prompt_kwargs["message_thread_id"] = thread_id
-            prompt = self.bot.send_message(chat.id, prompt_text, **prompt_kwargs)
+            prompt = self.bot.send_message(
+                chat.id, prompt_text,
+                reply_markup=self._cc_cancel_markup(token),
+                **prompt_kwargs,
+            )
         except Exception as error:
             print(f"[caption] /cc prompt failed chat={chat.id}: {error}")
             return
@@ -414,8 +466,11 @@ class AdminCaptionFeature:
             "target_message_id": target.message_id,
             "thread_id": getattr(message, "message_thread_id", None),
             "global_caption": global_caption,
+            "cc_token": token,
+            "workflow_message_ids": [],
             "expires_at": time.monotonic() + self.pending_cc_ttl,
         }
+        self.pending_cc_tokens[token] = key
         self._delete_workflow_message(chat.id, message.message_id)
 
     def _has_pending_cc(self, message):
@@ -434,23 +489,20 @@ class AdminCaptionFeature:
         state = self.pending_cc.get(key) if key else None
         if not state:
             return
+        state.setdefault("workflow_message_ids", []).append(message.message_id)
         submitted = (getattr(message, "text", None) or "").strip()
         if self._cancel_text(submitted):
             self.pending_cc.pop(key, None)
             self._finish_cc_messages(state, message.message_id)
-            try:
-                self.bot.send_message(state["chat_id"], "Caption edit cancelled.")
-            except Exception:
-                pass
             return
         if not submitted or submitted.startswith("/"):
-            self._delete_workflow_message(state["chat_id"], message.message_id)
-            self.bot.send_message(state["chat_id"], "That command wasn't used as a caption. Send caption text or /cancel.")
+            response = self.bot.send_message(state["chat_id"], "That command wasn't used as a caption. Send caption text or tap Cancel.")
+            state["workflow_message_ids"].append(response.message_id)
             return
         caption = self._compose_message_caption(submitted, state["global_caption"])
         if self._utf16_length(self._visible_text(caption)) > 1024:
-            self._delete_workflow_message(state["chat_id"], message.message_id)
-            self.bot.send_message(state["chat_id"], "The combined caption exceeds Telegram's media caption limit. Send a shorter caption or /cancel.")
+            response = self.bot.send_message(state["chat_id"], "The combined caption exceeds Telegram's media caption limit. Send a shorter caption or tap Cancel.")
+            state["workflow_message_ids"].append(response.message_id)
             return
         try:
             # Render-check HTML before changing the target media message.
@@ -458,7 +510,7 @@ class AdminCaptionFeature:
                 state["chat_id"], caption or "<i>(caption will be cleared)</i>",
                 parse_mode="HTML", message_thread_id=state.get("thread_id"),
             )
-            self._delete_workflow_message(state["chat_id"], preview.message_id)
+            state["workflow_message_ids"].append(preview.message_id)
             self.bot.edit_message_caption(
                 caption=caption,
                 chat_id=state["chat_id"],
@@ -474,12 +526,17 @@ class AdminCaptionFeature:
             self._finish_cc_messages(state, message.message_id)
         except Exception as error:
             self.pending_cc.pop(key, None)
-            self._finish_cc_messages(state, message.message_id)
             print(f"[caption] /cc edit failed chat={state['chat_id']} target={state['target_message_id']}: {error}")
-            self.bot.send_message(
-                state["chat_id"],
-                "Couldn't update that media caption. Check the HTML, caption length, and bot permissions.",
-            )
+            try:
+                response = self.bot.send_message(
+                    state["chat_id"],
+                    "Couldn't update that media caption. Check the HTML, caption length, and bot permissions.",
+                )
+                state["workflow_message_ids"].append(response.message_id)
+            except Exception as notice_error:
+                print(f"[caption] couldn't report /cc failure chat={state['chat_id']}: {notice_error}")
+            finally:
+                self._finish_cc_messages(state)
 
     def register_handlers(self):
         self.bot.message_handler(
@@ -497,6 +554,7 @@ class AdminCaptionFeature:
         self.bot.channel_post_handler(
             content_types=["text"], func=self._has_pending_cc
         )(self._receive_cc_caption)
+        self.bot.callback_query_handler(func=lambda call: call.data.startswith("cc_cancel_"))(self._cc_cancel_callback)
         self.bot.callback_query_handler(func=lambda call: call.data == "caption_edit")(self.edit_callback)
         self.bot.callback_query_handler(func=lambda call: call.data == "caption_delete")(self.delete_callback)
         self.bot.callback_query_handler(func=lambda call: call.data.startswith(("caption_save_", "caption_cancel_")))(self.preview_callback)

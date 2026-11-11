@@ -3679,6 +3679,7 @@ def setup_commands():
         BotCommand("users", "List all active subscribers & plans"),
     ]
     group_admin_commands = [
+        BotCommand("cc", "Edit caption on replied bot media"),
         BotCommand("remove", "Remove user(s) from this group/channel"),
         BotCommand("sync", "Sync member data of this group/channel"),
         BotCommand("import", "Import member list for this group/channel"),
