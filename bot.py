@@ -448,7 +448,10 @@ def adopt_existing_channel_owner():
     bot_config.ADMIN_ID = data_owner
     ADMIN_USER_IDS.add(data_owner)
 
-caption_admin_feature = AdminCaptionFeature(bot, settings_col)
+caption_admin_feature = AdminCaptionFeature(
+    bot, settings_col,
+    chat_admin_checker=lambda message: _is_chat_admin_message(message),
+)
 GROUP_MEDIA_CAPTION_SETTING_ID = caption_admin_feature.setting_id
 caption_admin_feature.register_handlers()
 
@@ -3661,6 +3664,7 @@ def setup_commands():
         BotCommand("bundles", "Manage offers (custom fixed-price offers)"),
         BotCommand("setmenuimage", "Set/remove the main menu image"),
         BotCommand("setmediacaption", "Set the caption appended to your group media"),
+        BotCommand("setcap", "Preview and save the global media caption"),
         BotCommand("forcejoin", "Require users to join a channel (Force Join settings)"),
         BotCommand("remove", "Remove a member or revoke a subscriber"),
         BotCommand("stats", "View bot stats & revenue"),
