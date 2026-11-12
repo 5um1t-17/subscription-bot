@@ -1,22 +1,68 @@
-"""Group media caption enforcement and ordered reposting."""
+"""Group media caption enforcement and ordered reposting.
+
+Architecture
+------------
+Every incoming admin media message — whether a standalone item or part of a
+Telegram album — enters a single per-chat *collect window*.  After a quiet
+gap (COLLECT_SETTLE_SECONDS) with no new arrivals for that chat, the window
+closes and ALL collected messages are processed at once:
+
+1. Messages are grouped by their media_group_id.
+   - Messages with no media_group_id each form a 1-item group (single).
+   - Messages sharing a media_group_id form a multi-item album group.
+
+2. Groups are sorted by the LOWEST message_id in each group so the replay
+   order exactly matches the order the admin originally sent the media.
+
+3. Each group is handed to the sequential per-chat worker which processes
+   them one at a time, with up to REPOST_MAX_RETRIES retries per unit.
+
+This single-window design eliminates two separate settle timers (the old
+2-second singles timer and 5-second album timer) that could fire at
+different times and scramble the send order or misclassify a lone video
+that Telegram tagged with a media_group_id as an "album".
+"""
 
 import time
+from collections import defaultdict
 from html.parser import HTMLParser
 from threading import RLock, Thread, Timer
 
 import telebot
-from telebot.types import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
+from telebot.types import (
+    InputMediaAudio,
+    InputMediaDocument,
+    InputMediaPhoto,
+    InputMediaVideo,
+)
 
-# Telegram delivers album items as separate updates with a shared media_group_id.
-# Wait for a quiet gap so delayed sibling updates can join the same album batch.
-GROUP_MEDIA_ALBUM_SETTLE_SECONDS = 5.0
-GROUP_MEDIA_REPOST_SETTLE_SECONDS = 2.0
+# ---------------------------------------------------------------------------
+# Timing / retry constants
+# ---------------------------------------------------------------------------
+
+# How long to wait after the LAST media message arrives for a chat before
+# closing the collect window and starting to process.  5 s comfortably covers
+# the worst-case Telegram album delivery spread while still feeling snappy.
+COLLECT_SETTLE_SECONDS = 5.0
+
 GROUP_ADMIN_CACHE_SECONDS = 60
 
-_group_media_album_batches = {}
-_group_media_album_lock = RLock()
-_group_media_repost_queues = {}
-_group_media_repost_queue_lock = RLock()
+# Retries per unit.  The queue is BLOCKED during retries to preserve order.
+REPOST_MAX_RETRIES = 3
+REPOST_RETRY_DELAY = 2.0   # seconds between attempts
+
+# ---------------------------------------------------------------------------
+# Module-level shared state
+# ---------------------------------------------------------------------------
+
+# Per-chat collect windows: chat_id -> {'messages': [...], 'timer': Timer|None}
+_collect_windows = {}
+_collect_lock = RLock()
+
+# Per-chat sequential worker queues: chat_id -> {'units': [...], 'active': bool}
+_repost_queues = {}
+_repost_queue_lock = RLock()
+
 _group_admin_status_cache = {}
 _group_admin_status_lock = RLock()
 _bot_delete_permission_cache = {}
@@ -26,36 +72,48 @@ GROUP_ANONYMOUS_BOT_ID = 1087968824
 caption_getter = lambda: ""
 schedule_delete_fn = lambda chat_id, message_id, delay: None
 admin_reply_vanish_seconds = 90
+_saved_caption_enabled_fn = None   # optional callable(chat_id) -> bool
 
-def configure(bot_client, anonymous_bot_id, get_caption, schedule_delete, reply_vanish_seconds=90):
-    global bot, GROUP_ANONYMOUS_BOT_ID, caption_getter, schedule_delete_fn, admin_reply_vanish_seconds
+
+def configure(bot_client, anonymous_bot_id, get_caption, schedule_delete,
+              reply_vanish_seconds=90, saved_caption_enabled_fn=None):
+    global bot, GROUP_ANONYMOUS_BOT_ID, caption_getter, schedule_delete_fn
+    global admin_reply_vanish_seconds, _saved_caption_enabled_fn
     bot = bot_client
     GROUP_ANONYMOUS_BOT_ID = anonymous_bot_id
     caption_getter = get_caption
     schedule_delete_fn = schedule_delete
     admin_reply_vanish_seconds = reply_vanish_seconds
+    _saved_caption_enabled_fn = saved_caption_enabled_fn
+
 
 def register_handlers():
     bot.message_handler(
-        content_types=['photo', 'video', 'document', 'audio', 'animation', 'voice', 'sticker', 'video_note'],
-        func=lambda message: _is_group_admin_media_sender(message) and _message_has_supported_media(message),
+        content_types=[
+            'photo', 'video', 'document', 'audio', 'animation',
+            'voice', 'sticker', 'video_note',
+        ],
+        func=lambda message: (
+            _is_group_admin_media_sender(message)
+            and _message_has_supported_media(message)
+        ),
     )(handle_configured_admin_group_media)
+
+
+# ---------------------------------------------------------------------------
+# Admin / permission helpers
+# ---------------------------------------------------------------------------
 
 def _is_group_admin_media_sender(message):
     if not message.chat or message.chat.type not in ('group', 'supergroup'):
         return False
-    # Telegram hides the real sender when an admin posts anonymously. In that
-    # case the message is sent as the group itself, which is only available to
-    # admins using the group's anonymous posting mode.
     sender_chat = getattr(message, 'sender_chat', None)
     if sender_chat and sender_chat.id == message.chat.id:
-        return True
+        return True          # anonymous admin posting as the group
     if not message.from_user:
         return False
-    # Some Telegram updates identify anonymous group admins through the
-    # GroupAnonymousBot user instead of (or in addition to) sender_chat.
     if message.from_user.id == GROUP_ANONYMOUS_BOT_ID:
-        return True
+        return True          # GroupAnonymousBot identity
     if message.from_user.is_bot:
         return False
     key = (message.chat.id, message.from_user.id)
@@ -68,162 +126,27 @@ def _is_group_admin_media_sender(message):
         member = bot.get_chat_member(message.chat.id, message.from_user.id)
         is_admin = getattr(member, 'status', None) in ('administrator', 'creator')
     except Exception as e:
-        print(f"[group-media-caption] couldn't verify sender admin status chat={message.chat.id} user={message.from_user.id}: {e}")
+        print(f"[group-media-caption] couldn't verify admin status "
+              f"chat={message.chat.id} user={message.from_user.id}: {e}")
         return False
     with _group_admin_status_lock:
         _group_admin_status_cache[key] = (now + GROUP_ADMIN_CACHE_SECONDS, is_admin)
         if not is_admin:
-            # Do not retain a negative result: a regular member may be promoted
-            # moments later, and their next media must be checked against Telegram.
             _group_admin_status_cache.pop(key, None)
-        expired = [cache_key for cache_key, value in _group_admin_status_cache.items() if value[0] <= now]
-        for cache_key in expired:
-            _group_admin_status_cache.pop(cache_key, None)
+        for k in [k for k, v in _group_admin_status_cache.items() if v[0] <= now]:
+            _group_admin_status_cache.pop(k, None)
     if not is_admin:
-        print(f"[group-media-caption] sender is not currently a group admin chat={message.chat.id} user={message.from_user.id} status={getattr(member, 'status', '?')}")
+        print(f"[group-media-caption] sender is not a group admin "
+              f"chat={message.chat.id} user={message.from_user.id}")
     return is_admin
 
+
 def _message_has_supported_media(message):
-    # Stickers and video notes are included so we can explain that Telegram
-    # does not provide a caption field for them instead of silently ignoring them.
     return any(getattr(message, attr, None) for attr in (
         'photo', 'video', 'document', 'audio', 'animation', 'voice',
         'sticker', 'video_note',
     ))
 
-def _get_group_media_file(message):
-    if getattr(message, 'photo', None):
-        return 'photo', message.photo[-1].file_id
-    for kind in ('video', 'document', 'audio', 'animation', 'voice'):
-        media = getattr(message, kind, None)
-        if media:
-            return kind, media.file_id
-    return None, None
-
-def _send_one_group_media(message, caption_html):
-    """Resend one supported media item with a caption, preserving its Telegram type."""
-    kind, file_id = _get_group_media_file(message)
-    send_method = {
-        'photo': bot.send_photo,
-        'video': bot.send_video,
-        'document': bot.send_document,
-        'audio': bot.send_audio,
-        'animation': bot.send_animation,
-        'voice': bot.send_voice,
-    }.get(kind)
-    if not send_method or not file_id:
-        raise ValueError(f"unsupported media type: {kind or 'unknown'}")
-    kwargs = {"caption": caption_html, "parse_mode": "HTML"}
-    thread_id = getattr(message, 'message_thread_id', None)
-    if thread_id is not None:
-        kwargs['message_thread_id'] = thread_id
-    reply_target = getattr(message, 'reply_to_message', None)
-    if reply_target is not None:
-        kwargs['reply_to_message_id'] = reply_target.message_id
-        # If the replied-to message disappears while this delayed repost is
-        # queued, still deliver the media instead of losing the replacement.
-        kwargs['allow_sending_without_reply'] = True
-    replacement = send_method(message.chat.id, file_id, **kwargs)
-    _keep_replacement_message(message.chat.id, replacement)
-    return replacement
-
-def _album_can_be_sent_together(kinds):
-    """Telegram media groups permit photo/video mixes, or homogeneous audio/docs."""
-    if len(kinds) < 2 or len(kinds) > 10:
-        return False
-    if all(kind in ('photo', 'video') for kind in kinds):
-        return True
-    return len(set(kinds)) == 1 and kinds[0] in ('audio', 'document')
-
-def _send_media_album(messages, caption_index, combined_caption):
-    media_data = [_get_group_media_file(item) for item in messages]
-    kinds = [kind for kind, file_id in media_data]
-    if any(not kind or not file_id for kind, file_id in media_data):
-        raise ValueError("album contains an unsupported media item")
-
-    if not _album_can_be_sent_together(kinds):
-        raise ValueError(
-            "Telegram cannot send this media_group as one album: albums need "
-            "2-10 photos/videos, or 2-10 audio files or documents of one type"
-        )
-
-    media_items = []
-    for index, (item, (kind, file_id)) in enumerate(zip(messages, media_data)):
-        if index == caption_index:
-            caption = combined_caption
-        else:
-            original_caption = getattr(item, 'caption', None)
-            caption = _caption_as_html(
-                original_caption, getattr(item, 'caption_entities', None)
-            ) if original_caption else None
-        if kind == 'photo':
-            media = InputMediaPhoto(file_id, caption=caption, parse_mode='HTML')
-        elif kind == 'video':
-            media = InputMediaVideo(file_id, caption=caption, parse_mode='HTML')
-        elif kind == 'audio':
-            media = InputMediaAudio(file_id, caption=caption, parse_mode='HTML')
-        else:  # homogeneous document album
-            media = InputMediaDocument(file_id, caption=caption, parse_mode='HTML')
-        media_items.append(media)
-
-    kwargs = {}
-    thread_id = getattr(messages[0], 'message_thread_id', None)
-    if thread_id is not None:
-        kwargs['message_thread_id'] = thread_id
-    reply_target = next(
-        (getattr(item, 'reply_to_message', None) for item in messages
-         if getattr(item, 'reply_to_message', None) is not None),
-        None,
-    )
-    if reply_target is not None:
-        kwargs['reply_to_message_id'] = reply_target.message_id
-        kwargs['allow_sending_without_reply'] = True
-    replacements = bot.send_media_group(messages[0].chat.id, media_items, **kwargs)
-    for replacement in replacements or []:
-        _keep_replacement_message(messages[0].chat.id, replacement)
-
-class _CaptionTextExtractor(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts = []
-
-    def handle_data(self, data):
-        self.parts.append(data)
-
-def _caption_visible_text(caption_html):
-    """Return the visible text in the saved HTML caption for duplicate checks."""
-    parser = _CaptionTextExtractor()
-    try:
-        parser.feed(caption_html or '')
-        parser.close()
-    except Exception:
-        return ''
-    return ''.join(parser.parts).strip()
-
-def _caption_utf16_length(caption_html):
-    """Telegram caption limits count UTF-16 code units, not Python characters."""
-    visible_text = _caption_visible_text(caption_html)
-    return len(visible_text.encode('utf-16-le')) // 2
-
-def _caption_as_html(caption, entities=None):
-    """Escape existing caption text and retain its Telegram formatting entities."""
-    return telebot.formatting.apply_html_entities(caption or '', entities or None)
-
-def _append_saved_caption_html(original_caption, original_entities, saved_caption):
-    original_html = _caption_as_html(original_caption, original_entities)
-    return f"{original_html}\n\n{saved_caption}" if original_html else saved_caption
-
-def _caption_already_present(messages, saved_caption):
-    saved_text = _caption_visible_text(saved_caption)
-    return bool(saved_text) and any(
-        saved_text in (getattr(message, 'caption', None) or '')
-        for message in messages
-    )
-
-def _keep_replacement_message(chat_id, message):
-    message_id = getattr(message, 'message_id', None)
-    if message_id is not None:
-        schedule_delete_fn(chat_id, message_id, None)
 
 def _bot_can_delete_group_messages(chat_id):
     now = time.monotonic()
@@ -242,167 +165,448 @@ def _bot_can_delete_group_messages(chat_id):
             )
         )
     except Exception as e:
-        print(f"[group-media-caption] couldn't verify bot delete permission chat={chat_id}: {e}")
+        print(f"[group-media-caption] couldn't verify bot delete permission "
+              f"chat={chat_id}: {e}")
         return False
     with _group_admin_status_lock:
         _bot_delete_permission_cache[chat_id] = (now + GROUP_ADMIN_CACHE_SECONDS, can_delete)
     return can_delete
 
-def _repost_group_media(messages):
-    messages = sorted(messages, key=lambda item: item.message_id)
+
+# ---------------------------------------------------------------------------
+# Caption helpers
+# ---------------------------------------------------------------------------
+
+class _CaptionTextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+
+def _caption_visible_text(caption_html):
+    parser = _CaptionTextExtractor()
+    try:
+        parser.feed(caption_html or '')
+        parser.close()
+    except Exception:
+        return ''
+    return ''.join(parser.parts).strip()
+
+
+def _caption_utf16_length(caption_html):
+    return len(_caption_visible_text(caption_html).encode('utf-16-le')) // 2
+
+
+def _caption_as_html(caption, entities=None):
+    return telebot.formatting.apply_html_entities(caption or '', entities or None)
+
+
+def _append_saved_caption_html(original_caption, original_entities, saved_caption):
+    original_html = _caption_as_html(original_caption, original_entities)
+    return f"{original_html}\n\n{saved_caption}" if original_html else saved_caption
+
+
+def _caption_already_present(messages, saved_caption):
+    saved_text = _caption_visible_text(saved_caption)
+    return bool(saved_text) and any(
+        saved_text in (getattr(m, 'caption', None) or '')
+        for m in messages
+    )
+
+
+# ---------------------------------------------------------------------------
+# Media send helpers
+# ---------------------------------------------------------------------------
+
+def _get_group_media_file(message):
+    if getattr(message, 'photo', None):
+        return 'photo', message.photo[-1].file_id
+    for kind in ('video', 'document', 'audio', 'animation', 'voice'):
+        media = getattr(message, kind, None)
+        if media:
+            return kind, media.file_id
+    return None, None
+
+
+def _keep_replacement_message(chat_id, message):
+    message_id = getattr(message, 'message_id', None)
+    if message_id is not None:
+        schedule_delete_fn(chat_id, message_id, None)
+
+
+def _send_one_group_media(message, caption_html):
+    """Resend one media item with the saved caption appended."""
+    kind, file_id = _get_group_media_file(message)
+    send_method = {
+        'photo':     bot.send_photo,
+        'video':     bot.send_video,
+        'document':  bot.send_document,
+        'audio':     bot.send_audio,
+        'animation': bot.send_animation,
+        'voice':     bot.send_voice,
+    }.get(kind)
+    if not send_method or not file_id:
+        raise ValueError(f"unsupported media type: {kind or 'unknown'}")
+    kwargs = {"caption": caption_html, "parse_mode": "HTML"}
+    thread_id = getattr(message, 'message_thread_id', None)
+    if thread_id is not None:
+        kwargs['message_thread_id'] = thread_id
+    reply_target = getattr(message, 'reply_to_message', None)
+    if reply_target is not None:
+        kwargs['reply_to_message_id'] = reply_target.message_id
+        kwargs['allow_sending_without_reply'] = True
+    replacement = send_method(message.chat.id, file_id, **kwargs)
+    _keep_replacement_message(message.chat.id, replacement)
+    return replacement
+
+
+def _album_can_be_sent_together(kinds):
+    """True if Telegram will accept these kinds as a single media group."""
+    if len(kinds) < 2 or len(kinds) > 10:
+        return False
+    if all(k in ('photo', 'video') for k in kinds):
+        return True
+    return len(set(kinds)) == 1 and kinds[0] in ('audio', 'document')
+
+
+def _send_media_album(messages, caption_index, combined_caption):
+    media_data = [_get_group_media_file(item) for item in messages]
+    kinds = [kind for kind, _ in media_data]
+    if any(not kind or not file_id for kind, file_id in media_data):
+        raise ValueError("album contains an unsupported media item")
+    if not _album_can_be_sent_together(kinds):
+        raise ValueError(
+            f"Telegram cannot group {len(kinds)} items of types [{','.join(kinds)}] "
+            "as one album"
+        )
+    media_items = []
+    for idx, (item, (kind, file_id)) in enumerate(zip(messages, media_data)):
+        caption = (
+            combined_caption if idx == caption_index
+            else (_caption_as_html(item.caption, getattr(item, 'caption_entities', None))
+                  if item.caption else None)
+        )
+        cls_map = {
+            'photo':    InputMediaPhoto,
+            'video':    InputMediaVideo,
+            'audio':    InputMediaAudio,
+            'document': InputMediaDocument,
+        }
+        media_items.append(cls_map[kind](file_id, caption=caption, parse_mode='HTML'))
+
+    kwargs = {}
+    thread_id = getattr(messages[0], 'message_thread_id', None)
+    if thread_id is not None:
+        kwargs['message_thread_id'] = thread_id
+    reply_target = next(
+        (getattr(item, 'reply_to_message', None) for item in messages
+         if getattr(item, 'reply_to_message', None) is not None),
+        None,
+    )
+    if reply_target is not None:
+        kwargs['reply_to_message_id'] = reply_target.message_id
+        kwargs['allow_sending_without_reply'] = True
+    replacements = bot.send_media_group(messages[0].chat.id, media_items, **kwargs)
+    for r in replacements or []:
+        _keep_replacement_message(messages[0].chat.id, r)
+
+
+# ---------------------------------------------------------------------------
+# Core repost logic — one unit (single OR album)
+# ---------------------------------------------------------------------------
+
+def _repost_unit(messages):
+    """
+    Process one ordered unit.  Raises on failure so the caller can retry.
+
+    A unit is ALWAYS a list sorted by message_id.  Whether it's treated as a
+    single or an album is decided here by the actual list length — never by
+    media_group_id alone, since Telegram sometimes stamps a lone forwarded
+    video with a media_group_id.
+    """
+    messages = sorted(messages, key=lambda m: m.message_id)
     if not messages:
         return
     chat_id = messages[0].chat.id
+
+    # Per-group saved-caption toggle
+    if _saved_caption_enabled_fn is not None:
+        try:
+            if not _saved_caption_enabled_fn(chat_id):
+                print(f"[group-media-caption] skipped chat={chat_id}: "
+                      "saved caption disabled for this group")
+                return
+        except Exception as e:
+            print(f"[group-media-caption] saved_caption_enabled_fn error "
+                  f"chat={chat_id}: {e}")
+
     saved_caption = caption_getter()
     if not saved_caption:
-        print(f"[group-media-caption] skipped chat={chat_id}: no saved caption is configured")
+        print(f"[group-media-caption] skipped chat={chat_id}: no saved caption")
         try:
-            bot.reply_to(messages[0], "ℹ️ No saved media caption is set yet. A configured bot admin must set one with /setmediacaption in a private chat.")
-        except Exception as reply_error:
-            print(f"[group-media-caption] couldn't notify sender chat={chat_id}: {reply_error}")
+            bot.reply_to(
+                messages[0],
+                "ℹ️ No saved media caption is set yet. "
+                "A configured bot admin must set one with /setmediacaption "
+                "in a private chat.",
+            )
+        except Exception:
+            pass
         return
+
     if _caption_already_present(messages, saved_caption):
-        print(f"[group-media-caption] already present chat={chat_id}; leaving source unchanged")
+        print(f"[group-media-caption] caption already present chat={chat_id}; skipping")
         return
+
     if not _bot_can_delete_group_messages(chat_id):
-        print(f"[group-media-caption] skipped chat={chat_id}: bot needs Delete Messages permission to replace the source")
+        print(f"[group-media-caption] bot lacks Delete Messages permission chat={chat_id}")
         try:
             bot.reply_to(
                 messages[0],
-                "⚠️ I couldn't replace this media. Please grant me the Telegram admin permission to delete messages, then try again.",
+                "⚠️ I couldn't replace this media — please grant me the "
+                "Telegram admin permission to delete messages, then try again.",
             )
-        except Exception as reply_error:
-            print(f"[group-media-caption] couldn't notify sender chat={chat_id}: {reply_error}")
+        except Exception:
+            pass
         return
 
-    try:
-        is_album = bool(getattr(messages[0], 'media_group_id', None))
-        if not is_album:
-            message = messages[0]
-            caption_html = _append_saved_caption_html(
-                message.caption,
-                getattr(message, 'caption_entities', None),
-                saved_caption,
-            )
-            if _caption_utf16_length(caption_html) > 1024:
-                print(f"[group-media-caption] skipped chat={chat_id} message={message.message_id}: combined caption exceeds Telegram's 1024 UTF-16-unit media caption limit")
-                bot.reply_to(message, "⚠️ The combined caption is too long for Telegram, so I left the original media unchanged.")
-                return
-            # Reuse the received file_id so protected-content groups do not
-            # block replacement through copyMessage's forwarding rules.
-            _send_one_group_media(message, caption_html)
-        else:
-            if len(messages) < 2 or len(messages) > 10:
-                raise ValueError(
-                    f"Telegram album batch has {len(messages)} item(s); "
-                    "sendMediaGroup requires 2-10 items. Originals were kept."
-                )
-            caption_index = next((i for i, item in enumerate(messages) if getattr(item, 'caption', None)), 0)
-            caption_source = messages[caption_index]
-            combined_caption = _append_saved_caption_html(
-                getattr(caption_source, 'caption', None),
-                getattr(caption_source, 'caption_entities', None),
-                saved_caption,
-            )
-            if _caption_utf16_length(combined_caption) > 1024:
-                print(f"[group-media-caption] skipped album chat={chat_id}: combined caption exceeds 1024 characters")
-                bot.reply_to(messages[0], "⚠️ The combined album caption is too long for Telegram, so I left the original album unchanged.")
-                return
-            _send_media_album(messages, caption_index, combined_caption)
+    # ------------------------------------------------------------------
+    # Single vs album decision — based on list length, NOT media_group_id
+    # ------------------------------------------------------------------
+    is_album = len(messages) >= 2   # 1-item list = single, always
 
-        # Delete the source only after Telegram confirms the replacement was sent.
-        for message in messages:
-            try:
-                bot.delete_message(chat_id, message.message_id)
-            except Exception as delete_error:
-                print(f"[group-media-caption] replacement sent but couldn't delete source chat={chat_id} message={message.message_id}: {delete_error}")
-        print(f"[group-media-caption] reposted media chat={chat_id} source_messages={len(messages)}")
-    except Exception as e:
-        kinds = ','.join(kind or 'unknown' for kind, _ in (_get_group_media_file(item) for item in messages))
-        print(
-            f"[group-media-caption] could not replace media chat={chat_id} "
-            f"message_ids={[item.message_id for item in messages]} types={kinds}: {e}",
-            flush=True,
+    if not is_album:
+        # ---- SINGLE media item ----------------------------------------
+        msg = messages[0]
+        caption_html = _append_saved_caption_html(
+            msg.caption,
+            getattr(msg, 'caption_entities', None),
+            saved_caption,
         )
-        try:
+        if _caption_utf16_length(caption_html) > 1024:
+            print(f"[group-media-caption] combined caption > 1024 UTF-16 units "
+                  f"chat={chat_id} message={msg.message_id}")
+            bot.reply_to(
+                msg,
+                "⚠️ The combined caption is too long for Telegram — "
+                "original media left unchanged.",
+            )
+            return
+        _send_one_group_media(msg, caption_html)   # raises on failure
+    else:
+        # ---- Album (≥2 real items) ------------------------------------
+        caption_idx = next(
+            (i for i, m in enumerate(messages) if getattr(m, 'caption', None)),
+            0,
+        )
+        cap_src = messages[caption_idx]
+        combined = _append_saved_caption_html(
+            cap_src.caption,
+            getattr(cap_src, 'caption_entities', None),
+            saved_caption,
+        )
+        if _caption_utf16_length(combined) > 1024:
+            print(f"[group-media-caption] album combined caption > 1024 UTF-16 units "
+                  f"chat={chat_id}")
             bot.reply_to(
                 messages[0],
-                "⚠️ I couldn't replace this media with its caption. The original was kept. "
-                "Albums stay grouped; Telegram only accepts 2-10 photos/videos, or "
-                "2-10 audio files or documents of the same type. Check the saved caption's HTML too.",
+                "⚠️ The combined album caption is too long for Telegram — "
+                "originals left unchanged.",
             )
-        except Exception as reply_error:
-            print(f"[group-media-caption] couldn't notify sender chat={chat_id}: {reply_error}")
-
-def _drain_group_media_repost_queue(chat_id):
-    while True:
-        with _group_media_repost_queue_lock:
-            state = _group_media_repost_queues.get(chat_id)
-            if not state:
-                return
-            if not state['ready_units']:
-                state['worker_active'] = False
-                if not state['pending_units']:
-                    _group_media_repost_queues.pop(chat_id, None)
-                return
-            unit = state['ready_units'].pop(0)
-        try:
-            _repost_group_media(unit)
-        except Exception as e:
-            print(f"[group-media-caption] queued repost failed chat={chat_id}: {e}", flush=True)
-
-
-def _flush_group_media_repost_batch(chat_id):
-    start_worker = False
-    with _group_media_repost_queue_lock:
-        state = _group_media_repost_queues.get(chat_id)
-        if not state:
             return
-        state['timer'] = None
-        if state['pending_units']:
-            state['pending_units'].sort(key=lambda unit: min(item.message_id for item in unit))
-            state['ready_units'].extend(state['pending_units'])
-            state['pending_units'] = []
-        if state['ready_units'] and not state['worker_active']:
-            state['worker_active'] = True
-            start_worker = True
-    if start_worker:
-        worker = Thread(target=_drain_group_media_repost_queue, args=(chat_id,), daemon=True)
-        worker.start()
+        _send_media_album(messages, caption_idx, combined)   # raises on failure
+
+    # Delete originals only after Telegram confirms the replacement was sent.
+    for m in messages:
+        try:
+            bot.delete_message(chat_id, m.message_id)
+        except Exception as de:
+            print(f"[group-media-caption] replacement sent but couldn't delete "
+                  f"source chat={chat_id} message={m.message_id}: {de}")
+    print(f"[group-media-caption] done chat={chat_id} items={len(messages)} "
+          f"album={is_album}", flush=True)
 
 
-def _queue_group_media_repost(messages):
-    messages = sorted(messages, key=lambda item: item.message_id)
-    if not messages:
+# ---------------------------------------------------------------------------
+# Sequential per-chat worker with retry
+# ---------------------------------------------------------------------------
+
+def _run_repost_queue(chat_id):
+    """
+    Pop units from the per-chat queue one at a time.
+    Each unit is retried up to REPOST_MAX_RETRIES times before giving up.
+    The queue is BLOCKED during retries → strict send order is preserved.
+    """
+    while True:
+        with _repost_queue_lock:
+            state = _repost_queues.get(chat_id)
+            if not state or not state['units']:
+                if state:
+                    state['active'] = False
+                    if not state['units']:
+                        _repost_queues.pop(chat_id, None)
+                return
+            unit = state['units'].pop(0)
+
+        last_err = None
+        for attempt in range(1, REPOST_MAX_RETRIES + 1):
+            try:
+                _repost_unit(unit)
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                kinds = ','.join(
+                    k or 'unknown'
+                    for k, _ in (_get_group_media_file(m) for m in unit)
+                )
+                print(
+                    f"[group-media-caption] attempt {attempt}/{REPOST_MAX_RETRIES} "
+                    f"failed chat={chat_id} "
+                    f"ids={[m.message_id for m in unit]} types={kinds}: {e}",
+                    flush=True,
+                )
+                if attempt < REPOST_MAX_RETRIES:
+                    time.sleep(REPOST_RETRY_DELAY)
+
+        if last_err is not None:
+            print(
+                f"[group-media-caption] gave up after {REPOST_MAX_RETRIES} attempts "
+                f"chat={chat_id} ids={[m.message_id for m in unit]}: {last_err}",
+                flush=True,
+            )
+            is_album = len(unit) >= 2
+            try:
+                notice = (
+                    f"⚠️ I couldn't replace this "
+                    f"{'album' if is_album else 'media'} with its caption "
+                    f"after {REPOST_MAX_RETRIES} attempts — original kept.\n"
+                    + ("Albums need 2–10 photos/videos, or 2–10 audio files or "
+                       "documents of the same type. Also check the saved caption HTML."
+                       if is_album else
+                       "Check the saved caption HTML and my admin permissions.")
+                )
+                bot.reply_to(unit[0], notice)
+            except Exception as ne:
+                print(f"[group-media-caption] couldn't notify admin "
+                      f"chat={chat_id}: {ne}")
+
+
+def _start_repost_queue(chat_id, units):
+    """
+    Push sorted units into the per-chat queue and ensure the worker is running.
+    `units` is an already-sorted list of message-lists (each sorted internally).
+    """
+    start = False
+    with _repost_queue_lock:
+        state = _repost_queues.setdefault(chat_id, {'units': [], 'active': False})
+        state['units'].extend(units)
+        if not state['active']:
+            state['active'] = True
+            start = True
+    if start:
+        Thread(target=_run_repost_queue, args=(chat_id,), daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Unified collect window — single timer, all media types, per chat
+# ---------------------------------------------------------------------------
+
+def _flush_collect_window(chat_id):
+    """
+    Called when the per-chat collect window closes.
+
+    1. Drain all buffered messages for this chat.
+    2. Group them by media_group_id:
+       - Each distinct media_group_id whose group has ≥2 members → album unit.
+       - A group with only 1 member (lone video with spurious media_group_id,
+         or genuinely standalone message) → single unit.
+       - Messages with no media_group_id → each its own single unit.
+    3. Sort all units by their lowest message_id (original send order).
+    4. Hand the sorted list to the sequential worker.
+    """
+    with _collect_lock:
+        window = _collect_windows.pop(chat_id, None)
+    if not window or not window['messages']:
         return
-    chat_id = messages[0].chat.id
-    with _group_media_repost_queue_lock:
-        state = _group_media_repost_queues.setdefault(chat_id, {
-            'pending_units': [], 'ready_units': [], 'timer': None, 'worker_active': False,
-        })
-        state['pending_units'].append(messages)
-        old_timer = state.get('timer')
-        if old_timer:
-            old_timer.cancel()
-        timer = Timer(GROUP_MEDIA_REPOST_SETTLE_SECONDS, _flush_group_media_repost_batch, args=(chat_id,))
-        timer.daemon = True
-        state['timer'] = timer
-        timer.start()
+
+    all_messages = sorted(window['messages'], key=lambda m: m.message_id)
+
+    # Group by media_group_id.  None-keyed messages are always individual.
+    groups_by_id = defaultdict(list)   # media_group_id -> [message, ...]
+    singles = []                       # messages with no media_group_id
+
+    for msg in all_messages:
+        mgid = getattr(msg, 'media_group_id', None)
+        if mgid:
+            groups_by_id[mgid].append(msg)
+        else:
+            singles.append([msg])      # wrap immediately so it's a unit
+
+    # Convert multi-item album groups; demote 1-item groups to singles.
+    album_units = []
+    for mgid, msgs in groups_by_id.items():
+        msgs_sorted = sorted(msgs, key=lambda m: m.message_id)
+        if len(msgs_sorted) >= 2:
+            album_units.append(msgs_sorted)   # true album
+        else:
+            singles.append(msgs_sorted)       # lone video — treat as single
+
+    # Merge and sort ALL units by their first (lowest) message_id so the
+    # replay order matches the exact order the admin originally sent them.
+    all_units = singles + album_units
+    all_units.sort(key=lambda unit: unit[0].message_id)
+
+    unit_summary = [(len(u), getattr(u[0], 'media_group_id', None)) for u in all_units]
+    print(
+        f"[group-media-caption] flushing chat={chat_id} "
+        f"total_items={len(all_messages)} units={len(all_units)} "
+        f"summary={unit_summary}",
+        flush=True,
+    )
+
+    _start_repost_queue(chat_id, all_units)
 
 
-def _flush_group_media_album(album_key):
-    with _group_media_album_lock:
-        batch = _group_media_album_batches.pop(album_key, None)
-    if batch:
-        _queue_group_media_repost(batch['messages'])
+def _add_to_collect_window(message):
+    """
+    Add a message to this chat's collect window, resetting the settle timer.
+    All messages — singles and album parts alike — enter the same window.
+    """
+    chat_id = message.chat.id
+    with _collect_lock:
+        window = _collect_windows.setdefault(chat_id, {'messages': [], 'timer': None})
+
+        # Deduplicate (Telegram can re-deliver the same update).
+        if all(m.message_id != message.message_id for m in window['messages']):
+            window['messages'].append(message)
+
+        # Reset the settle timer.
+        if window['timer']:
+            window['timer'].cancel()
+        t = Timer(COLLECT_SETTLE_SECONDS, _flush_collect_window, args=(chat_id,))
+        t.daemon = True
+        window['timer'] = t
+        t.start()
+
+
+# ---------------------------------------------------------------------------
+# Entry point called by the telebot handler
+# ---------------------------------------------------------------------------
 
 def handle_configured_admin_group_media(message):
     print(
-        f"[group-media-caption] received group media chat={message.chat.id} "
-        f"sender={message.from_user.id if message.from_user else '?'} "
-        f"message={message.message_id} album={getattr(message, 'media_group_id', None) or '-'}",
+        f"[group-media-caption] incoming chat={message.chat.id} "
+        f"sender={message.from_user.id if message.from_user else 'anon'} "
+        f"msg={message.message_id} "
+        f"mgid={getattr(message, 'media_group_id', None) or '-'}",
         flush=True,
     )
+
+    # Stickers and video notes can never carry a caption.
     if getattr(message, 'sticker', None) or getattr(message, 'video_note', None):
         try:
             bot.reply_to(
@@ -410,23 +614,10 @@ def handle_configured_admin_group_media(message):
                 "ℹ️ Telegram doesn't support captions on stickers or video notes. "
                 "I left the original media unchanged.",
             )
-        except Exception as reply_error:
-            print(f"[group-media-caption] couldn't explain unsupported caption type chat={message.chat.id}: {reply_error}")
-        return
-    media_group_id = getattr(message, 'media_group_id', None)
-    if not media_group_id:
-        _queue_group_media_repost([message])
+        except Exception as e:
+            print(f"[group-media-caption] couldn't explain unsupported type "
+                  f"chat={message.chat.id}: {e}")
         return
 
-    album_key = (message.chat.id, str(media_group_id))
-    with _group_media_album_lock:
-        batch = _group_media_album_batches.setdefault(album_key, {"messages": [], "timer": None})
-        if all(item.message_id != message.message_id for item in batch['messages']):
-            batch['messages'].append(message)
-        old_timer = batch.get('timer')
-        if old_timer:
-            old_timer.cancel()
-        timer = Timer(GROUP_MEDIA_ALBUM_SETTLE_SECONDS, _flush_group_media_album, args=(album_key,))
-        timer.daemon = True
-        batch['timer'] = timer
-        timer.start()
+    # Everything else enters the unified collect window.
+    _add_to_collect_window(message)

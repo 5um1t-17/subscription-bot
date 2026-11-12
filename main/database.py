@@ -28,3 +28,5 @@ offer_bundles_col = db["offer_bundles"]
 pending_offer_bundle_checkouts_col = db["pending_offer_bundle_checkouts"]
 fj_pending_requests_col = db["fj_pending_requests"]
 approved_payments_col = db["approved_payments"]
+# Per-group feature toggle settings (saved caption on/off, emoji reaction on/off)
+group_chat_settings_col = db["group_chat_settings"]

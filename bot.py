@@ -35,6 +35,7 @@ from main.database import (
     approved_payments_col, carts_col, channels_col, chat_members_col, client,
     counters_col, db, expired_subs_col, fj_pending_requests_col,
     free_trial_claims_col, free_trial_claims_history_col, free_trials_col,
+    group_chat_settings_col,
     offer_bundles_col, payments_col, pending_checkouts_col,
     pending_offer_bundle_checkouts_col, pending_reactions_col,
     scheduled_broadcasts_col, seen_users_col, settings_col, tracked_chats_col,
@@ -414,6 +415,18 @@ class AutoReactMiddleware(BaseMiddleware):
 
         if message.from_user and message.from_user.is_bot and not is_anon_admin:
             return
+
+        # --- Per-group emoji reaction toggle check ---
+        # is_emoji_react_enabled is defined later in this module but that's fine
+        # because this method is only called at runtime, not at class definition time.
+        try:
+            chat = getattr(message, 'chat', None)
+            if chat and chat.type in ('group', 'supergroup'):
+                if not is_emoji_react_enabled(chat.id):
+                    return  # emoji reactions disabled for this group
+        except Exception:
+            pass  # fail-open: react anyway if the check itself errors
+
         queue_message_reaction(message)
 
     def post_process(self, message, data, exception):
@@ -459,6 +472,7 @@ caption_admin_feature.register_handlers()
 group_media_caption_feature.configure(
     bot, GROUP_ANONYMOUS_BOT_ID, caption_admin_feature.get_caption,
     lambda chat_id, message_id, delay: schedule_delete(chat_id, message_id, delay),
+    saved_caption_enabled_fn=lambda chat_id: is_saved_caption_enabled(chat_id),
 )
 group_media_caption_feature.register_handlers()
 
@@ -3369,6 +3383,160 @@ def _is_chat_admin_message(message):
 
     return False
 
+# =====================================================================
+# PER-GROUP FEATURE SETTINGS  (/sc saved caption  |  /em emoji react)
+# ---------------------------------------------------------------------
+# Settings are stored in group_chat_settings_col keyed by chat_id.
+# Schema: { "_id": chat_id (int), "saved_caption": bool, "emoji_react": bool }
+# Both features default to ON when no document exists for a group.
+# =====================================================================
+
+def _get_group_chat_settings(chat_id):
+    """Return the settings doc for `chat_id`, or a default-ON dict if absent."""
+    try:
+        doc = group_chat_settings_col.find_one({"_id": int(chat_id)})
+        if doc:
+            return doc
+    except Exception as e:
+        print(f"[group-settings] read error chat={chat_id}: {e}")
+    return {"_id": int(chat_id), "saved_caption": True, "emoji_react": True}
+
+def _set_group_chat_setting(chat_id, field, value):
+    """Upsert a single boolean field for a group."""
+    try:
+        group_chat_settings_col.update_one(
+            {"_id": int(chat_id)},
+            {"$set": {field: bool(value), "updated_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+        return True
+    except Exception as e:
+        print(f"[group-settings] write error chat={chat_id} field={field}: {e}")
+        return False
+
+def is_saved_caption_enabled(chat_id):
+    """True (default) unless admin explicitly disabled it for this group."""
+    return bool(_get_group_chat_settings(chat_id).get("saved_caption", True))
+
+def is_emoji_react_enabled(chat_id):
+    """True (default) unless admin explicitly disabled it for this group."""
+    return bool(_get_group_chat_settings(chat_id).get("emoji_react", True))
+
+
+def _parse_on_off(text):
+    """Return True for 'on', False for 'off', None if unrecognised."""
+    val = (text or "").strip().lower()
+    if val == "on":
+        return True
+    if val == "off":
+        return False
+    return None
+
+
+def _sc_em_check(message):
+    """Shared guard: command must come from a group admin (including anon admins)."""
+    if message.chat.type not in ("group", "supergroup"):
+        return False
+    return _is_chat_admin_message(message)
+
+
+SC_EM_VANISH_SECONDS = 5  # both the command message and the bot reply auto-delete after 5 s
+
+
+def _delete_command_message(message):
+    """Schedule the user's own command message for deletion after SC_EM_VANISH_SECONDS."""
+    try:
+        schedule_delete(message.chat.id, message.message_id, SC_EM_VANISH_SECONDS)
+    except Exception:
+        pass
+
+
+@bot.message_handler(commands=["sc"], func=_sc_em_check)
+def cmd_saved_caption(message):
+    """
+    /sc on  — enable the saved caption feature for this group
+    /sc off — disable it
+    Both the command and the bot reply auto-vanish after SC_EM_VANISH_SECONDS.
+    """
+    args = (message.text or "").strip().split(None, 1)
+    state_arg = args[1].strip() if len(args) > 1 else ""
+    state = _parse_on_off(state_arg)
+    chat_id = message.chat.id
+
+    # Schedule the admin's command message to vanish
+    _delete_command_message(message)
+
+    if state is None:
+        current = "🟢 ON" if is_saved_caption_enabled(chat_id) else "🔴 OFF"
+        try:
+            bot.reply_to(
+                message,
+                f"📝 <b>Saved Caption</b> is currently <b>{current}</b> in this group.\n\n"
+                f"Use <code>/sc on</code> or <code>/sc off</code> to change it.",
+                parse_mode="HTML",
+                vanish_delay=SC_EM_VANISH_SECONDS,
+            )
+        except Exception:
+            pass
+        return
+
+    ok = _set_group_chat_setting(chat_id, "saved_caption", state)
+    label = "🟢 Enabled" if state else "🔴 Disabled"
+    if ok:
+        reply = f"📝 <b>Saved Caption</b> has been <b>{label}</b> for this group."
+    else:
+        reply = "⚠️ Failed to save setting — please try again."
+    try:
+        bot.reply_to(message, reply, parse_mode="HTML", vanish_delay=SC_EM_VANISH_SECONDS)
+    except Exception:
+        pass
+    print(f"[group-settings] /sc {'on' if state else 'off'} chat={chat_id} "
+          f"by user={getattr(message.from_user, 'id', 'anon')}")
+
+
+@bot.message_handler(commands=["em"], func=_sc_em_check)
+def cmd_emoji_react(message):
+    """
+    /em on  — enable auto emoji reactions for this group
+    /em off — disable them
+    Both the command and the bot reply auto-vanish after SC_EM_VANISH_SECONDS.
+    """
+    args = (message.text or "").strip().split(None, 1)
+    state_arg = args[1].strip() if len(args) > 1 else ""
+    state = _parse_on_off(state_arg)
+    chat_id = message.chat.id
+
+    # Schedule the admin's command message to vanish
+    _delete_command_message(message)
+
+    if state is None:
+        current = "🟢 ON" if is_emoji_react_enabled(chat_id) else "🔴 OFF"
+        try:
+            bot.reply_to(
+                message,
+                f"😀 <b>Emoji Reactions</b> are currently <b>{current}</b> in this group.\n\n"
+                f"Use <code>/em on</code> or <code>/em off</code> to change it.",
+                parse_mode="HTML",
+                vanish_delay=SC_EM_VANISH_SECONDS,
+            )
+        except Exception:
+            pass
+        return
+
+    ok = _set_group_chat_setting(chat_id, "emoji_react", state)
+    label = "🟢 Enabled" if state else "🔴 Disabled"
+    if ok:
+        reply = f"😀 <b>Emoji Reactions</b> have been <b>{label}</b> for this group."
+    else:
+        reply = "⚠️ Failed to save setting — please try again."
+    try:
+        bot.reply_to(message, reply, parse_mode="HTML", vanish_delay=SC_EM_VANISH_SECONDS)
+    except Exception:
+        pass
+    print(f"[group-settings] /em {'on' if state else 'off'} chat={chat_id} "
+          f"by user={getattr(message.from_user, 'id', 'anon')}")
+
+
 def _get_protected_admin_ids(chat_id):
     admin_ids = {GROUP_ANONYMOUS_BOT_ID}
     admin_ids.update(ADMIN_USER_IDS)
@@ -3680,6 +3848,8 @@ def setup_commands():
     ]
     group_admin_commands = [
         BotCommand("cc", "Edit caption on replied bot media"),
+        BotCommand("sc", "Toggle saved caption on/off for this group"),
+        BotCommand("em", "Toggle emoji reactions on/off for this group"),
         BotCommand("remove", "Remove user(s) from this group/channel"),
         BotCommand("sync", "Sync member data of this group/channel"),
         BotCommand("import", "Import member list for this group/channel"),
