@@ -30,10 +30,11 @@ class AdminCaptionFeature:
     pending_preview_ttl = 900
     pending_cc_ttl = 900
 
-    def __init__(self, bot, settings_collection, chat_admin_checker=None):
+    def __init__(self, bot, settings_collection, chat_admin_checker=None, sc_enabled_checker=None):
         self.bot = bot
         self.settings = settings_collection
         self.chat_admin_checker = chat_admin_checker or (lambda message: False)
+        self.sc_enabled_checker = sc_enabled_checker or (lambda chat_id: True)
         self.pending_previews = {}
         self.pending_cc = {}
         self.pending_cc_tokens = {}
@@ -250,10 +251,16 @@ class AdminCaptionFeature:
         return (message.chat.id, sender_id) if sender_id is not None else None
 
     def _is_cc_chat_admin(self, message):
-        return (
-            getattr(message.chat, "type", None) in ("group", "supergroup", "channel")
-            and self.chat_admin_checker(message)
-        )
+        chat = getattr(message, "chat", None)
+        if not chat or getattr(chat, "type", None) not in ("group", "supergroup", "channel"):
+            return False
+        if chat.type in ("group", "supergroup"):
+            try:
+                if not self.sc_enabled_checker(chat.id):
+                    return False
+            except Exception:
+                pass
+        return self.chat_admin_checker(message)
 
     def _bot_can_delete_workflow(self, chat_id, chat_type):
         try:
@@ -304,20 +311,27 @@ class AdminCaptionFeature:
         return telebot.formatting.apply_html_entities(text or "", entities or None)
 
     def _caption_entity_prefix(self, message, global_caption):
-        text = getattr(message, "caption", None) or ""
-        global_text = self._visible_text(global_caption)
+        raw_text = getattr(message, "caption", None) or ""
+        text = raw_text.strip()
+        global_text = self._visible_text(global_caption).strip()
+        if not text:
+            return ""
         if global_text and text == global_text:
             return ""
         separator_suffix = "\n\n" + global_text if global_text else ""
-        if separator_suffix and text.endswith(separator_suffix):
-            custom_text = text[:-len(separator_suffix)]
+        if separator_suffix and raw_text.endswith(separator_suffix):
+            custom_text = raw_text[:-len(separator_suffix)]
             custom_units = self._utf16_length(custom_text)
             entities = [
                 entity for entity in (getattr(message, "caption_entities", None) or [])
                 if getattr(entity, "offset", 0) + getattr(entity, "length", 0) <= custom_units
             ]
             return self._html_caption(custom_text, entities)
-        return self._html_caption(text, getattr(message, "caption_entities", None))
+        if global_text and text.endswith(global_text):
+            prefix = text[:-len(global_text)].rstrip()
+            if not prefix:
+                return ""
+        return self._html_caption(raw_text, getattr(message, "caption_entities", None))
 
     def _current_custom_caption(self, chat_id, target, global_caption):
         doc = self.settings.find_one({
@@ -408,6 +422,14 @@ class AdminCaptionFeature:
         args = self._command_args(message).casefold()
         if args in ("r", "reset"):
             global_caption = self.get_caption()
+            current_custom = self._current_custom_caption(chat.id, target, global_caption)
+            if not current_custom:
+                self._delete_workflow_message(chat.id, message.message_id)
+                self.bot.send_message(
+                    chat.id,
+                    "ℹ️ There is nothing to remove — this media doesn't have any custom caption.",
+                )
+                return
             try:
                 self.bot.edit_message_caption(
                     caption=global_caption,
@@ -421,8 +443,21 @@ class AdminCaptionFeature:
                 self._delete_workflow_message(chat.id, message.message_id)
             except Exception as error:
                 self._delete_workflow_message(chat.id, message.message_id)
+                err_text = str(error).lower()
+                if "message is not modified" in err_text or "not modified" in err_text:
+                    self.settings.delete_one({
+                        "_id": self._custom_setting_id(chat.id, target.message_id)
+                    })
+                    self.bot.send_message(
+                        chat.id,
+                        "ℹ️ There is nothing to remove — this media doesn't have any custom caption.",
+                    )
+                    return
                 print(f"[caption] reset failed chat={chat.id} target={target.message_id}: {error}")
-                self.bot.send_message(chat.id, "Couldn't reset that media caption. Check the bot's edit permission and saved caption HTML.")
+                self.bot.send_message(
+                    chat.id,
+                    "Couldn't reset that media caption. Check the bot's edit permission and saved caption HTML.",
+                )
             return
         if args:
             self.bot.reply_to(message, "Use /cc to replace the custom caption, or reply with /cc reset to restore the saved caption.")

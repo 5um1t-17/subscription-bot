@@ -19,7 +19,7 @@ try:
 except ImportError:
     qrcode = None
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault, InputFile, InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand, BotCommandScopeChat, BotCommandScopeDefault, BotCommandScopeChatAdministrators, InputFile, InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
 from telebot.handler_backends import BaseMiddleware, CancelUpdate
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
@@ -464,6 +464,7 @@ def adopt_existing_channel_owner():
 caption_admin_feature = AdminCaptionFeature(
     bot, settings_col,
     chat_admin_checker=lambda message: _is_chat_admin_message(message),
+    sc_enabled_checker=lambda chat_id: is_saved_caption_enabled(chat_id),
 )
 GROUP_MEDIA_CAPTION_SETTING_ID = caption_admin_feature.setting_id
 caption_admin_feature.register_handlers()
@@ -3443,6 +3444,40 @@ def _sc_em_check(message):
 SC_EM_VANISH_SECONDS = 5  # both the command message and the bot reply auto-delete after 5 s
 
 
+group_admin_commands = [
+    BotCommand("cc", "Edit caption on replied bot media"),
+    BotCommand("sc", "Toggle saved caption on/off for this group"),
+    BotCommand("em", "Toggle emoji reactions on/off for this group"),
+    BotCommand("remove", "Remove user(s) from this group/channel"),
+    BotCommand("sync", "Sync member data of this group/channel"),
+    BotCommand("import", "Import member list for this group/channel"),
+    BotCommand("about", "Show user subscription info"),
+]
+
+group_admin_commands_no_cc = [
+    BotCommand("sc", "Toggle saved caption on/off for this group"),
+    BotCommand("em", "Toggle emoji reactions on/off for this group"),
+    BotCommand("remove", "Remove user(s) from this group/channel"),
+    BotCommand("sync", "Sync member data of this group/channel"),
+    BotCommand("import", "Import member list for this group/channel"),
+    BotCommand("about", "Show user subscription info"),
+]
+
+def sync_group_admin_commands(chat_id, sc_enabled=True):
+    """Sync Telegram command menu for chat_id's administrators depending on sc_enabled.
+    When sc is ON, explicitly sets group_admin_commands (including /cc).
+    When sc is OFF, explicitly sets group_admin_commands_no_cc (excluding /cc).
+    """
+    try:
+        scope = BotCommandScopeChatAdministrators(int(chat_id))
+        if sc_enabled:
+            bot.set_my_commands(group_admin_commands, scope=scope)
+        else:
+            bot.set_my_commands(group_admin_commands_no_cc, scope=scope)
+    except Exception as e:
+        print(f"[menu] couldn't sync admin commands for group {chat_id}: {e}")
+
+
 def _delete_command_message(message):
     """Schedule the user's own command message for deletion after SC_EM_VANISH_SECONDS."""
     try:
@@ -3484,6 +3519,7 @@ def cmd_saved_caption(message):
     label = "🟢 Enabled" if state else "🔴 Disabled"
     if ok:
         reply = f"📝 <b>Saved Caption</b> has been <b>{label}</b> for this group."
+        sync_group_admin_commands(chat_id, sc_enabled=state)
     else:
         reply = "⚠️ Failed to save setting — please try again."
     try:
@@ -3869,6 +3905,12 @@ def setup_commands():
         )
         if scope_cls:
             bot.set_my_commands(group_admin_commands, scope=scope_cls())
+        try:
+            for doc in group_chat_settings_col.find({}):
+                sc_status = bool(doc.get("saved_caption", True))
+                sync_group_admin_commands(doc["_id"], sc_enabled=sc_status)
+        except Exception as e:
+            print(f"[menu] startup sync error for group sc menus: {e}")
     except Exception:
         pass
 
