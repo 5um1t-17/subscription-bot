@@ -2127,7 +2127,7 @@ def build_cart_summary(user_id):
     """Builds the (text, markup) for the cart summary / checkout screen."""
     items = get_cart(user_id)
     if not items:
-        text = "🛒 Your cart is empty.\n\nBrowse channels below and add something 🔥"
+        text = "Your cart is empty.\n\nBrowse the available channels to get started."
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("😍 𝗕𝗿𝗼𝘄𝘀𝗲 𝗖𝗵𝗮𝗻𝗻𝗲𝗹𝘀", callback_data="cart_browse"))
         contact_url = contact_admin_url()
@@ -2137,13 +2137,13 @@ def build_cart_summary(user_id):
         markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
         return text, markup
 
-    lines = ["🛒 <b>Your Cart</b> 🛒\n"]
+    lines = ["<b>Your cart</b>\n"]
     for i in items:
         lines.append(f"• {escape(i['name'])} — {format_label(i['t'])} — ₹{i['price']}")
     total = cart_total(items)
     discount, grand_total = bundle_discount(items)
-    lines.append(f"\n💰 <b>Subtotal: ₹{total}</b>")
-    lines.append(f"💡 <b>Total: ₹{grand_total}</b>")
+    lines.append(f"\nSubtotal: ₹{total}")
+    lines.append(f"<b>Total: ₹{grand_total}</b>")
     text = "\n".join(lines)
 
     markup = InlineKeyboardMarkup()
@@ -2157,9 +2157,9 @@ def build_cart_summary(user_id):
     markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     return text, markup
 
-RANK_BADGES = {1: "🥇", 2: "🥈", 3: "🥉"}  # top 3 by position always get a medal
-CHANNEL_NEW_TAG = "⁽ᴺᴱᵂ⁾˖✧"
-CHANNEL_FREE_TAG = "⁽ᶠᴿᴱᴱ⁾˖✧"
+RANK_BADGES = {1: "1.", 2: "2.", 3: "3."}  # top three positions
+CHANNEL_NEW_TAG = "[NEW]"
+CHANNEL_FREE_TAG = "[FREE]"
 SMALL_TAG_CHARS = str.maketrans({
     "A": "ᴬ", "B": "ᴮ", "C": "ᶜ", "D": "ᴰ", "E": "ᴱ", "F": "ᶠ",
     "G": "ᴳ", "H": "ᴴ", "I": "ᴵ", "J": "ᴶ", "K": "ᴷ", "L": "ᴸ",
@@ -2381,8 +2381,8 @@ def build_main_menu(username=None, user_id=None, first_name=None):
         display = f'<a href="tg://user?id={user_id}">User</a>'
     else:
         display = "there"
-    text = (f"Hey <i> {display} </i> 🔥\n\n"
-            "Came looking for something? 👀\n\n")
+    text = (f"Hello, <b>{display}</b>.\n\n"
+            "Browse the available channels and subscription plans below.\n\n")
     return text, markup
 
 def _render_main_menu(chat_id, user_id=None, message_id=None, username=None, first_name=None):
@@ -2822,17 +2822,14 @@ def _send_bundle_preview_media(chat_id, bundle, channels):
         
         # Build attractive UI with bundle details first
         text = (
-            f"╭━━━ 🎉 <b>{escape(bundle.get('title', 'Offer'))}</b> ━━━╮\n\n"
-            f"💰 <b>𝙁𝙄𝙓𝙀𝘿 𝙋𝙍𝙄𝘾𝙀</b>\n"
-            f"   ₹<b>{int(bundle.get('price', 0))}</b>\n\n"
-            f"⏱ <b>𝘿𝙐𝙍𝘼𝙏𝙄𝙊𝙉</b>\n"
-            f"   {escape(_bundle_duration_label(bundle))}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📺 <b>𝙊𝙁𝙁𝙀𝙍 𝘾𝙊𝙉𝙏𝘼𝙄𝙉𝙎:</b>\n"
+            f"<b>{escape(bundle.get('title', 'Offer'))}</b>\n\n"
+            f"<b>Price</b>\n"
+            f"₹{int(bundle.get('price', 0))}\n\n"
+            f"<b>Duration</b>\n"
+            f"{escape(_bundle_duration_label(bundle))}\n\n"
+            f"<b>Included channels</b>\n"
             f"{chr(10).join(channel_lines)}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔥 Ready to lock it in?\n"
-            f"Tap below to grab this offer 👇"
+            f"Select Continue to purchase this offer."
         )
         
         markup = InlineKeyboardMarkup(row_width=5)
@@ -3949,7 +3946,7 @@ def _admin_menu_markup():
 
 def show_admin_menu(chat_id, message_id=None):
     admin_user_id = current_admin_id()
-    text = "👑 <b>Admin Panel</b>\n\nChoose an action:"
+    text = "<b>Admin panel</b>\n\nSelect an option:"
     markup = _admin_menu_markup()
     if message_id:
         edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="HTML", delay=None)
