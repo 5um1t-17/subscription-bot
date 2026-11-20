@@ -1081,24 +1081,6 @@ def handle_fj_chat_join_request(req):
             print(f"JOIN_REQUEST_NOT_CONFIRMED user={user_id} channel={chat_id} reason=database_write_failed", flush=True)
             return
 
-        # Confirm the event reached the bot and give the requester a one-tap
-        # route into the bot while their group request is still pending.
-        confirmation = None
-        try:
-            continue_markup = InlineKeyboardMarkup().add(
-                InlineKeyboardButton("✅ Continue", callback_data=FJ_CB_RETRY)
-            )
-            recipient_chat_id = getattr(req, 'user_chat_id', None) or user_id
-            confirmation = bot.send_message(
-                recipient_chat_id,
-                "✅ Request received! Keep using the bot while awaiting approval.",
-                reply_markup=continue_markup,
-                vanish_delay=None,
-            )
-            print(f"JOIN_REQUEST_CONFIRMATION_SENT user={user_id} recipient={recipient_chat_id}", flush=True)
-        except Exception as e:
-            print(f"JOIN_REQUEST_CONFIRMATION_FAILED user={user_id} error={e!r}", flush=True)
-        
         # Auto-approve only when enabled for this specific channel.
         if _fj_channel_auto_approve_enabled(chat_id):
             try:
@@ -1110,18 +1092,30 @@ def handle_fj_chat_join_request(req):
             except Exception as e:
                 print(f"JOIN_REQUEST_AUTO_APPROVE_FAILED channel={chat_id} user={user_id} error={e!r}", flush=True)
 
-        # A request counts toward the gate immediately. Once the user has
-        # joined or requested every configured channel, replace the original
-        # Force Join prompt with the main menu.
+        # Do not send a Continue message for each individual request. Wait
+        # until every configured channel is joined or has a pending request,
+        # then remove the gate prompt and send one Continue button.
         try:
             if user_has_force_join_pass(user_id):
-                _fj_finish_gate(
-                    getattr(req, 'user_chat_id', None) or user_id,
-                    req.from_user,
-                    completed_message=confirmation,
-                )
+                had_gate = _fj_clear_block_messages(user_id)
+                if had_gate:
+                    recipient_chat_id = getattr(req, 'user_chat_id', None) or user_id
+                    continue_markup = InlineKeyboardMarkup().add(
+                        InlineKeyboardButton("✅ Continue", callback_data=FJ_CB_RETRY)
+                    )
+                    confirmation = bot.send_message(
+                        recipient_chat_id,
+                        "✅ All required join requests are submitted. Tap Continue to open the bot.",
+                        reply_markup=continue_markup,
+                        vanish_delay=None,
+                    )
+                    print(
+                        f"JOIN_REQUEST_CONTINUE_SENT user={user_id} "
+                        f"recipient={recipient_chat_id} message={getattr(confirmation, 'message_id', None)}",
+                        flush=True,
+                    )
         except Exception as e:
-            print(f"[force-join] completion check failed user={user_id}: {e}", flush=True)
+            print(f"[force-join] completion/continue message failed user={user_id}: {e}", flush=True)
     except Exception as e:
         print(f"JOIN_REQUEST_HANDLER_FAILED error={e!r}", flush=True)
 
