@@ -526,6 +526,7 @@ def get_force_join_settings():
     doc = settings_col.find_one({"_id": FJ_SETTINGS_ID})
     if not doc:
         return {"enabled": False, "channels": [], "image_file_id": None, "auto_approve": False}
+    legacy_auto_approve = bool(doc.get("auto_approve", False))
     
     # Backward compatibility: convert legacy single-channel to list format
     if "channels" not in doc:
@@ -538,6 +539,7 @@ def get_force_join_settings():
                 "title": legacy_title or legacy_channel,
                 "is_private": False,
                 "invite_link": None,
+                "auto_approve": legacy_auto_approve,
             })
         return {
             "enabled": bool(doc.get("enabled", False)),
@@ -555,6 +557,8 @@ def get_force_join_settings():
             "is_private": ch.get("is_private", False),
             "invite_link": ch.get("invite_link"),
             "join_request_link": bool(ch.get("join_request_link", False)),
+            # Migrate the former global setting as each channel's initial value.
+            "auto_approve": bool(ch.get("auto_approve", legacy_auto_approve)),
         })
     
     return {
@@ -639,6 +643,55 @@ def _fj_mark_request_approved(chat_id, user_id):
         )
     except Exception as e:
         print(f"[fj_track] error saving approval for user {user_id} in chat {chat_id}: {e}")
+
+
+def _fj_set_channel_auto_approve(chat_id, enabled):
+    """Save one channel's auto-approval preference without changing others."""
+    settings = get_force_join_settings()
+    channels = settings.get("channels", [])
+    for channel in channels:
+        if _fj_canonical_chat_id(channel.get("channel")) == int(chat_id):
+            channel["auto_approve"] = bool(enabled)
+            save_force_join_settings(channels=channels)
+            return channel
+    return None
+
+
+def _fj_approve_tracked_requests(chat_id):
+    """Approve requests previously recorded by this bot for one channel."""
+    approved = 0
+    failed = 0
+    try:
+        requests = list(fj_pending_requests_col.find({
+            "channel_id": int(chat_id),
+            "active": True,
+        }))
+    except Exception as e:
+        print(f"[force-join] could not load pending requests channel={chat_id}: {e}")
+        return approved, 1
+
+    for request in requests:
+        user_id = request.get("user_id")
+        try:
+            bot.approve_chat_join_request(int(chat_id), int(user_id))
+            _fj_mark_request_approved(chat_id, user_id)
+            approved += 1
+        except Exception as e:
+            failed += 1
+            print(
+                f"[force-join] pending request approval failed "
+                f"channel={chat_id} user={user_id}: {e}"
+            )
+    return approved, failed
+
+
+def _fj_channel_auto_approve_enabled(chat_id):
+    """Return the auto-approval setting for a configured channel."""
+    settings = get_force_join_settings()
+    for channel in settings.get("channels", []):
+        if _fj_canonical_chat_id(channel.get("channel")) == int(chat_id):
+            return bool(channel.get("auto_approve", False))
+    return False
 
 def _fj_is_force_join_channel(chat_id, username=None):
     """Check if the given chat_id is configured as a Force Join channel."""
@@ -1002,7 +1055,7 @@ bot.setup_middleware(ForceJoinMiddleware())
 @bot.chat_join_request_handler()
 def handle_fj_chat_join_request(req):
     """Capture join requests for configured Force Join channels and store them in MongoDB.
-    If auto_approve is enabled, automatically approve the request."""
+    If auto-approve is enabled for this channel, approve the request."""
     try:
         chat_id = req.chat.id
         user_id = req.from_user.id
@@ -1046,9 +1099,8 @@ def handle_fj_chat_join_request(req):
         except Exception as e:
             print(f"JOIN_REQUEST_CONFIRMATION_FAILED user={user_id} error={e!r}", flush=True)
         
-        # Auto-approve if enabled
-        settings = get_force_join_settings()
-        if settings.get('auto_approve'):
+        # Auto-approve only when enabled for this specific channel.
+        if _fj_channel_auto_approve_enabled(chat_id):
             try:
                 bot.approve_chat_join_request(chat_id, user_id)
                 print(f"JOIN_REQUEST_AUTO_APPROVED channel={chat_id} user={user_id}", flush=True)
@@ -1116,7 +1168,11 @@ def send_force_join_menu(chat_id, message_id=None):
         for i, ch in enumerate(channels, 1):
             title = ch.get('title') or ch.get('channel') or f"Channel {i}"
             channel_type = "🔒 Private" if ch.get('is_private') else "🌐 Public"
-            channel_lines.append(f"{i}. {escape_markdown(title)} (`{escape_markdown(ch.get('channel', ''))}`) — {channel_type}")
+            auto_status = "ON" if ch.get("auto_approve") else "OFF"
+            channel_lines.append(
+                f"{i}. {escape_markdown(title)} (`{escape_markdown(ch.get('channel', ''))}`) "
+                f"— {channel_type} — Auto-approve: {auto_status}"
+            )
         channel_str = "\n".join(channel_lines)
     else:
         channel_str = "— no channels set —"
@@ -1131,11 +1187,9 @@ def send_force_join_menu(chat_id, message_id=None):
     markup.add(InlineKeyboardButton(
         "🔴 Disable" if s.get('enabled') else "🟢 Enable",
         callback_data="fj_disable" if s.get('enabled') else "fj_enable"))
-    markup.add(InlineKeyboardButton(
-        "🟢 Auto-Approve: ON" if s.get('auto_approve') else "🔴 Auto-Approve: OFF",
-        callback_data="fj_toggle_autoapprove"))
     markup.add(InlineKeyboardButton("➕ Add Channel", callback_data="fj_setchannel"))
     if channels:
+        markup.add(InlineKeyboardButton("⚙️ Auto-Approve by Channel", callback_data="fj_auto_menu"))
         markup.add(InlineKeyboardButton("➖ Remove Channel", callback_data="fj_removechannel_menu"))
     markup.add(InlineKeyboardButton(
         "🖼 Replace Banner Image" if s.get('image_file_id') else "🖼 Set Banner Image",
@@ -1166,6 +1220,30 @@ def send_force_join_menu(chat_id, message_id=None):
     else:
         send_admin_reply(text, parse_mode="Markdown", reply_markup=markup)
 
+
+def _render_fj_auto_approve_menu(chat_id, message_id):
+    settings = get_force_join_settings()
+    channels = settings.get("channels", [])
+    markup = InlineKeyboardMarkup()
+    if channels:
+        for index, channel in enumerate(channels, 1):
+            title = channel.get("title") or channel.get("channel") or f"Channel {index}"
+            state = "ON" if channel.get("auto_approve") else "OFF"
+            markup.add(InlineKeyboardButton(
+                f"{'🟢' if state == 'ON' else '🔴'} {title}: {state}",
+                callback_data=f"fj_autotoggle_{index}",
+            ))
+        text = (
+            "*Auto-Approve by Channel*\n\n"
+            "Select a channel to change its setting. Turning it on also approves "
+            "pending requests recorded by the bot for that channel."
+        )
+    else:
+        text = "No Force Join channels are configured."
+    markup.add(InlineKeyboardButton("⬅️ Back", callback_data="fj_back"))
+    markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
+    edit_menu(chat_id, message_id, text, reply_markup=markup, parse_mode="Markdown")
+
 def _fj_admin(call):
     """Gate every admin Force Join callback through the existing admin check."""
     if not _require_admin(call):
@@ -1187,14 +1265,78 @@ def cb_fj_disable(call):
     save_force_join_settings(enabled=False)
     send_force_join_menu(call.message.chat.id, call.message.message_id)
 
-@bot.callback_query_handler(func=lambda call: call.data == "fj_toggle_autoapprove")
-def cb_fj_toggle_autoapprove(call):
+@bot.callback_query_handler(func=lambda call: call.data in ("fj_auto_menu", "fj_toggle_autoapprove"))
+def cb_fj_auto_approve_menu(call):
     if not _fj_admin(call):
         return
-    s = get_force_join_settings()
-    new_state = not s.get('auto_approve', False)
-    save_force_join_settings(auto_approve=new_state)
-    bot.answer_callback_query(call.id, f"Auto-Approve {'enabled' if new_state else 'disabled'}.")
+    _render_fj_auto_approve_menu(call.message.chat.id, call.message.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("fj_autotoggle_"))
+def cb_fj_auto_approve_toggle(call):
+    if not _fj_admin(call):
+        return
+    try:
+        index = int(call.data.rsplit("_", 1)[1]) - 1
+    except (TypeError, ValueError, IndexError):
+        send_admin_reply("Invalid channel selection.")
+        return
+    settings = get_force_join_settings()
+    channels = settings.get("channels", [])
+    if not 0 <= index < len(channels):
+        send_admin_reply("That Force Join channel is no longer configured.")
+        send_force_join_menu(call.message.chat.id, call.message.message_id)
+        return
+    channel = channels[index]
+    channel_id = _fj_canonical_chat_id(channel.get("channel"))
+    if channel_id is None:
+        send_admin_reply("Could not resolve that channel. Check its Force Join configuration.")
+        _render_fj_auto_approve_menu(call.message.chat.id, call.message.message_id)
+        return
+    enabled = not bool(channel.get("auto_approve", False))
+    updated = _fj_set_channel_auto_approve(channel_id, enabled)
+    if not updated:
+        send_admin_reply("That Force Join channel is no longer configured.")
+        send_force_join_menu(call.message.chat.id, call.message.message_id)
+        return
+    approved = failed = 0
+    if enabled:
+        approved, failed = _fj_approve_tracked_requests(channel_id)
+    answer = f"Auto-approve {'enabled' if enabled else 'disabled'} for {updated.get('title', 'channel')}."
+    if enabled:
+        answer += f" Approved {approved} pending request(s)."
+        if failed:
+            answer += f" {failed} could not be approved; see bot logs."
+    send_admin_reply(answer)
+    _render_fj_auto_approve_menu(call.message.chat.id, call.message.message_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(("fj_autoset_on_", "fj_autoset_off_")))
+def cb_fj_auto_approve_after_add(call):
+    if not _require_admin(call):
+        return
+    try:
+        action, raw_channel_id = call.data.split("_", 3)[2:]
+        channel_id = int(raw_channel_id)
+    except (TypeError, ValueError, IndexError):
+        bot.answer_callback_query(call.id, "Invalid channel selection.", show_alert=True)
+        return
+    enabled = action == "on"
+    updated = _fj_set_channel_auto_approve(channel_id, enabled)
+    if not updated:
+        bot.answer_callback_query(call.id, "That Force Join channel is no longer configured.", show_alert=True)
+        send_force_join_menu(call.message.chat.id, call.message.message_id)
+        return
+    approved = failed = 0
+    if enabled:
+        approved, failed = _fj_approve_tracked_requests(channel_id)
+    bot.answer_callback_query(call.id, "Auto-approval setting saved.")
+    message = f"Auto-approve is {'ON' if enabled else 'OFF'} for {updated.get('title', 'this channel')}."
+    if enabled:
+        message += f" Approved {approved} pending request(s)."
+        if failed:
+            message += f" {failed} could not be approved; see bot logs."
+    send_admin_reply(message)
     send_force_join_menu(call.message.chat.id, call.message.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data == "fj_setchannel")
@@ -1246,6 +1388,7 @@ def _fj_save_channel(message):
         "is_private": is_private,
         "invite_link": invite_link,
         "join_request_link": False,
+        "auto_approve": False,
     })
     save_force_join_settings(channels=channels)
     request_link_ready = False
@@ -1260,13 +1403,20 @@ def _fj_save_channel(message):
         "\n⚠️ Could not create a join-request link. Check the bot's Invite Users admin permission."
         if is_private else ""
     )
+    auto_markup = InlineKeyboardMarkup()
+    auto_markup.row(
+        InlineKeyboardButton("✅ Turn Auto-Approve On", callback_data=f"fj_autoset_on_{chat_obj.id}"),
+        InlineKeyboardButton("Keep Off", callback_data=f"fj_autoset_off_{chat_obj.id}"),
+    )
     send_admin_reply(
         f"✅ Added *{escape_markdown(title)}* ({raw}) to Force Join.\n"
         f"Type: {channel_type}\n"
         f"{request_link_status}\n"
         f"Total channels: {len(channels)}\n\n"
-        f"Open /forcejoin to see the updated settings.",
-        parse_mode="Markdown"
+        f"Should join requests for this channel be approved automatically?",
+        parse_mode="Markdown",
+        reply_markup=auto_markup,
+        delay=None,
     )
 
 @bot.callback_query_handler(func=lambda call: call.data == "fj_removechannel_menu")
