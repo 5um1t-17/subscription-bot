@@ -91,7 +91,7 @@ def register_handlers():
     bot.message_handler(
         content_types=[
             'photo', 'video', 'document', 'audio', 'animation',
-            'voice', 'sticker', 'video_note',
+            'voice', 'video_note',
         ],
         func=lambda message: (
             _is_group_admin_media_sender(message)
@@ -144,7 +144,7 @@ def _is_group_admin_media_sender(message):
 def _message_has_supported_media(message):
     return any(getattr(message, attr, None) for attr in (
         'photo', 'video', 'document', 'audio', 'animation', 'voice',
-        'sticker', 'video_note',
+        'video_note',
     ))
 
 
@@ -606,12 +606,13 @@ def handle_configured_admin_group_media(message):
         flush=True,
     )
 
-    # Stickers and video notes can never carry a caption.
-    if getattr(message, 'sticker', None) or getattr(message, 'video_note', None):
+    # Video notes are handled explicitly because they cannot carry captions.
+    # Stickers are excluded from the registered media handler entirely.
+    if getattr(message, 'video_note', None):
         try:
             bot.reply_to(
                 message,
-                "ℹ️ Telegram doesn't support captions on stickers or video notes. "
+                "ℹ️ Telegram doesn't support captions on video notes. "
                 "I left the original media unchanged.",
             )
         except Exception as e:
