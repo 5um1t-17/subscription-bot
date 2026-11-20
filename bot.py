@@ -2249,8 +2249,8 @@ def build_cart_summary(user_id):
     return text, markup
 
 RANK_BADGES = {1: "1.", 2: "2.", 3: "3."}  # top three positions
-CHANNEL_NEW_TAG = "[NEW]"
-CHANNEL_FREE_TAG = "[FREE]"
+CHANNEL_NEW_TAG = "⁽ᴺᴱᵂ⁾˖✧"
+CHANNEL_FREE_TAG = "⁽ᶠᴿᴱᴱ⁾˖✧"
 SMALL_TAG_CHARS = str.maketrans({
     "A": "ᴬ", "B": "ᴮ", "C": "ᶜ", "D": "ᴰ", "E": "ᴱ", "F": "ᶠ",
     "G": "ᴳ", "H": "ᴴ", "I": "ᴵ", "J": "ᴶ", "K": "ᴷ", "L": "ᴸ",
