@@ -33,7 +33,7 @@ from main.admin_caption import AdminCaptionFeature
 from main import group_media_caption as group_media_caption_feature
 from main.database import (
     approved_payments_col, carts_col, channels_col, chat_members_col, client,
-    counters_col, db, expired_subs_col, fj_pending_requests_col,
+    counters_col, db, expired_subs_col, fj_block_messages_col, fj_pending_requests_col,
     free_trial_claims_col, free_trial_claims_history_col, free_trials_col,
     group_chat_settings_col,
     offer_bundles_col, payments_col, pending_checkouts_col,
@@ -518,6 +518,7 @@ FJ_CB_RETRY = "fj_retry"
 FJ_CB_JOIN = "fj_join"
 FJ_BLOCK_COOLDOWN_SECONDS = 4   # don't re-send the block screen on every keystroke
 _fj_last_block = {}             # user_id -> time.monotonic() of the last block screen
+_fj_block_messages = {}          # user_id -> [(chat_id, message_id), ...]
 
 def get_force_join_settings():
     """Read the current Force Join config from settings_col (fail-safe defaults).
@@ -865,11 +866,81 @@ def send_force_join_block(chat_id, user_id):
     try:
         img = settings.get('image_file_id')
         if img:
-            return bot.send_photo(chat_id, img, caption=text, reply_markup=markup, parse_mode="HTML", vanish_delay=None)
-        return bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML", vanish_delay=None)
+            sent = bot.send_photo(chat_id, img, caption=text, reply_markup=markup, parse_mode="HTML", vanish_delay=None)
+        else:
+            sent = bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML", vanish_delay=None)
+        if sent and getattr(sent, 'message_id', None):
+            message_id = sent.message_id
+            _fj_block_messages.setdefault(user_id, []).append((chat_id, message_id))
+            try:
+                fj_block_messages_col.update_one(
+                    {"user_id": int(user_id), "chat_id": int(chat_id), "message_id": int(message_id)},
+                    {"$set": {
+                        "user_id": int(user_id),
+                        "chat_id": int(chat_id),
+                        "message_id": int(message_id),
+                    }},
+                    upsert=True,
+                )
+            except Exception as e:
+                print(f"[force-join] could not persist prompt user={user_id}: {e}")
+        return sent
     except Exception as e:
         print(f"[force-join] could not send block screen to {user_id}: {e}")
         return None
+
+
+def _fj_clear_block_messages(user_id):
+    """Delete all tracked Force Join prompts for a user and report if any existed."""
+    messages = list(_fj_block_messages.pop(user_id, []))
+    try:
+        saved_messages = fj_block_messages_col.find(
+            {"user_id": int(user_id)}, {"chat_id": 1, "message_id": 1}
+        )
+        messages.extend(
+            (doc.get("chat_id"), doc.get("message_id"))
+            for doc in saved_messages
+            if doc.get("chat_id") is not None and doc.get("message_id") is not None
+        )
+    except Exception as e:
+        print(f"[force-join] could not load saved prompts user={user_id}: {e}")
+    messages = list(dict.fromkeys(messages))
+    deleted_message_ids = []
+    for chat_id, message_id in messages:
+        cancel_delete(chat_id, message_id)
+        try:
+            bot.delete_message(chat_id, message_id)
+            deleted_message_ids.append(message_id)
+        except Exception as e:
+            print(f"[force-join] could not remove completed prompt user={user_id}: {e}")
+    if deleted_message_ids:
+        try:
+            fj_block_messages_col.delete_many({
+                "user_id": int(user_id),
+                "message_id": {"$in": deleted_message_ids},
+            })
+        except Exception as e:
+            print(f"[force-join] could not clear saved prompt records user={user_id}: {e}")
+    return bool(messages)
+
+
+def _fj_finish_gate(chat_id, user, completed_message=None, always_show_menu=False):
+    """Remove the gate prompt and optionally replace it with the main menu."""
+    user_id = user.id
+    cleared = _fj_clear_block_messages(user_id)
+    if completed_message is not None:
+        cancel_delete(chat_id, completed_message.message_id)
+        try:
+            bot.delete_message(chat_id, completed_message.message_id)
+        except Exception:
+            pass
+    if cleared or always_show_menu:
+        show_main_menu(
+            chat_id,
+            user_id,
+            username=getattr(user, 'username', None),
+            first_name=getattr(user, 'first_name', None),
+        )
 
 class ForceJoinMiddleware(BaseMiddleware):
     """Runs before every handler and cancels any update coming from a user who
@@ -901,6 +972,7 @@ class ForceJoinMiddleware(BaseMiddleware):
                         pass
                     send_force_join_block(chat.id, user_id)
                     return CancelUpdate()
+                _fj_clear_block_messages(user_id)
                 return None
             # --- plain message / edited message ---
             chat = getattr(update, 'chat', None)
@@ -914,6 +986,7 @@ class ForceJoinMiddleware(BaseMiddleware):
             if not user_has_force_join_pass(user.id):
                 send_force_join_block(chat.id, user.id)
                 return CancelUpdate()
+            _fj_clear_block_messages(user.id)
             return None
         except Exception as e:
             print(f"[force-join] middleware error: {e}")
@@ -957,12 +1030,13 @@ def handle_fj_chat_join_request(req):
 
         # Confirm the event reached the bot and give the requester a one-tap
         # route into the bot while their group request is still pending.
+        confirmation = None
         try:
             continue_markup = InlineKeyboardMarkup().add(
                 InlineKeyboardButton("✅ Continue", callback_data=FJ_CB_RETRY)
             )
             recipient_chat_id = getattr(req, 'user_chat_id', None) or user_id
-            bot.send_message(
+            confirmation = bot.send_message(
                 recipient_chat_id,
                 "✅ Request received! Keep using the bot while awaiting approval.",
                 reply_markup=continue_markup,
@@ -983,6 +1057,19 @@ def handle_fj_chat_join_request(req):
                 _fj_mark_request_approved(chat_id, user_id)
             except Exception as e:
                 print(f"JOIN_REQUEST_AUTO_APPROVE_FAILED channel={chat_id} user={user_id} error={e!r}", flush=True)
+
+        # A request counts toward the gate immediately. Once the user has
+        # joined or requested every configured channel, replace the original
+        # Force Join prompt with the main menu.
+        try:
+            if user_has_force_join_pass(user_id):
+                _fj_finish_gate(
+                    getattr(req, 'user_chat_id', None) or user_id,
+                    req.from_user,
+                    completed_message=confirmation,
+                )
+        except Exception as e:
+            print(f"[force-join] completion check failed user={user_id}: {e}", flush=True)
     except Exception as e:
         print(f"JOIN_REQUEST_HANDLER_FAILED error={e!r}", flush=True)
 
@@ -1005,6 +1092,11 @@ def handle_fj_chat_member_update(update):
             _fj_mark_request_approved(chat_id, user_id)
         elif status == 'restricted' and getattr(new_member, 'is_member', False):
             _fj_mark_request_approved(chat_id, user_id)
+        if status in ('creator', 'administrator', 'member') or (
+            status == 'restricted' and getattr(new_member, 'is_member', False)
+        ):
+            if user_has_force_join_pass(user_id):
+                _fj_finish_gate(user_id, new_member.user)
     except Exception as e:
         print(f"[fj_track] error handling chat_member update: {e}")
 
@@ -1342,13 +1434,12 @@ def cb_fj_retry(call):
     if passed:
         bot.answer_callback_query(call.id, "✅ Welcome! You're all set.")
         chat_id = call.message.chat.id
-        msg_id = call.message.message_id
-        cancel_delete(chat_id, msg_id)
-        try:
-            bot.delete_message(chat_id, msg_id)
-        except Exception:
-            pass
-        show_main_menu(chat_id, user_id, username=getattr(call.from_user, 'username', None), first_name=getattr(call.from_user, 'first_name', None))
+        _fj_finish_gate(
+            chat_id,
+            call.from_user,
+            completed_message=call.message,
+            always_show_menu=True,
+        )
     else:
         bot.answer_callback_query(call.id, "🔒 You haven't joined yet. Join the channel first.", show_alert=True)
 
@@ -2696,19 +2787,6 @@ def cb_main_channels(call):
     edit_all_channels(call.message.chat.id, call.message.message_id, call.from_user.id,
                        message_obj=call.message, back_to_menu=True)
 
-@bot.callback_query_handler(func=lambda call: call.data == "main_offers")
-def cb_main_offers(call):
-    bot.answer_callback_query(call.id)
-    text = ("🎁 <b>Current Offers</b>\n\n"
-            "Choose a custom offer to get several channels at the exact fixed price "
-            "set by the admin, or browse individual channels.")
-    markup = InlineKeyboardMarkup()
-    if offer_bundles_col.count_documents({"enabled": True}) > 0:
-        markup.add(InlineKeyboardButton("🎉 View Offers", callback_data="main_obundles"))
-    markup.add(InlineKeyboardButton("😍 Premium Groups", callback_data="main_channels"))
-    markup.add(InlineKeyboardButton("𝗛𝗼𝗺𝗲", callback_data="main_menu_back"))
-    edit_menu(call.message.chat.id, call.message.message_id, text, reply_markup=markup, parse_mode="HTML", message_obj=call.message)
-
 # --- CUSTOM OFFER BUNDLES ---
 # A bundle stores a snapshot of its selected channel ids, but channel names are
 # resolved again when rendered and approved. This keeps renamed channels readable
@@ -2763,8 +2841,10 @@ def _render_bundle_list(chat_id, message_id=None):
 def bundles_command(message):
     _render_bundle_list(message.chat.id)
 
-@bot.callback_query_handler(func=lambda call: call.data == "main_obundles")
+@bot.callback_query_handler(func=lambda call: call.data in ("main_obundles", "main_offers"))
 def cb_main_bundles(call):
+    # main_offers is kept as an alias so already-delivered older keyboards
+    # continue to open the current Offers screen.
     record_seen_user(call.from_user)
     bot.answer_callback_query(call.id)
     chat_id = call.message.chat.id
@@ -9471,6 +9551,10 @@ def setup_indexes():
         fj_pending_requests_col.create_index([("channel_id", 1), ("user_id", 1)], unique=True)
         fj_pending_requests_col.create_index([("active", 1)])
         fj_pending_requests_col.create_index([("requested_at", 1)])
+    except Exception:
+        pass
+    try:
+        fj_block_messages_col.create_index([("user_id", 1), ("message_id", 1)])
     except Exception:
         pass
 
