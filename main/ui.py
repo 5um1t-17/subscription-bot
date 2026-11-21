@@ -44,8 +44,6 @@ def _clean_button_label(text):
         icon = "✨"
     elif "approved payment" in lowered:
         icon = "✅"
-    elif "saved caption" in lowered:
-        icon = "📝"
     elif "force join" in lowered:
         icon = "⚙️"
     elif "pending payment" in lowered or "notify" in lowered or "notification" in lowered:

@@ -29,8 +29,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
 from threading import Thread, Timer, RLock, local
 from queue import Queue
-from main.admin_caption import AdminCaptionFeature
-from main import group_media_caption as group_media_caption_feature
 from main.database import (
     approved_payments_col, carts_col, channels_col, chat_members_col, client,
     counters_col, db, expired_subs_col, fj_block_messages_col, fj_pending_requests_col,
@@ -460,28 +458,6 @@ def adopt_existing_channel_owner():
     ADMIN_ID = data_owner
     bot_config.ADMIN_ID = data_owner
     ADMIN_USER_IDS.add(data_owner)
-
-caption_admin_feature = AdminCaptionFeature(
-    bot, settings_col,
-    chat_admin_checker=lambda message: _is_chat_admin_message(message),
-    sc_enabled_checker=lambda chat_id: is_saved_caption_enabled(chat_id),
-)
-GROUP_MEDIA_CAPTION_SETTING_ID = caption_admin_feature.setting_id
-caption_admin_feature.register_handlers()
-
-# --- Group media caption processing ---
-group_media_caption_feature.configure(
-    bot, GROUP_ANONYMOUS_BOT_ID, caption_admin_feature.get_caption,
-    lambda chat_id, message_id, delay: schedule_delete(chat_id, message_id, delay),
-    saved_caption_enabled_fn=lambda chat_id: is_saved_caption_enabled(chat_id),
-)
-group_media_caption_feature.register_handlers()
-
-def get_group_media_caption():
-    return caption_admin_feature.get_caption()
-
-def show_group_media_caption_settings(chat_id, message_id=None, admin_user_id=None):
-    caption_admin_feature.show_settings(chat_id, message_id, admin_user_id or current_admin_id())
 
 def get_menu_image_file_id():
     """Returns the Telegram file_id of the admin-set main menu image, or None if not set."""
@@ -3606,11 +3582,10 @@ def _is_chat_admin_message(message):
     return False
 
 # =====================================================================
-# PER-GROUP FEATURE SETTINGS  (/sc saved caption  |  /em emoji react)
+# PER-GROUP FEATURE SETTINGS  (/em emoji react)
 # ---------------------------------------------------------------------
 # Settings are stored in group_chat_settings_col keyed by chat_id.
-# Schema: { "_id": chat_id (int), "saved_caption": bool, "emoji_react": bool }
-# Both features default to ON when no document exists for a group.
+# Schema: { "_id": chat_id (int), "emoji_react": bool }
 # =====================================================================
 
 def _get_group_chat_settings(chat_id):
@@ -3621,7 +3596,7 @@ def _get_group_chat_settings(chat_id):
             return doc
     except Exception as e:
         print(f"[group-settings] read error chat={chat_id}: {e}")
-    return {"_id": int(chat_id), "saved_caption": True, "emoji_react": True}
+    return {"_id": int(chat_id), "emoji_react": True}
 
 def _set_group_chat_setting(chat_id, field, value):
     """Upsert a single boolean field for a group."""
@@ -3635,10 +3610,6 @@ def _set_group_chat_setting(chat_id, field, value):
     except Exception as e:
         print(f"[group-settings] write error chat={chat_id} field={field}: {e}")
         return False
-
-def is_saved_caption_enabled(chat_id):
-    """True (default) unless admin explicitly disabled it for this group."""
-    return bool(_get_group_chat_settings(chat_id).get("saved_caption", True))
 
 def is_emoji_react_enabled(chat_id):
     """True (default) unless admin explicitly disabled it for this group."""
@@ -3655,19 +3626,17 @@ def _parse_on_off(text):
     return None
 
 
-def _sc_em_check(message):
-    """Shared guard: command must come from a group admin (including anon admins)."""
+def _em_check(message):
+    """Guard /em so only a group admin (including anonymous admins) can use it."""
     if message.chat.type not in ("group", "supergroup"):
         return False
     return _is_chat_admin_message(message)
 
 
-SC_EM_VANISH_SECONDS = 5  # both the command message and the bot reply auto-delete after 5 s
+EM_VANISH_SECONDS = 5  # both the command message and the bot reply auto-delete after 5 s
 
 
 group_admin_commands = [
-    BotCommand("cc", "Edit caption on replied bot media"),
-    BotCommand("sc", "Toggle saved caption on/off for this group"),
     BotCommand("em", "Toggle emoji reactions on/off for this group"),
     BotCommand("remove", "Remove user(s) from this group/channel"),
     BotCommand("sync", "Sync member data of this group/channel"),
@@ -3675,88 +3644,29 @@ group_admin_commands = [
     BotCommand("about", "Show user subscription info"),
 ]
 
-group_admin_commands_no_cc = [
-    BotCommand("sc", "Toggle saved caption on/off for this group"),
-    BotCommand("em", "Toggle emoji reactions on/off for this group"),
-    BotCommand("remove", "Remove user(s) from this group/channel"),
-    BotCommand("sync", "Sync member data of this group/channel"),
-    BotCommand("import", "Import member list for this group/channel"),
-    BotCommand("about", "Show user subscription info"),
-]
-
-def sync_group_admin_commands(chat_id, sc_enabled=True):
-    """Sync Telegram command menu for chat_id's administrators depending on sc_enabled.
-    When sc is ON, explicitly sets group_admin_commands (including /cc).
-    When sc is OFF, explicitly sets group_admin_commands_no_cc (excluding /cc).
-    """
+def sync_group_admin_commands(chat_id):
+    """Set the supported command menu for one chat's administrators."""
     try:
         scope = BotCommandScopeChatAdministrators(int(chat_id))
-        if sc_enabled:
-            bot.set_my_commands(group_admin_commands, scope=scope)
-        else:
-            bot.set_my_commands(group_admin_commands_no_cc, scope=scope)
+        bot.set_my_commands(group_admin_commands, scope=scope)
     except Exception as e:
         print(f"[menu] couldn't sync admin commands for group {chat_id}: {e}")
 
 
 def _delete_command_message(message):
-    """Schedule the user's own command message for deletion after SC_EM_VANISH_SECONDS."""
+    """Schedule the user's own settings command message for deletion."""
     try:
-        schedule_delete(message.chat.id, message.message_id, SC_EM_VANISH_SECONDS)
+        schedule_delete(message.chat.id, message.message_id, EM_VANISH_SECONDS)
     except Exception:
         pass
 
 
-@bot.message_handler(commands=["sc"], func=_sc_em_check)
-def cmd_saved_caption(message):
-    """
-    /sc on  — enable the saved caption feature for this group
-    /sc off — disable it
-    Both the command and the bot reply auto-vanish after SC_EM_VANISH_SECONDS.
-    """
-    args = (message.text or "").strip().split(None, 1)
-    state_arg = args[1].strip() if len(args) > 1 else ""
-    state = _parse_on_off(state_arg)
-    chat_id = message.chat.id
-
-    # Schedule the admin's command message to vanish
-    _delete_command_message(message)
-
-    if state is None:
-        current = "🟢 ON" if is_saved_caption_enabled(chat_id) else "🔴 OFF"
-        try:
-            bot.reply_to(
-                message,
-                f"📝 <b>Saved Caption</b> is currently <b>{current}</b> in this group.\n\n"
-                f"Use <code>/sc on</code> or <code>/sc off</code> to change it.",
-                parse_mode="HTML",
-                vanish_delay=SC_EM_VANISH_SECONDS,
-            )
-        except Exception:
-            pass
-        return
-
-    ok = _set_group_chat_setting(chat_id, "saved_caption", state)
-    label = "🟢 Enabled" if state else "🔴 Disabled"
-    if ok:
-        reply = f"📝 <b>Saved Caption</b> has been <b>{label}</b> for this group."
-        sync_group_admin_commands(chat_id, sc_enabled=state)
-    else:
-        reply = "⚠️ Failed to save setting — please try again."
-    try:
-        bot.reply_to(message, reply, parse_mode="HTML", vanish_delay=SC_EM_VANISH_SECONDS)
-    except Exception:
-        pass
-    print(f"[group-settings] /sc {'on' if state else 'off'} chat={chat_id} "
-          f"by user={getattr(message.from_user, 'id', 'anon')}")
-
-
-@bot.message_handler(commands=["em"], func=_sc_em_check)
+@bot.message_handler(commands=["em"], func=_em_check)
 def cmd_emoji_react(message):
     """
     /em on  — enable auto emoji reactions for this group
     /em off — disable them
-    Both the command and the bot reply auto-vanish after SC_EM_VANISH_SECONDS.
+    Both the command and the bot reply auto-vanish after EM_VANISH_SECONDS.
     """
     args = (message.text or "").strip().split(None, 1)
     state_arg = args[1].strip() if len(args) > 1 else ""
@@ -3774,7 +3684,7 @@ def cmd_emoji_react(message):
                 f"😀 <b>Emoji Reactions</b> are currently <b>{current}</b> in this group.\n\n"
                 f"Use <code>/em on</code> or <code>/em off</code> to change it.",
                 parse_mode="HTML",
-                vanish_delay=SC_EM_VANISH_SECONDS,
+                vanish_delay=EM_VANISH_SECONDS,
             )
         except Exception:
             pass
@@ -3787,7 +3697,7 @@ def cmd_emoji_react(message):
     else:
         reply = "⚠️ Failed to save setting — please try again."
     try:
-        bot.reply_to(message, reply, parse_mode="HTML", vanish_delay=SC_EM_VANISH_SECONDS)
+        bot.reply_to(message, reply, parse_mode="HTML", vanish_delay=EM_VANISH_SECONDS)
     except Exception:
         pass
     print(f"[group-settings] /em {'on' if state else 'off'} chat={chat_id} "
@@ -4088,8 +3998,6 @@ def setup_commands():
         BotCommand("channels", "Manage channels (edit/delete)"),
         BotCommand("bundles", "Manage offers (custom fixed-price offers)"),
         BotCommand("setmenuimage", "Set/remove the main menu image"),
-        BotCommand("setmediacaption", "Set the caption appended to your group media"),
-        BotCommand("setcap", "Preview and save the global media caption"),
         BotCommand("forcejoin", "Require users to join a channel (Force Join settings)"),
         BotCommand("remove", "Remove a member or revoke a subscriber"),
         BotCommand("stats", "View bot stats & revenue"),
@@ -4104,14 +4012,11 @@ def setup_commands():
         BotCommand("users", "List all active subscribers & plans"),
     ]
     group_admin_commands = [
-        BotCommand("cc", "Edit caption on replied bot media"),
-        BotCommand("sc", "Toggle saved caption on/off for this group"),
         BotCommand("em", "Toggle emoji reactions on/off for this group"),
         BotCommand("remove", "Remove user(s) from this group/channel"),
         BotCommand("sync", "Sync member data of this group/channel"),
         BotCommand("import", "Import member list for this group/channel"),
         BotCommand("about", "Show user subscription info"),
-
     ]
     bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
     for admin_user_id in sorted(ADMIN_USER_IDS):
@@ -4128,8 +4033,7 @@ def setup_commands():
             bot.set_my_commands(group_admin_commands, scope=scope_cls())
         try:
             for doc in group_chat_settings_col.find({}):
-                sc_status = bool(doc.get("saved_caption", True))
-                sync_group_admin_commands(doc["_id"], sc_enabled=sc_status)
+                sync_group_admin_commands(doc["_id"])
         except Exception as e:
             print(f"[menu] startup sync error for group sc menus: {e}")
     except Exception:
@@ -4163,7 +4067,6 @@ def _admin_menu_markup():
         InlineKeyboardButton("🗄 Database", callback_data="admin_dbstats"),
         InlineKeyboardButton("🖼 Menu Image", callback_data="admin_menuimage"),
     )
-    markup.add(InlineKeyboardButton("📝 Saved Caption", callback_data="admin_caption"))
     markup.add(InlineKeyboardButton("✖️ Close", callback_data="ui_close"))
     return markup
 
@@ -4225,8 +4128,6 @@ def admin_menu_action(call):
         dbstats_handler(call.message, message_id=call.message.message_id)
     elif action == 'admin_menuimage':
         _show_menu_image_settings(chat_id, call.message.message_id)
-    elif action == 'admin_caption':
-        show_group_media_caption_settings(chat_id, call.message.message_id, call.from_user.id)
     elif action == 'admin_home':
         try:
             bot.clear_step_handler_by_chat_id(chat_id)

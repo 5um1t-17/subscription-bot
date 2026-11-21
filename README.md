@@ -5,8 +5,6 @@
 - `bot.py` is the polling and web-health entry point.
 - `main/config.py` reads environment settings and admin IDs.
 - `main/database.py` creates the MongoDB client and collections.
-- `main/admin_caption.py` manages the saved media caption card, commands, and callbacks.
-- `main/group_media_caption.py` detects group admin media, preserves album/order handling, and reposts it with the saved caption.
 - `requirements.txt` lists the Python dependencies.
 
 Keep the `main` folder beside the entry point and include it in every deployment.
@@ -28,7 +26,3 @@ On Render, add these values under the service's Environment settings. Render sup
 Install dependencies with `pip install -r requirements.txt`, then set the Render start command to `python bot.py`.
 
 The service exposes `/` as a health endpoint and runs one Telegram polling process. Keep a single running instance for the bot token so multiple pollers do not compete for updates.
-
-## Admin caption
-
-The admin panel has a **Saved Caption** card. Configured bot admins can edit or delete the saved caption there. `/setmediacaption` prompts for a caption, and `/setcap <caption>` opens the same HTML preview; changes are saved only after pressing **Save**. In groups and channels, a chat admin can reply to bot-sent media with `/cc` to change its custom caption in place, or `/cc reset` to restore the saved global caption (or clear the caption if none is set). The bot must be able to delete messages in the chat to remove the `/cc` workflow messages; in channels it also needs permission to post the prompt.
