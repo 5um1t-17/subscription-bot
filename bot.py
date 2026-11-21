@@ -495,6 +495,36 @@ FJ_CB_JOIN = "fj_join"
 FJ_BLOCK_COOLDOWN_SECONDS = 4   # don't re-send the block screen on every keystroke
 _fj_last_block = {}             # user_id -> time.monotonic() of the last block screen
 _fj_block_messages = {}          # user_id -> [(chat_id, message_id), ...]
+_fj_continue_sent_users = set()
+_fj_completion_lock = RLock()
+
+def _fj_send_continue_once(chat_id, user):
+    """Replace the Force Join gate with one Continue prompt after all channels pass."""
+    user_id = user.id
+    with _fj_completion_lock:
+        if user_id in _fj_continue_sent_users:
+            return None
+        if not _fj_clear_block_messages(user_id):
+            return None
+        # Claim before sending: join-request and membership updates can arrive
+        # concurrently for auto-approved requests.
+        _fj_continue_sent_users.add(user_id)
+
+    markup = InlineKeyboardMarkup().add(
+        InlineKeyboardButton("✅ Continue", callback_data=FJ_CB_RETRY)
+    )
+    try:
+        return bot.send_message(
+            chat_id,
+            "✅ All required join requests are submitted. Tap Continue to open the bot.",
+            reply_markup=markup,
+            vanish_delay=None,
+        )
+    except Exception as e:
+        with _fj_completion_lock:
+            _fj_continue_sent_users.discard(user_id)
+        print(f"[force-join] continue message failed user={user_id}: {e}", flush=True)
+        return None
 
 def get_force_join_settings():
     """Read the current Force Join config from settings_col (fail-safe defaults).
@@ -867,6 +897,8 @@ def send_force_join_block(chat_id, user_id):
     if now - _fj_last_block.get(user_id, 0) < FJ_BLOCK_COOLDOWN_SECONDS:
         return None
     _fj_last_block[user_id] = now
+    with _fj_completion_lock:
+        _fj_continue_sent_users.discard(user_id)
     settings = get_force_join_settings()
     channels = settings.get('channels', [])
     markup = InlineKeyboardMarkup(row_width=1)
@@ -1071,27 +1103,15 @@ def handle_fj_chat_join_request(req):
         # Do not send a Continue message for each individual request. Wait
         # until every configured channel is joined or has a pending request,
         # then remove the gate prompt and send one Continue button.
-        try:
-            if user_has_force_join_pass(user_id):
-                had_gate = _fj_clear_block_messages(user_id)
-                if had_gate:
-                    recipient_chat_id = getattr(req, 'user_chat_id', None) or user_id
-                    continue_markup = InlineKeyboardMarkup().add(
-                        InlineKeyboardButton("✅ Continue", callback_data=FJ_CB_RETRY)
-                    )
-                    confirmation = bot.send_message(
-                        recipient_chat_id,
-                        "✅ All required join requests are submitted. Tap Continue to open the bot.",
-                        reply_markup=continue_markup,
-                        vanish_delay=None,
-                    )
-                    print(
-                        f"JOIN_REQUEST_CONTINUE_SENT user={user_id} "
-                        f"recipient={recipient_chat_id} message={getattr(confirmation, 'message_id', None)}",
-                        flush=True,
-                    )
-        except Exception as e:
-            print(f"[force-join] completion/continue message failed user={user_id}: {e}", flush=True)
+        if user_has_force_join_pass(user_id):
+            recipient_chat_id = getattr(req, 'user_chat_id', None) or user_id
+            confirmation = _fj_send_continue_once(recipient_chat_id, req.from_user)
+            if confirmation:
+                print(
+                    f"JOIN_REQUEST_CONTINUE_SENT user={user_id} "
+                    f"recipient={recipient_chat_id} message={getattr(confirmation, 'message_id', None)}",
+                    flush=True,
+                )
     except Exception as e:
         print(f"JOIN_REQUEST_HANDLER_FAILED error={e!r}", flush=True)
 
@@ -1118,7 +1138,7 @@ def handle_fj_chat_member_update(update):
             status == 'restricted' and getattr(new_member, 'is_member', False)
         ):
             if user_has_force_join_pass(user_id):
-                _fj_finish_gate(user_id, new_member.user)
+                _fj_send_continue_once(user_id, new_member.user)
     except Exception as e:
         print(f"[fj_track] error handling chat_member update: {e}")
 
@@ -1554,6 +1574,8 @@ def cb_fj_retry(call):
     if passed:
         bot.answer_callback_query(call.id, "✅ Welcome! You're all set.")
         chat_id = call.message.chat.id
+        with _fj_completion_lock:
+            _fj_continue_sent_users.discard(user_id)
         _fj_finish_gate(
             chat_id,
             call.from_user,
@@ -1930,49 +1952,82 @@ def _safe_reply(message, text, parse_mode=None, delay=COMMAND_VANISH_SECONDS):
     return msg
 
 def track_msg(user_id, msg):
-    """Remember `msg` as the latest bot reply for `user_id` so it can be
-    animated-out when the next command fires."""
-    last_bot_msg[user_id] = (msg.chat.id, msg.message_id)
+    """Track a replaceable navigation screen and remove the prior one."""
+    _remember_outgoing_private_message(msg.chat.id, msg)
+
+
+_outgoing_message_lock = RLock()
+
+
+def _remember_outgoing_private_message(chat_id, result):
+    """Replace only explicitly tracked private navigation screens."""
+    try:
+        user_id = int(chat_id)
+    except (TypeError, ValueError):
+        return
+    if user_id <= 0 or result is None:
+        return
+
+    messages = result if isinstance(result, (list, tuple)) else (result,)
+    sent = next((msg for msg in reversed(messages) if getattr(msg, 'message_id', None)), None)
+    if sent is None:
+        return
+    msg_chat_id = getattr(getattr(sent, 'chat', None), 'id', user_id)
+    try:
+        msg_chat_id = int(msg_chat_id)
+    except (TypeError, ValueError):
+        return
+    if msg_chat_id <= 0:
+        return
+
+    new_entry = (msg_chat_id, sent.message_id)
+    with _outgoing_message_lock:
+        previous = last_bot_msg.get(user_id)
+        if previous == new_entry:
+            return
+        # Concurrent handlers can finish out of order. Keep the newest Telegram
+        # message as the tracked screen and remove a late, stale screen instead.
+        if previous and previous[0] == msg_chat_id and previous[1] > sent.message_id:
+            stale = True
+        else:
+            stale = False
+            last_bot_msg[user_id] = new_entry
+    if stale:
+        cancel_delete(msg_chat_id, sent.message_id)
+        try:
+            bot.delete_message(msg_chat_id, sent.message_id)
+        except Exception:
+            pass
+        return
+    if previous:
+        previous_chat_id, previous_message_id = previous
+        cancel_delete(previous_chat_id, previous_message_id)
+        try:
+            bot.delete_message(previous_chat_id, previous_message_id)
+        except Exception:
+            # The previous message may already have vanished or be inaccessible.
+            pass
 
 def dismiss_previous(chat_id, user_id):
-    """If there is a previous bot reply for this user, edit it to a vanish
-    animation frame (💨 ✦ ·) and then delete it 2 seconds later.
-    This runs entirely in a daemon thread so it never blocks the main flow."""
-    entry = last_bot_msg.pop(user_id, None)
+    """Immediately remove the previous tracked navigation screen for this user."""
+    with _outgoing_message_lock:
+        entry = last_bot_msg.pop(user_id, None)
     if not entry:
         return
     prev_chat_id, prev_msg_id = entry
-    # Cancel any existing scheduled-delete timer so the two don't race
     cancel_delete(prev_chat_id, prev_msg_id)
-    def _animate_out():
-        import time
-        # Frame 1 — shrinking text suggests motion
-        try:
-            bot.edit_message_text("💨  ·  ·  ·", prev_chat_id, prev_msg_id)
-        except Exception:
-            pass
-        time.sleep(1)
-        # Frame 2 — almost gone
-        try:
-            bot.edit_message_text("·", prev_chat_id, prev_msg_id)
-        except Exception:
-            pass
-        time.sleep(1)
-        # Delete
-        try:
-            bot.delete_message(prev_chat_id, prev_msg_id)
-        except Exception:
-            pass
-    t = Thread(target=_animate_out, daemon=True)
-    t.start()
+    try:
+        bot.delete_message(prev_chat_id, prev_msg_id)
+    except Exception:
+        pass
 
 def send_command_reply(message, text, reply_markup=None, parse_mode=None):
     """Reply to a typed /command:
-    - Previous bot reply animates out (💨 → deleted after 2 s).
-    - The bot's new reply auto-vanishes after COMMAND_VANISH_SECONDS (15 s).
+    - Previous tracked navigation screen is removed immediately.
+    - The bot's new reply auto-vanishes after COMMAND_VANISH_SECONDS.
     Returns the sent Message object."""
     user_id = message.from_user.id
-    # Dismiss the old reply with animation
+    # Remove the previous tracked screen before sending this command's reply.
     dismiss_previous(message.chat.id, user_id)
     reply = bot.send_message(message.chat.id, text, reply_markup=reply_markup, parse_mode=parse_mode)
     schedule_delete(message.chat.id, reply.message_id, COMMAND_VANISH_SECONDS)
